@@ -1,0 +1,79 @@
+# Render Blueprint: one free web service that runs the API and serves the web app (infra/render.Dockerfile).
+# Database and invoice files: Neon (free Postgres + Object Storage). Step-by-step setup: infra/render/README.md.
+# "sync: false" values are asked for when the Blueprint is created; Render never reads them from this file.
+services:
+  - type: web
+    name: probity
+    runtime: docker
+    plan: free
+    region: singapore            # keep the Neon database in the same region (AWS Asia Pacific, Singapore)
+    dockerfilePath: ./infra/render.Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/v1/health
+    numInstances: 1              # inline investigations live in the process: never run more than one
+    envVars:
+      - key: ENV
+        value: prod
+      - key: TASK_BACKEND
+        value: inline
+      - key: STORAGE_BACKEND
+        value: s3
+      - key: LOG_JSON
+        value: "true"
+      - key: METRICS_TOKEN
+        generateValue: true
+
+      # Neon connection strings as Neon shows them, direct (non-pooled) host, with ?sslmode=require
+      - key: DATABASE_URL          # probity_app role (row-level security applies)
+        sync: false
+      - key: DATABASE_MIGRATE_URL  # owner role (migrations only)
+        sync: false
+
+      # The Render URL, e.g. https://probity.onrender.com (all three are the same origin)
+      - key: PUBLIC_APP_URL
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+      - key: CLERK_AUTHORIZED_PARTIES
+        sync: false
+
+      - key: CLERK_ISSUER
+        sync: false
+      - key: CLERK_SECRET_KEY
+        sync: false
+      - key: VITE_CLERK_PUBLISHABLE_KEY  # public; baked into the web build
+        sync: false
+
+      - key: LLM_PROVIDER          # anthropic | gemini
+        sync: false
+      - key: ANTHROPIC_API_KEY     # when LLM_PROVIDER=anthropic
+        sync: false
+      - key: GEMINI_API_KEY        # when LLM_PROVIDER=gemini
+        sync: false
+
+      # Fresh values, not your local apps/api/.env ones (command in infra/render/README.md). Back both up:
+      # losing FIELD_KEY_B64 makes stored bank numbers unreadable; changing HMAC_KEY breaks older audit rows.
+      - key: FIELD_KEY_B64
+        sync: false
+      - key: HMAC_KEY
+        sync: false
+
+      # Neon Object Storage (Connect → Storage). Neon names them AWS_*; Probity reads S3_*.
+      - key: S3_BUCKET             # uploads
+        sync: false
+      - key: S3_ENDPOINT_URL       # AWS_ENDPOINT_URL_S3, https://br-<branch>.storage.<cell>.<region>.aws.neon.tech
+        sync: false
+      - key: S3_REGION             # AWS_REGION, ap-southeast-1 (use "auto" for Cloudflare R2)
+        sync: false
+      - key: S3_ACCESS_KEY_ID      # AWS_ACCESS_KEY_ID
+        sync: false
+      - key: S3_SECRET_ACCESS_KEY  # AWS_SECRET_ACCESS_KEY
+        sync: false
+
+      # Optional
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: EMAIL_FROM
+        sync: false
