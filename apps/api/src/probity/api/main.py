@@ -71,7 +71,7 @@ async def request_context(request: Request, call_next):  # type: ignore[no-untyp
         response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
-    if not request.url.path.endswith("/file"):
+    if request.url.path.startswith(API) and not request.url.path.endswith("/file"):
         response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
         response.headers["X-Frame-Options"] = "DENY"
     return response
@@ -112,6 +112,18 @@ async def _http(request: Request, e: HTTPException):  # type: ignore[no-untyped-
 
 
 API = "/api/v1"
+
+# CSP for the web app (served from this origin). Clerk's frontend API, images and bot-protection need allowances.
+_CLERK = " ".join(filter(None, [get_settings().clerk_frontend_api or "https://*.clerk.accounts.dev", "https://*.clerk.com"]))
+WEB_CSP = (
+    "default-src 'self'; "
+    f"script-src 'self' {_CLERK} https://challenges.cloudflare.com; "
+    f"connect-src 'self' {_CLERK} https://clerk-telemetry.com; "
+    f"img-src 'self' data: blob: https://img.clerk.com; "
+    "style-src 'self' 'unsafe-inline'; font-src 'self' data:; "
+    "frame-src 'self' blob: https://challenges.cloudflare.com; worker-src 'self' blob:; "
+    "object-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+)
 
 
 # ---------------------------------------------------------------- ops
@@ -744,8 +756,28 @@ def demo_speed(delay_ms: int = Query(..., ge=0, le=5000), user: User = Depends(c
 
 # ---------------------------------------------------------------- static web build (optional)
 
-_WEB = REPO_ROOT / "apps" / "web" / "dist"
+import os as _os
+
+_WEB = Path(_os.environ.get("WEB_DIST_DIR") or (REPO_ROOT / "apps" / "web" / "dist"))
 if _WEB.exists():
     from fastapi.staticfiles import StaticFiles
+    from starlette.exceptions import HTTPException as StarletteHTTPException
 
-    app.mount("/", StaticFiles(directory=_WEB, html=True), name="web")
+    class SPAStaticFiles(StaticFiles):
+        """Serve the built web app; unknown non-API paths fall back to index.html (client-side routing)."""
+
+        async def get_response(self, path, scope):  # type: ignore[no-untyped-def, override]
+            try:
+                resp = await super().get_response(path, scope)
+            except StarletteHTTPException as e:
+                if e.status_code != 404 or path.startswith("api/"):
+                    raise
+                resp = await super().get_response("index.html", scope)
+            if path.startswith("assets/"):
+                resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+            elif resp.media_type == "text/html":
+                resp.headers["Cache-Control"] = "no-cache"
+                resp.headers["Content-Security-Policy"] = WEB_CSP
+            return resp
+
+    app.mount("/", SPAStaticFiles(directory=_WEB, html=True), name="web")

@@ -34,8 +34,13 @@ def mask(last_four: str | None) -> str:
 
 
 def _key() -> bytes:
-    raw = base64.b64decode(get_settings().field_key_b64)
-    return hashlib.sha256(raw).digest()  # always 32 bytes
+    """32-byte AES key derived from FIELD_KEY_B64 (base64 preferred; any high-entropy string accepted)."""
+    secret = get_settings().field_key_b64
+    try:
+        raw = base64.b64decode(secret, validate=True)
+    except (ValueError, TypeError):
+        raw = secret.encode()
+    return hashlib.sha256(raw).digest()
 
 
 def encrypt(plaintext: str) -> bytes:

@@ -7,6 +7,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 API_ROOT = Path(__file__).resolve().parents[2]  # apps/api
@@ -54,6 +55,7 @@ class Settings(BaseSettings):
     clerk_jwks_url: str | None = None  # defaults to {issuer}/.well-known/jwks.json
     clerk_authorized_parties: str = ""  # comma-separated allowed `azp` origins
     clerk_secret_key: str | None = None  # Backend API (fetch user email on first sign-in)
+    clerk_frontend_api: str | None = None  # e.g. https://clerk.yourdomain.com (custom domain) — added to the web CSP
 
     # --- email: "outbox" (stored only, simulated inbox) | "resend" | "smtp"
     email_backend: Literal["outbox", "resend", "smtp"] = "outbox"
@@ -93,6 +95,16 @@ class Settings(BaseSettings):
 
     agent_delay_ms: int = 0
     cors_origins: str = "http://localhost:5180,http://127.0.0.1:5180"
+
+    @field_validator("database_url", "database_migrate_url", mode="before")
+    @classmethod
+    def _sqlalchemy_scheme(cls, v: str | None) -> str | None:
+        """Managed providers (Render, Heroku, Supabase) hand out postgres:// URLs; use the psycopg 3 driver."""
+        if isinstance(v, str):
+            for prefix in ("postgres://", "postgresql://"):
+                if v.startswith(prefix):
+                    return "postgresql+psycopg://" + v[len(prefix):]
+        return v
 
     def problems_for_prod(self) -> list[str]:
         p = []
