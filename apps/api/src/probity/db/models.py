@@ -367,6 +367,21 @@ class ImportJob(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class Notification(Base):
+    """In-app notification for one user (also emailed when an email backend is live)."""
+
+    __tablename__ = "notifications"
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("ntf"))
+    workspace_id: Mapped[str] = mapped_column(String(40), index=True)
+    user_id: Mapped[str] = mapped_column(String(40), index=True)
+    kind: Mapped[str] = mapped_column(String(40))  # case_held | vendor_replied | approval_needed | followup_due | case_failed
+    title: Mapped[str] = mapped_column(String(300))
+    body: Mapped[str] = mapped_column(Text, default="")
+    case_id: Mapped[str | None] = mapped_column(String(40))
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
 class AgentEvent(TelemetryBase):
     """Persisted SSE stream; supports Last-Event-ID resume."""
 

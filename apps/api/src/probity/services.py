@@ -127,6 +127,10 @@ def _run_inner(workspace_id: str, case_id: str, depth: int) -> None:
             if c:
                 c.status = "FAILED"
                 audit(s, workspace_id, "system", "case.failed", case_id, {"error": str(e)[:300]})
+                from probity.notify import notify
+
+                notify(s, workspace_id, "accountant", "case_failed", f"Investigation of case #{c.number} failed",
+                       f"{str(e)[:300]}. The document may be unreadable — try re-uploading or entering fields manually.", case_id)
         emit(workspace_id, case_id, "agent.failed", agent="pipeline", status="failed", message=f"Investigation failed: {e}")
         return
     with session_scope() as s:
@@ -196,6 +200,10 @@ def decide(s: Session, user: User, case_id: str, decision: str, reason: str) -> 
             if len(approvers) < 2:
                 case.recommendation = {**case.recommendation, "approvals": sorted(approvers)}
                 s.flush()
+                from probity.notify import notify
+
+                notify(s, user.workspace_id, "approver", "approval_needed", f"Second approval needed on case #{case.number}",
+                       f"{user.name} approved. This case needs a second approver.", case.id, exclude_user=user.id)
                 emit(user.workspace_id, case.id, "decision.recorded", agent="human_gate", status="waiting", message=f"{msg} — 1 of 2 approvals (dual approval required)")
                 return case
         transition(case, "APPROVED")
@@ -290,6 +298,11 @@ def vendor_reply(s: Session, workspace_id: str, actor: str, case_id: str, from_e
 
     verify_claims(s, workspace_id, case.id, rows)  # → all `unverified` (requires_out_of_band)
     transition(case, "AWAITING_HUMAN")
+    from probity.notify import notify
+
+    notify(s, workspace_id, "approver", "vendor_replied", f"Vendor replied on case #{case.number}",
+           f"From {from_email}. {len(rows)} statement(s) need out-of-band confirmation before the score can change."
+           + (f" Warning: {'; '.join(indicators)}." if indicators else ""), case.id)
     audit(s, workspace_id, actor, "vendor.reply_received", case.id, {"from": from_email, "claims": [r.id for r in rows], "indicators": indicators})
     s.flush()
     emit(workspace_id, case.id, "vendor.reply_received", agent="action", status="done",

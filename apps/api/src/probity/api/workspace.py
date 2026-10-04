@@ -4,6 +4,7 @@ workspace settings and data export."""
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
@@ -18,7 +19,7 @@ from probity.api.deps import current_user, db
 from probity.config import get_settings
 from probity.db.audit import audit
 from probity.db.models import (
-    Case, CaseNote, HistoricalInvoice, ImportJob, PurchaseOrder, User, Vendor, VendorBankAccount, VendorContact, Workspace, iso,
+    Case, CaseNote, HistoricalInvoice, ImportJob, Notification, PurchaseOrder, User, Vendor, VendorBankAccount, VendorContact, Workspace, iso,
 )
 from probity.policy import get_policy
 
@@ -172,6 +173,38 @@ def add_note(case_id: str, body: NoteIn, request: Request, user: User = Depends(
     s.flush()
     audit(s, user.workspace_id, user.id, "note.added", case.id, {"note_id": n.id, "case_id": case.id}, request.state.request_id)
     return {"id": n.id, "text": n.text, "author": user.name, "author_id": user.id, "at": iso(n.created_at)}
+
+
+# ---------------------------------------------------------------- notifications
+
+@router.get("/notifications")
+def list_notifications(unread_only: bool = False, limit: int = Query(50, ge=1, le=200), user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
+    stmt = select(Notification).where(Notification.workspace_id == user.workspace_id, Notification.user_id == user.id)
+    if unread_only:
+        stmt = stmt.where(Notification.read_at.is_(None))
+    rows = s.scalars(stmt.order_by(Notification.created_at.desc()).limit(limit))
+    unread = s.scalar(select(func.count()).select_from(Notification).where(
+        Notification.workspace_id == user.workspace_id, Notification.user_id == user.id, Notification.read_at.is_(None))) or 0
+    return {"unread": unread, "items": [{"id": n.id, "kind": n.kind, "title": n.title, "body": n.body, "case_id": n.case_id,
+                                         "read": n.read_at is not None, "at": iso(n.created_at)} for n in rows]}
+
+
+@router.post("/notifications/{notification_id}/read")
+def mark_read(notification_id: str, user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
+    n = s.get(Notification, notification_id)
+    if n is None or n.user_id != user.id:
+        raise LookupError("notification not found")
+    n.read_at = n.read_at or datetime.now(timezone.utc)
+    return {"id": n.id, "read": True}
+
+
+@router.post("/notifications/read-all")
+def mark_all_read(user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
+    now = datetime.now(timezone.utc)
+    rows = list(s.scalars(select(Notification).where(Notification.workspace_id == user.workspace_id, Notification.user_id == user.id, Notification.read_at.is_(None))))
+    for n in rows:
+        n.read_at = now
+    return {"marked": len(rows)}
 
 
 # ---------------------------------------------------------------- data export (DPDP: portability)

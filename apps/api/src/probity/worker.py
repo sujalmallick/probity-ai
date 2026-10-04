@@ -76,6 +76,10 @@ def followups() -> int:
                 if case is None or case.status != "AWAITING_VENDOR":
                     continue
                 d.status = "followup_due"
+                from probity.notify import notify
+
+                notify(s, ws, "approver", "followup_due", f"No vendor reply on case #{case.number}",
+                       f"Verification email to {d.to_email} sent {d.sent_at:%Y-%m-%d} has no reply. Call the known contact or send a reminder.", d.case_id)
                 flagged += 1
                 emit(ws, d.case_id, "action.sent", agent="action", status="waiting",
                      message=f"No reply from {d.to_email} since {d.sent_at:%Y-%m-%d}; follow-up due — draft a reminder or call the known contact")

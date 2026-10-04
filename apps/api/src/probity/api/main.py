@@ -14,7 +14,7 @@ from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Reques
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select  # noqa: F401
 from sqlalchemy.orm import Session
 
 from probity import services as svc
@@ -353,18 +353,39 @@ def create_case(body: CreateCase, user: User = Depends(current_user), s: Session
 
 @app.get(f"{API}/cases")
 def list_cases(
-    tier: str | None = None, status: str | None = None, vendor_id: str | None = None, limit: int = Query(50, le=200),
+    tier: str | None = None, status: str | None = None, vendor_id: str | None = None, q: str = "",
+    limit: int = Query(50, ge=1, le=200), cursor: str | None = None,
     user: User = Depends(current_user), s: Session = Depends(db),
 ) -> dict:
-    q = select(Case).where(Case.workspace_id == user.workspace_id)
+    """Newest first. `status`/`tier` accept comma-separated values; `q` searches invoice number, vendor name
+    and file name; pass `next_cursor` back as `cursor` for the next page."""
+    import base64
+
+    stmt = select(Case).where(Case.workspace_id == user.workspace_id)
     if status:
-        q = q.where(Case.status == status)
-    if vendor_id:
-        q = q.where(Case.vendor_id == vendor_id)
-    rows = [svc.serialize_case(s, c, user, full=False) for c in s.scalars(q.order_by(Case.created_at.desc()).limit(limit))]
+        stmt = stmt.where(Case.status.in_([x.strip().upper() for x in status.split(",") if x.strip()]))
     if tier:
-        rows = [r for r in rows if (r["risk"] or {}).get("tier") == tier]
-    return {"items": rows, "next_cursor": None}
+        stmt = stmt.where(Case.risk["tier"].as_string().in_([x.strip().upper() for x in tier.split(",") if x.strip()]))
+    if vendor_id:
+        stmt = stmt.where(Case.vendor_id == vendor_id)
+    if q.strip():
+        like = f"%{q.strip()}%"
+        stmt = stmt.outerjoin(Vendor, Vendor.id == Case.vendor_id).outerjoin(Document, Document.id == Case.document_id).where(or_(
+            Case.extraction["invoice_number"]["value"].as_string().ilike(like),
+            Case.extraction["vendor_name"]["value"].as_string().ilike(like),
+            Vendor.name.ilike(like), Document.filename.ilike(like)))
+    if cursor:
+        try:
+            ts, cid = base64.urlsafe_b64decode(cursor.encode()).decode().split("|", 1)
+            at = datetime.fromisoformat(ts)
+        except Exception as e:  # noqa: BLE001
+            raise svc.BadRequest("invalid cursor") from e
+        stmt = stmt.where(or_(Case.created_at < at, (Case.created_at == at) & (Case.id < cid)))
+    page = list(s.scalars(stmt.order_by(Case.created_at.desc(), Case.id.desc()).limit(limit + 1)))
+    more = len(page) > limit
+    page = page[:limit]
+    nxt = base64.urlsafe_b64encode(f"{page[-1].created_at.isoformat()}|{page[-1].id}".encode()).decode() if more and page else None
+    return {"items": [svc.serialize_case(s, c, user, full=False) for c in page], "next_cursor": nxt}
 
 
 @app.get(f"{API}/cases/{{case_id}}")

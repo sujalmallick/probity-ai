@@ -151,6 +151,16 @@ def gate(ctx: CaseCtx) -> dict:
         case.status = "AUTO_CLEARED" if auto else "AWAITING_HUMAN"
         case.recommendation = {**case.recommendation, "gate": {"auto_cleared": auto, "reasons": reasons, "dual_approval": requires_dual_approval(case, policy),
                                                                "requires_role": "approver"}}
+        if not auto:
+            from probity.agents.common import fv
+            from probity.ingestion.validators import format_inr
+            from probity.notify import notify
+
+            inv = fv(case.extraction, "invoice_number") or f"case #{case.number}"
+            vendor = fv(case.extraction, "vendor_name") or "unknown vendor"
+            notify(s, ctx.workspace_id, "approver", "case_held",
+                   f"{inv} from {vendor} held — {risk['score']}/100 {risk['tier']}",
+                   f"{format_inr(case.amount_minor)} · {case.recommendation.get('action', '').replace('_', ' ').lower()}. {case.summary or ''}", case.id)
     if auto:
         ctx.emit("gate.waiting", agent="policy_gate", status="done", message="Auto-cleared by policy (LOW, all checks complete)", data={"auto_cleared": True})
     else:
