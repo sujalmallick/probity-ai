@@ -38,7 +38,7 @@ UI rules:
 Show an "Offline mode" badge only when `features.demo` is true and some integration is `offline`.
 
 `GET /auth/config` → `{mode, demo_login}` (kept for compatibility; prefer `/app/config`).
-`GET /auth/demo-users`, `POST /auth/demo-login {user_id}` → `{token, user}` — 404 unless `auth.demo_login`.
+`GET /auth/demo-users` → `[{id, name, email, role, workspace: {id, name}}]`, `POST /auth/demo-login {user_id}` → `{token, user}` — 404 unless `auth.demo_login`.
 
 ## 2. Onboarding (new workspace checklist)
 
@@ -125,7 +125,7 @@ Rules: import vendors **before** invoices/POs (they reference vendors by GSTIN o
 | `POST /documents` (multipart `file`) | → `{document_id, sha256, filename, mime, duplicate_of}`; 415 = rejected (wrong type, active PDF content, virus) — show message. Accepts PDF, PNG/JPG (OCR) and **.eml**: for emails the attached PDF/image is read, and the *envelope sender* becomes `sender_domain` (field `via: "email_header"`); a failed DKIM check appears as extracted field `email_dkim` |
 | `POST /documents/{id}/preview` | → `{fields, validation, low_confidence[], injection_detected}` before launching |
 | `POST /cases {document_id, corrections?}` | starts the investigation |
-| `GET /cases?tier&status&vendor_id&limit` | queue |
+| `GET /cases?q=&status=&tier=&vendor_id=&limit=50&cursor=` | queue, newest first → `{items, next_cursor}`. `q` searches invoice number, vendor name and file name; `status`/`tier` take comma-separated values (e.g. `tier=HIGH,CRITICAL`); pass `next_cursor` back as `cursor` for the next page (`null` = last page); 400 on a bad cursor |
 | `GET /cases/{id}` | full case (claims, risk, recommendation, drafts, messages, decisions, score_history) |
 | `GET /cases/{id}/events` | SSE via `streamEvents()` (fetch + header; Last-Event-ID resume) |
 | `GET /cases/{id}/explain`, `/evidence`, `/audit` | Why panel, evidence, audit trail |
@@ -138,7 +138,19 @@ Rules: import vendors **before** invoices/POs (they reference vendors by GSTIN o
 | **new** `POST /cases/{id}/notes {text}` | accountant+ → note (201). Show as a comment thread on the case |
 | `POST /demo/vendor-reply/{id}?kind=legit|spoof` | **only when `features.simulated_inbox`** |
 
-## 6. Team, policy, health
+## 6. Notifications (per user)
+
+| Endpoint | Notes |
+|---|---|
+| `GET /notifications?unread_only=false&limit=50` | → `{unread, items:[{id, kind, title, body, case_id, read, at}]}` newest first. Poll every ~30 s for a bell badge |
+| `POST /notifications/{id}/read` | → `{id, read: true}` (404 for someone else's) |
+| `POST /notifications/read-all` | → `{marked}` |
+
+`kind`: `case_held` (approvers: an invoice needs a decision) · `vendor_replied` (approvers: confirm out-of-band) · `approval_needed`
+(other approvers: second approval for dual-approval cases) · `followup_due` (approvers: no vendor reply after 2 days) · `case_failed`
+(accountants+: document couldn't be investigated). Link to `/cases/{case_id}`. Also emailed to the user when email is live.
+
+## 7. Team, policy, health
 
 `GET /workspace/members`, `POST /workspace/invitations {email, role}`, `GET /workspace/invitations`, `DELETE /workspace/invitations/{id}`,
 `PATCH /workspace/members/{id} {role?, active?}` (owner; 409 for last owner) · `GET|PUT /workspace/policy` (owner for PUT; response includes
@@ -148,3 +160,5 @@ Rules: import vendors **before** invoices/POs (they reference vendors by GSTIN o
 - 2026-10-04 — v1 of this contract: app config, onboarding, vendor CRUD + verification rules, CSV import, case notes, demo gating.
 - 2026-10-04 — v1.1: out-of-band confirmation `known_channel` + 20-char note minimum (FRONTEND); emailed invoices (.eml) read from the
   attachment with envelope-sender domain; extracted `invoice_date`/`due_date` values are now normalized ISO dates (raw text kept in `raw`).
+- 2026-10-04 — v1.2: notifications (§6); case queue search, multi-value filters and cursor pagination; `demo-users` items carry
+  `workspace {id, name}` (FRONTEND).
