@@ -57,16 +57,9 @@ def _llm_fill(ctx: CaseCtx, text: str, fields: dict, missing: list[str]) -> None
             fields[f.name] = {"value": val, "raw": f.raw, "confidence": min(f.confidence, 0.85), "evidence_snippet": (f.evidence_snippet or f.raw)[:300], "page": 1, "via": "llm"}
 
 
-def run(ctx: CaseCtx) -> dict:
-    ctx.emit("agent.started", agent=AGENT, status="running", message="Reading invoice")
-    with session_scope() as s:
-        case = load_case(s, ctx)
-        doc = s.get(Document, case.document_id)
-        assert doc is not None
-        data = storage.get(doc.storage_path)
-        mime = doc.mime
-        corrections = case.corrections or {}
-
+def extract_document(ctx: CaseCtx, data: bytes, mime: str, corrections: dict) -> tuple[dict, dict, str, list[str]]:
+    """Text → fields → corrections → bank-number protection → deterministic validation → injection scan.
+    Shared by the investigation and the pre-launch preview."""
     ctx.progress(AGENT, "Extracting text layer")
     pages, used_ocr = extract(data, mime)
     pages = [p for p in pages if p != OCR_MARK]
@@ -108,6 +101,31 @@ def run(ctx: CaseCtx) -> dict:
     validation["injection"] = {"ok": not injection, "detail": injection}
     if injection:
         ctx.progress(AGENT, "Instruction-like text found in document — neutralized and flagged")
+
+    return fields, validation, text, injection
+
+
+class PreviewCtx(CaseCtx):
+    """Extraction preview before a case exists: same pipeline, no events."""
+
+    def emit(self, type_: str, **kw) -> None:  # type: ignore[no-untyped-def, override]
+        return None
+
+    def pause(self, factor: float = 1.0) -> None:
+        return None
+
+
+def run(ctx: CaseCtx) -> dict:
+    ctx.emit("agent.started", agent=AGENT, status="running", message="Reading invoice")
+    with session_scope() as s:
+        case = load_case(s, ctx)
+        doc = s.get(Document, case.document_id)
+        assert doc is not None
+        data = storage.get(doc.storage_path)
+        mime = doc.mime
+        corrections = case.corrections or {}
+
+    fields, validation, text, injection = extract_document(ctx, data, mime, corrections)
 
     with session_scope() as s:
         case = load_case(s, ctx)

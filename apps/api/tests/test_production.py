@@ -256,3 +256,54 @@ def test_log_scrubbing():
     out = scrub({"msg": "acct 50100098129812 PAN AABCA1234F mail a@b.in Bearer abc.def", "token": "x", "nested": ["sk-ant-api03-abcdefghijkl"]})
     assert "50100098129812" not in str(out) and "AABCA1234F" not in str(out) and "a@b.in" not in str(out)
     assert out["token"] == "<redacted>" and "sk-ant" not in str(out)
+
+
+# ---------------------------------------------------------------- relationship graph
+
+
+def test_shared_bank_account_across_vendors_is_flagged(client, tmp_path):
+    from datetime import date, timedelta
+
+    from probity.demo import seed
+    from probity.demo.invoice_pdf import InvoiceSpec, render
+    from test_demo_flow import API
+
+    v = seed.VENDORS[1]  # Kaveri Packaging … but paid into ABC Supplies' bank account
+    today = date.today()
+    spec = InvoiceSpec(vendor_name=v[0], vendor_address=v[2], gstin=v[1], email=v[4], phone="+91 80 4000 2000", invoice_number="KP-2026-999",
+                       invoice_date=(today - timedelta(days=1)).isoformat(), due_date=(today + timedelta(days=20)).isoformat(), po_number="PO-7711",
+                       items=[(v[8], 2000, 4200)], account_number="50200012341234", ifsc="HDFC0001234", bank_name="HDFC Bank")
+    path = render(spec, tmp_path / "shared.pdf")
+    acc = login(client, "accountant")
+    doc = client.post(f"{API}/documents", headers=acc, files={"file": ("shared.pdf", path.read_bytes(), "application/pdf")}).json()
+    cid = client.post(f"{API}/cases", headers=acc, json={"document_id": doc["document_id"]}).json()["case_id"]
+    case = client.get(f"{API}/cases/{cid}", headers=acc).json()
+    shared = [c for c in case["claims"] if c["signal"] == "shared_attribute"]
+    assert shared and "ABC Supplies" in shared[0]["statement"] and shared[0]["status"] == "verified"
+    assert case["status"] == "AWAITING_HUMAN"  # never auto-cleared, even though it adds 0 points
+    graph = client.get(f"{API}/vendors/{case['vendor_id']}/graph", headers=acc).json()
+    assert any(n["type"] == "vendor" and "ABC" in n["label"] for n in graph["nodes"])
+    groups = client.get(f"{API}/graph/shared-attributes", headers=acc).json()["items"]
+    assert any(g["type"] == "bank" and len(g["vendors"]) == 2 for g in groups)
+
+
+def test_pdf_export_and_preview(client):
+    from test_demo_flow import API, upload_and_run
+
+    from probity.demo.seed import DEMO_DIR
+
+    acc = login(client, "accountant")
+    doc = client.post(f"{API}/documents", headers=acc, files={"file": ("p.pdf", (DEMO_DIR / "invoice_4821.pdf").read_bytes(), "application/pdf")}).json()
+    pv = client.post(f"{API}/documents/{doc['document_id']}/preview", headers=acc).json()
+    assert pv["fields"]["total"]["value"] == 56640000 and pv["fields"]["bank_account"]["value"] == "XXXX9812" and "hmac" not in pv["fields"]["bank_account"]
+    assert pv["validation"]["gstin_checksum"]["ok"] and not pv["injection_detected"]
+    case = upload_and_run(client, acc, "invoice_kaveri_clean.pdf")
+    r = client.get(f"{API}/cases/{case['id']}/export?format=pdf", headers=acc)
+    assert r.status_code == 200 and r.headers["content-type"] == "application/pdf" and r.content.startswith(b"%PDF")
+    import io
+
+    import pdfplumber
+
+    text = " ".join((p.extract_text() or "").replace("\n", " ") for p in pdfplumber.open(io.BytesIO(r.content)).pages)
+    assert "�" not in text  # no unrenderable glyphs
+    assert "Kaveri Packaging" in text and "hash chain verified intact" in text and "never executes payments" in text

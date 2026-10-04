@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from datetime import date
 
+from probity import graph_rel
 from probity.agents.common import fsnip, fv, load_case, record_claim, vendor_bundle
 from probity.db.session import session_scope
 from probity.events import CaseCtx
@@ -72,6 +73,26 @@ def run(ctx: CaseCtx) -> dict:
                     ],
                     confidence=0.85, severity="warn", assertion={"op": "similarity_below", "a": "$0", "b": "$1", "threshold": 70},
                     data={"observed": inv_addr, "baseline": v.address},
+                ))
+                claims.append(c.id)
+
+        # --- relationship graph: does another vendor share this bank account / domain / address?
+        if v is not None:
+            ctx.progress(AGENT, "Checking relationship graph for shared bank, domain or address")
+            attrs = graph_rel.index_invoice(s, ctx.workspace_id, v.id, ctx.case_id, ex)
+            shared = graph_rel.shared_with_other_vendors(s, ctx.workspace_id, v.id, attrs)
+            checks["relationship_check"] = {"status": "fired" if shared else "passed", "reason": f"{len(shared)} shared attribute(s)", "signal": "shared_attribute"}
+            for h in shared[:3]:
+                c = record_claim(s, ctx, AGENT, AgentClaim(
+                    claim=f"The {h['kind']} {h['label']} on this invoice is also linked to a different vendor: {h['other_vendor']}.",
+                    signal="shared_attribute",
+                    evidence=[
+                        EvidenceIn(source="invoice", field=h["kind"].replace(" ", "_"), value=h["label"], source_ref="invoice", tier=1),
+                        EvidenceIn(source="vendor_master", field="linked_vendor", value=h["other_vendor"], source_ref=f"graph:vendor:{h['other_vendor_id']}",
+                                   excerpt=f"{h['other_vendor']} — {h['kind']} {h['label']}" + (f" (seen in case {h['case_id']})" if h.get("case_id") else ""), tier=1),
+                    ],
+                    confidence=0.9, severity="warn", assertion={"op": "info"},
+                    data={"observed": h["label"], "baseline": h["other_vendor"], "label_observed": h["kind"].capitalize(), "label_baseline": "Also used by"},
                 ))
                 claims.append(c.id)
 

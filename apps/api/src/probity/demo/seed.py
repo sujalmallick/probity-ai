@@ -90,6 +90,9 @@ def seed_workspace(s: Session, today: date | None = None, name: str = "Probity D
             s.add(PurchaseOrder(workspace_id=ws.id, vendor_id=v.id, po_number="PO-7731", po_date=today - timedelta(days=2),
                                 lines=[{"description": item, "qty": 200, "unit_price_minor": 60000}]))
     s.flush()
+    from probity import graph_rel
+
+    graph_rel.index_vendor_master(s, ws.id)
     audit(s, ws.id, "system", "workspace.seeded", ws.id, {"vendors": len(VENDORS), "users": len(USERS)})
     return ws
 

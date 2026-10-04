@@ -298,6 +298,24 @@ def get_document_file(doc_id: str, user: User = Depends(current_user), s: Sessio
         "Content-Disposition": f'inline; filename="{d.filename}"', "Content-Security-Policy": "sandbox", "X-Content-Type-Options": "nosniff"})
 
 
+@app.post(f"{API}/documents/{{doc_id}}/preview")
+async def preview_document(doc_id: str, user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
+    """Extract fields before launching an investigation so low-confidence values can be corrected."""
+    from probity import storage
+    from probity.agents.document import PreviewCtx, extract_document
+    from probity.ingestion.parse import low_confidence
+    from probity.tools.base import Budget
+
+    svc.require_role(user, "accountant")
+    d = s.get(Document, doc_id)
+    if not d or d.workspace_id != user.workspace_id:
+        raise LookupError("document not found")
+    data, mime, ws = storage.get(d.storage_path), d.mime, user.workspace_id
+    fields, validation, _text, injection = await asyncio.to_thread(extract_document, PreviewCtx(ws, f"preview:{doc_id}", Budget.from_settings()), data, mime, {})
+    public = {k: {kk: vv for kk, vv in v.items() if kk not in ("hmac", "enc")} for k, v in fields.items()}
+    return {"fields": public, "validation": validation, "low_confidence": low_confidence(fields), "injection_detected": bool(injection)}
+
+
 class CreateCase(BaseModel):
     document_id: str
     corrections: dict[str, Any] | None = None
@@ -362,18 +380,27 @@ def case_audit(case_id: str, user: User = Depends(current_user), s: Session = De
 
 
 @app.get(f"{API}/cases/{{case_id}}/export")
-def export_case(case_id: str, request: Request, format: Literal["json"] = "json", user: User = Depends(current_user), s: Session = Depends(db)) -> JSONResponse:
+def export_case(case_id: str, request: Request, format: Literal["json", "pdf"] = "json", user: User = Depends(current_user), s: Session = Depends(db)) -> Response:
     case = svc.get_case(s, user.workspace_id, case_id)
     audit(s, user.workspace_id, user.id, "case.exported", case.id, {"format": format}, request.state.request_id)
     body = {"case": svc.serialize_case(s, case, user), "evidence": svc.case_evidence(s, case), "audit": case_audit(case_id, user, s)}
+    if format == "pdf":
+        from probity.report import build_case_pdf
+
+        pdf = build_case_pdf(body["case"], body["evidence"], body["audit"])
+        return Response(pdf, media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="probity-case-{case.number}.pdf"'})
     return JSONResponse(json.loads(json.dumps(body, default=str)), headers={"Content-Disposition": f'attachment; filename="probity-case-{case.number}.json"'})
 
 
 @app.get(f"{API}/cases/{{case_id}}/events")
-async def case_events(case_id: str, request: Request, user: User = Depends(current_user)) -> StreamingResponse:
+async def case_events(case_id: str, request: Request, user: User = Depends(current_user), req_session: Session = Depends(db)) -> StreamingResponse:
     """SSE agent stream. Backfills from the database after Last-Event-ID, then streams live events from
     Redis pub/sub (or polls the database when Redis is not configured). Keepalive every 15 s."""
     ws = user.workspace_id
+    # Release the request's DB session now: a stream can stay open for minutes, and an open transaction
+    # would sit "idle in transaction" holding locks and blocking vacuum/migrations.
+    req_session.commit()
+    req_session.close()
     with session_scope(ws) as s:
         svc.get_case(s, ws, case_id)
     last = int(request.headers.get("Last-Event-ID") or request.query_params.get("last_event_id") or 0)
@@ -622,6 +649,20 @@ def add_bank(vendor_id: str, body: BankIn, request: Request, user: User = Depend
     s.add(a)
     audit(s, user.workspace_id, user.id, "vendor.bank_verified", v.id, {"account": crypto.mask(a.last4), "note": body.note}, request.state.request_id)
     return {"account": crypto.mask(a.last4), "verified": True}
+
+
+@app.get(f"{API}/vendors/{{vendor_id}}/graph")
+def vendor_graph(vendor_id: str, user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
+    from probity import graph_rel
+
+    return graph_rel.vendor_graph(s, user.workspace_id, vendor_id)
+
+
+@app.get(f"{API}/graph/shared-attributes")
+def shared_attrs(user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
+    from probity import graph_rel
+
+    return {"items": graph_rel.shared_attributes(s, user.workspace_id)}
 
 
 @app.get(f"{API}/memory/cases")

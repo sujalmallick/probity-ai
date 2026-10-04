@@ -8,10 +8,21 @@ import { api, can, fetchBlob, post, streamEvents, type Role } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { evValue, inr, isoDate, relTime, RUNNING, tierColor } from "../lib/format";
 import { Gauge } from "../components/Gauge";
+import { RelGraph } from "../components/RelGraph";
 import { ActivityLog, Timeline, type AgentEvent } from "../components/Timeline";
 import { Modal, Skeleton, Spinner, StatusChip, TierChip, VerifyBadge } from "../components/ui";
 
 type Any = Record<string, any>;
+
+async function download(path: string, name: string) {
+  const b = await fetchBlob(path);
+  const u = URL.createObjectURL(b);
+  const a = document.createElement("a");
+  a.href = u;
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(u), 1000);
+}
 
 const SRC_ICON: Record<string, any> = {
   invoice: FileText, vendor_history: History, vendor_master: Building2, purchase_order: ClipboardList, registry: Landmark,
@@ -105,7 +116,8 @@ export default function CaseView() {
         </div>
         <div className="flex items-center gap-2">
           {risk.tier && !running && <TierChip tier={risk.tier} score={risk.score} />}
-          <a className="btn !py-1.5 text-xs" onClick={async (e) => { e.preventDefault(); const b = await fetchBlob(`/api/v1/cases/${id}/export?format=json`); const u = URL.createObjectURL(b); const a = document.createElement("a"); a.href = u; a.download = `probity-case-${c.number}.json`; a.click(); URL.revokeObjectURL(u); }} href="#"><Download size={13} />Export</a>
+          <button className="btn !py-1.5 text-xs" onClick={() => download(`/api/v1/cases/${id}/export?format=pdf`, `probity-case-${c.number}.pdf`)}><Download size={13} />PDF report</button>
+          <button className="btn !py-1.5 text-xs" onClick={() => download(`/api/v1/cases/${id}/export?format=json`, `probity-case-${c.number}.json`)}>JSON</button>
         </div>
       </div>
 
@@ -341,7 +353,7 @@ function WhyPanel({ why }: { why: Any }) {
 }
 
 function Tabs({ tab, setTab, c, evidence, events, id }: { tab: string; setTab: (t: string) => void; c: Any; evidence: Any[]; events: AgentEvent[]; id: string }) {
-  const tabs = [["evidence", `Evidence (${evidence.length})`], ["document", "Document"], ["checks", "Plan & checks"], ["comms", "Communications"], ["audit", "Audit"], ["activity", "Activity"]];
+  const tabs = [["evidence", `Evidence (${evidence.length})`], ["document", "Document"], ["checks", "Plan & checks"], ["graph", "Graph"], ["comms", "Communications"], ["audit", "Audit"], ["activity", "Activity"]];
   return (
     <div className="card">
       <div className="flex gap-1 overflow-x-auto border-b border-line px-2" role="tablist">
@@ -353,12 +365,20 @@ function Tabs({ tab, setTab, c, evidence, events, id }: { tab: string; setTab: (
         {tab === "evidence" && <div className="flex flex-col gap-2">{evidence.map((e) => <EvidenceCard key={e.id} e={e} />)}</div>}
         {tab === "document" && <DocumentTab c={c} />}
         {tab === "checks" && <ChecksTab c={c} />}
+        {tab === "graph" && <GraphTab vendorId={c.vendor_id} />}
         {tab === "comms" && <CommsTab c={c} />}
         {tab === "audit" && <AuditTab id={id} />}
         {tab === "activity" && <ActivityLog events={events} />}
       </div>
     </div>
   );
+}
+
+function GraphTab({ vendorId }: { vendorId: string | null }) {
+  const [g, setG] = useState<Any | null>(null);
+  useEffect(() => { if (vendorId) api(`/vendors/${vendorId}/graph`).then(setG); }, [vendorId]);
+  if (!vendorId) return <div className="text-sm text-muted">Unknown vendor: no relationship graph.</div>;
+  return g ? <RelGraph nodes={g.nodes} edges={g.edges} /> : <Spinner />;
 }
 
 function DocumentTab({ c }: { c: Any }) {

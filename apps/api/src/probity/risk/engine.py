@@ -28,6 +28,7 @@ WEIGHTS: dict[str, dict[str, int]] = {
         "no_history": 5,
         "statistical_anomaly": 10,  # max
         "round_sum": 0,
+        "shared_attribute": 0,  # flags for human review (blocks auto-clear) without changing the agreed weights
     }
 }
 CORE_SIGNALS = ["bank_account_changed", "price_anomaly", "new_domain", "identity_mismatch", "duplicate_invoice", "address_mismatch", "missing_po"]
@@ -50,6 +51,7 @@ LABELS = {
     "no_history": "No transaction history",
     "statistical_anomaly": "Statistical outlier",
     "round_sum": "Round-sum amount",
+    "shared_attribute": "Shared with another vendor",
 }
 
 
