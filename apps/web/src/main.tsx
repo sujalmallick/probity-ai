@@ -2,13 +2,14 @@ import React, { useEffect, useState } from "react";
 import ReactDOM from "react-dom/client";
 import { BrowserRouter, Link, Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { ClerkProvider, SignedIn, SignedOut, UserButton, useAuth as useClerkAuth, useClerk } from "@clerk/clerk-react";
-import { Brain, Building2, ClipboardCheck, FilePlus2, Gauge as GaugeIcon, LogOut, Menu, Moon, PanelLeftClose, PanelLeftOpen, Settings, Sun, Users, WifiOff, X } from "lucide-react";
+import { BookOpen, Brain, Building2, ClipboardCheck, FilePlus2, Gauge as GaugeIcon, LogOut, Menu, Moon, PanelLeftClose, PanelLeftOpen, Settings, Sun, Users, WifiOff, X } from "lucide-react";
 import "./index.css";
 import { AuthCtx, useAuth } from "./lib/auth";
 import { api, ApiError, can, errMsg, setTokenGetter, setUnauthorizedHandler, type Me } from "./lib/api";
 import { InvitationChoice, type Invitation } from "./components/InvitationChoice";
 import Login, { SignInUnavailable, SignUpPage } from "./pages/Login";
 import Landing from "./pages/Landing";
+import Guide from "./pages/Guide";
 import Dashboard from "./pages/Dashboard";
 import NewCase from "./pages/NewCase";
 import CaseView from "./pages/CaseView";
@@ -76,6 +77,7 @@ function Shell({ children }: { children: React.ReactNode }) {
     { to: "/memory", icon: Brain, label: "Case memory" },
     { to: "/settings/policy", icon: Settings, label: "Policy" },
     { to: "/settings/team", icon: Users, label: "Team" },
+    { to: "/guide", icon: BookOpen, label: "How to use" },
   ];
   const navList = (mini: boolean) => (
     <nav className="flex flex-col gap-1" aria-label="App">
@@ -311,6 +313,7 @@ function ClerkApp() {
         <Routes>
           <Route path="/" element={cfg.features.landing_page ? <Landing /> : <Navigate to="/login" replace />} />
           <Route path="/login" element={<Login />} />
+          <Route path="/guide" element={<Guide />} />
           <Route path="/status" element={<Centered><div className="w-full max-w-3xl"><StatusPage /></div></Centered>} />
           {cfg.auth.sign_up && <Route path="/sign-up" element={<SignUpPage />} />}
           <Route path="*" element={<Navigate to="/login" replace />} />
@@ -320,6 +323,7 @@ function ClerkApp() {
         {user ? (
           <Routes>
             {cfg.features.landing_page && <Route path="/" element={<Landing signedIn />} />}
+            <Route path="/guide" element={<Guide signedIn />} />
             <Route path="*" element={<AppRoutes />} />
           </Routes>
         ) : invites ? (
@@ -354,6 +358,7 @@ function Root() {
       <BrowserRouter>
         <Routes>
           <Route path="/" element={<Landing />} />
+          <Route path="/guide" element={<Guide />} />
           <Route path="/login" element={<SignInUnavailable mode="sign-in" />} />
           <Route path="/sign-up" element={<SignInUnavailable mode="sign-up" />} />
           <Route path="*" element={<Navigate to="/login" replace />} />
