@@ -232,3 +232,27 @@ def test_local_storage_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setattr(get_settings(), "storage_dir", tmp_path)
     ref = storage.put("ws_1", "abc", b"data", "application/pdf")
     assert ref.startswith("local:") and storage.get(ref) == b"data"
+
+
+# ---------------------------------------------------------------- operations
+
+
+def test_ready_and_metrics(client, monkeypatch):
+    r = client.get("/api/v1/ready")
+    assert r.status_code == 200 and r.json()["ok"] and r.json()["database"].startswith("ok")
+    from test_demo_flow import upload_and_run
+
+    upload_and_run(client, login(client, "accountant"), "invoice_kaveri_clean.pdf")
+    body = client.get("/api/v1/metrics").text
+    assert "probity_http_requests_total" in body and 'probity_cases{status="AUTO_CLEARED",tier="LOW"}' in body
+    monkeypatch.setattr(get_settings(), "metrics_token", "m-token")
+    assert client.get("/api/v1/metrics").status_code == 401
+    assert client.get("/api/v1/metrics", headers={"Authorization": "Bearer m-token"}).status_code == 200
+
+
+def test_log_scrubbing():
+    from probity.logging import scrub
+
+    out = scrub({"msg": "acct 50100098129812 PAN AABCA1234F mail a@b.in Bearer abc.def", "token": "x", "nested": ["sk-ant-api03-abcdefghijkl"]})
+    assert "50100098129812" not in str(out) and "AABCA1234F" not in str(out) and "a@b.in" not in str(out)
+    assert out["token"] == "<redacted>" and "sk-ant" not in str(out)

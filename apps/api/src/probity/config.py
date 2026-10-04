@@ -81,6 +81,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_json: bool = False
     sentry_dsn: str | None = None
+    metrics_token: str | None = None  # if set, /metrics requires "Authorization: Bearer <token>"
 
     # --- hard per-case budgets (Guardrails G7)
     max_depth: int = 2

@@ -40,6 +40,7 @@ def principal(request: Request, s: Session = Depends(db), authorization: str | N
     except AuthError as e:
         raise HTTPException(401, str(e)) from e
     request.state.principal = p
+    request.state.user_id, request.state.workspace_id = p.user.id, p.user.workspace_id
     _rate_limit(f"u:{p.user.id}", 120, 60)
     return p
 

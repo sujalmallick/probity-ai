@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
@@ -24,11 +25,15 @@ from probity.db.session import init_db, session_scope, set_tenant
 from probity.guardrails import crypto
 from probity.ingestion.parse import UnsupportedDocument
 from probity.events import event_payload
+from probity.logging import configure_logging, get_logger
+from probity.observability import metrics_payload, observe_request, readiness
 from probity.policy import get_policy
 from probity.redis_client import async_redis, channel
 from probity.risk.engine import WEIGHTS
 
-app = FastAPI(title="Probity API", version="0.1.0", description="Evidence before payment.")
+configure_logging()
+log = get_logger("api")
+app = FastAPI(title="Probity API", version="1.0.0", description="Evidence before payment.")
 settings = get_settings()
 app.add_middleware(
     CORSMiddleware,
@@ -47,10 +52,23 @@ def _startup() -> None:
 
 @app.middleware("http")
 async def request_context(request: Request, call_next):  # type: ignore[no-untyped-def]
-    rid = request.headers.get("X-Request-ID") or uuid.uuid4().hex
+    rid = (request.headers.get("X-Request-ID") or uuid.uuid4().hex)[:64]
     request.state.request_id = rid
-    response = await call_next(request)
+    t0 = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        log.exception("http.unhandled", path=request.url.path, request_id=rid)
+        raise
+    elapsed = time.perf_counter() - t0
+    route = getattr(request.scope.get("route"), "path", "unmatched")
+    if request.url.path.startswith(API) and route not in (f"{API}/health", f"{API}/metrics"):
+        observe_request(request.method, route, response.status_code, elapsed)
+        log.info("http.request", method=request.method, route=route, status=response.status_code, ms=round(elapsed * 1000, 1),
+                 request_id=rid, user_id=getattr(request.state, "user_id", None), workspace_id=getattr(request.state, "workspace_id", None))
     response.headers["X-Request-ID"] = rid
+    if get_settings().env == "prod":
+        response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
     if not request.url.path.endswith("/file"):
@@ -104,10 +122,18 @@ def health() -> dict:
 
 
 @app.get(f"{API}/ready")
-def ready(s: Session = Depends(db)) -> dict:
-    s.execute(select(1))
-    st = get_settings()
-    return {"database": "ok", "tools_mode": st.tools_mode, "llm_mode": st.llm_mode, "auth_mode": st.auth_mode, "env": st.env}
+def ready() -> JSONResponse:
+    ok, checks = readiness()
+    return JSONResponse({"ok": ok, **checks}, status_code=200 if ok else 503)
+
+
+@app.get(f"{API}/metrics")
+def metrics(authorization: str | None = Header(default=None)) -> Response:
+    token = get_settings().metrics_token
+    if token and authorization != f"Bearer {token}":
+        raise HTTPException(401, "metrics token required")
+    body, ctype = metrics_payload()
+    return Response(body, media_type=ctype)
 
 
 # ---------------------------------------------------------------- auth (AUTH_MODE=local, non-prod)
