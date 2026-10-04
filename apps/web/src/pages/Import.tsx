@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { AlertCircle, ArrowLeft, CheckCircle2, Copy, Download, FileSpreadsheet, FileUp, RefreshCcw, RotateCcw, SkipForward } from "lucide-react";
-import { api, can, fetchBlob, type Role } from "../lib/api";
+import { api, can, errMsg, fetchBlob, type Role } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { relTime } from "../lib/format";
 import { Skeleton, Spinner } from "../components/ui";
@@ -70,7 +70,7 @@ export default function ImportPage() {
 
   const loadHistory = () => api<{ items: Any[] }>("/imports").then((r) => setHistory(r.items)).catch(() => setHistory([]));
   useEffect(() => {
-    api("/imports/spec").then(setSpec).catch((e) => setErr(e.message));
+    api("/imports/spec").then(setSpec).catch((e) => setErr(errMsg(e)));
     api<{ items: Any[] }>("/vendors?include_archived=true").then((r) => setVendors(r.items)).catch(() => {});
     loadHistory();
   }, []);
@@ -86,7 +86,7 @@ export default function ImportPage() {
       setReport(await api<Report>(`/imports/${kind}?dry_run=true`, { method: "POST", body: fd }));
       setEdited(false);
     } catch (e: any) {
-      setErr(e.message);
+      setErr(errMsg(e));
       setReport(null);
     } finally {
       setBusy(null);
@@ -114,7 +114,7 @@ export default function ImportPage() {
       setResult(r);
       loadHistory();
     } catch (e: any) {
-      setErr(e.message);
+      setErr(errMsg(e));
     } finally {
       setBusy(null);
     }
@@ -129,7 +129,7 @@ export default function ImportPage() {
       a.click();
       setTimeout(() => URL.revokeObjectURL(u), 1000);
     } catch (e: any) {
-      setErr(`Could not download the template: ${e.message}`);
+      setErr(`Could not download the template: ${errMsg(e)}`);
     }
   };
 

@@ -22,6 +22,12 @@ Never include real API keys, real invoices or other people's personal data in a 
 We'll acknowledge your report as soon as we can (this is a volunteer project, so please allow a few days), keep you updated, and credit
 you if you'd like.
 
+## Testing safely
+
+Test against **your own local copy** (see [docs/SETUP.md](docs/SETUP.md)), not the live site at https://probity-3xgk.onrender.com.
+Real people use it, it runs on a small free plan, and automated scanning or load testing can take it down. If a problem can only be
+shown on the live site, describe it in your private report instead of exploiting it.
+
 ## In scope
 
 - Getting into another workspace's data (workspace isolation / row-level security)

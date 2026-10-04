@@ -7,7 +7,14 @@ export type AppConfig = {
   auth: { mode: "clerk"; sign_up: boolean };
   features: { landing_page: boolean };
   integrations: Partial<Record<Integration, string>>;
-  limits: { max_upload_mb: number; max_import_mb: number };
+  limits: {
+    max_upload_mb: number;
+    max_import_mb: number;
+    workspace_daily_cases?: number;
+    case_tokens?: number;
+    workspace_daily_tokens?: number;
+    case_web_searches?: number;
+  };
 };
 
 export type Integration = "ai" | "web_search" | "domain_lookup" | "gst_registry" | "email" | "storage" | "antivirus" | "background_jobs";

@@ -19,22 +19,22 @@ export function AuthLayout({ children, title, subtitle }: { children: ReactNode;
         />
       </div>
 
-      <header className="relative z-10 flex items-center justify-between px-6 py-5 sm:px-10">
+      <header className="relative z-10 flex items-center justify-between px-4 py-4 sm:px-10 sm:py-5">
         <Link to="/" className="flex items-center gap-2.5 rounded-md" aria-label="Probity home">
           <img src="/landing/logo.svg" alt="" className="h-7 w-7" />
           <span className="text-lg font-bold tracking-tight">Probity</span>
         </Link>
         <Link to="/" className="flex items-center gap-1.5 rounded-md text-sm text-muted-foreground transition-colors duration-200 hover:text-foreground">
-          <ArrowLeft size={14} aria-hidden />Back to home
+          <ArrowLeft size={14} aria-hidden /><span className="hidden sm:inline">Back to home</span><span className="sm:hidden">Home</span>
         </Link>
       </header>
 
-      <main className="relative z-10 flex flex-1 items-center justify-center px-4 pt-4 pb-16">
+      <main className="relative z-10 flex flex-1 items-start justify-center px-4 pt-2 pb-12 sm:items-center sm:pt-4 sm:pb-16">
         <div className="w-full max-w-[420px]">
-          <div className="rounded-3xl border border-border bg-card/80 p-7 shadow-[0_30px_80px_-20px_rgba(0,0,0,0.8)] backdrop-blur-xl sm:p-9">
-            <div className="mb-7 flex flex-col items-center text-center">
-              <img src="/landing/logo.svg" alt="" className="mb-5 h-11 w-11" />
-              <h1 className="text-[28px] leading-tight font-medium tracking-[-0.8px]">{title}</h1>
+          <div className="rounded-3xl border border-border bg-card/80 px-5 py-7 shadow-[0_30px_80px_-20px_rgba(0,0,0,0.8)] backdrop-blur-xl sm:p-9">
+            <div className="mb-6 flex flex-col items-center text-center sm:mb-7">
+              <img src="/landing/logo.svg" alt="" className="mb-4 h-10 w-10 sm:mb-5 sm:h-11 sm:w-11" />
+              <h1 className="text-[24px] leading-tight font-medium tracking-[-0.8px] sm:text-[28px]">{title}</h1>
               {subtitle && <p className="mt-1.5 text-[15px] text-muted-foreground">{subtitle}</p>}
             </div>
             {children}

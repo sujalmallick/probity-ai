@@ -25,14 +25,32 @@ in the issue first.
 
 ## 3. Workflow
 
+> **`real-data` is the live branch.** Every push to it is deployed automatically to https://probity-3xgk.onrender.com, where real people
+> sign in. So **never push straight to `real-data`**: always use your own branch and a pull request. (`main` is an older snapshot. Don't
+> base work on it until it has been brought up to date.)
+
 1. **Fork** the repo (or, if you're a collaborator, create a branch in it).
-2. Create a branch from `main` with a clear name:
+2. Start from the latest `real-data`:
+
+   ```powershell
+   git checkout real-data
+   git pull
+   ```
+
+   Then create a branch with a clear name:
    - `feature/notifications-bell`
    - `fix/memory-page-error-state`
    - `docs/setup-macos-notes`
+
+   ```powershell
+   git checkout -b fix/memory-page-error-state
+   ```
 3. Make **small commits with clear messages** that say what changed and why, e.g. `Show an error with Retry when the Memory page fails to load`.
-4. Push your branch and open a **pull request to `main`**. Fill in the template and link the issue (`Closes #12`).
+4. Push your branch (`git push -u origin fix/memory-page-error-state`) and open a **pull request into `real-data`**. Fill in the
+   template and link the issue (`Closes #12`). Pushing your own branch never changes the live site.
 5. Keep each PR focused on one thing. Several small PRs are easier to review than one big one.
+6. When your PR is merged, Render deploys it within a few minutes. Check the live site afterwards.
+7. If `real-data` moved on while you worked, update your branch: `git fetch origin` then `git merge origin/real-data`.
 
 ## 4. Checks to run before opening a PR
 
@@ -58,7 +76,7 @@ npm run build
 
 There's no frontend linter or test runner yet. Adding one would be a welcome contribution.
 
-**Before you push**, read your own diff (`git diff main...HEAD`) and make sure there are no keys, `.env` contents, real invoices or
+**Before you push**, read your own diff (`git diff origin/real-data...HEAD`) and make sure there are no keys, `.env` contents, real invoices or
 personal data in it.
 
 GitHub runs the backend tests and the frontend type check and build on every pull request.
@@ -109,9 +127,15 @@ git config user.email "12345678+yourname@users.noreply.github.com"
   - **screenshots** for any UI change, before and after
   - anything you're **unsure about**
 - Reply to comments with a new commit, not a force-push, so reviewers can see what changed.
-- Once the checks pass and the review is approved, the maintainer merges it.
+- Once the checks pass and the review is approved, the maintainer merges it into `real-data`, which deploys it to the live site.
+  That's why reviews are careful.
 
-## 8. Security problems
+## 8. License of your contributions
+
+Probity is licensed under the [MIT License](LICENSE). By opening a pull request, you agree that your contribution is shared
+under the same license.
+
+## 9. Security problems
 
 Please **don't open a public issue** for a security problem. See [SECURITY.md](SECURITY.md) for how to report it privately.
 

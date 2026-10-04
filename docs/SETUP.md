@@ -34,9 +34,16 @@ Before you start, also create the accounts you'll need. See [API_KEYS.md](API_KE
 ## 2. Get the code
 
 ```powershell
-git clone https://github.com/sujalmallick/probity-ai.git
+git clone -b real-data https://github.com/sujalmallick/probity-ai.git
 cd probity-ai
 ```
+
+Use `-b real-data`. That branch has the current code, and it's the one deployed to the live site. `main` is an older snapshot. If you
+already cloned without it, run `git checkout real-data`.
+
+**Just want to try Probity?** You don't need any of this. Use the live app at https://probity-3xgk.onrender.com. This guide is for
+running your own copy on your computer, to develop or test changes. Your local copy uses your own database and keys and never touches
+the live site.
 
 If you plan to contribute, fork the repo on GitHub first and clone your fork (see [CONTRIBUTING.md](../CONTRIBUTING.md)).
 

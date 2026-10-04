@@ -45,7 +45,7 @@ A *human* decides about the payment. Probity never pays anything.
 | `apps/api/src/probity/` (top-level files) | `config.py` (settings and start-up checklist), `bootstrap.py` (create/upgrade the schema), `check.py` (live integration checks), `services.py` (case lifecycle, decisions, emails), `auth.py` (Clerk), `mailer.py`, `notify.py`, `importer.py` (CSV), `baseline.py`, `sanity.py`, `trace.py`, `report.py` (PDF export), `worker.py` (Celery), `observability.py`, `storage.py`. |
 | `apps/api/tests/` | The backend test suite. Test data is built by `tests/factories/`. |
 | `apps/web/` | The frontend: React 18, Vite, TypeScript, Tailwind, Clerk. Pages in `src/pages/`, shared pieces in `src/components/`, API client and helpers in `src/lib/`. |
-| `infra/` | Docker: `docker-compose.dev.yml` (PostgreSQL for development, plus optional Redis), `docker-compose.yml` (the production stack with worker, scheduler and a Cloudflare Tunnel; settings in `infra/.env.prod`, guide in `infra/cloudflare/`), Dockerfiles, nginx config, `postgres/` (creates the `probity_app` database user). |
+| `infra/` | Docker: `docker-compose.dev.yml` (PostgreSQL for development, plus optional Redis), `docker-compose.yml` (the production stack with worker, scheduler and a Cloudflare Tunnel; settings in `infra/.env.prod`, guide in `infra/cloudflare/`), Dockerfiles, nginx config, `postgres/` (creates the `probity_app` database user). Also `render.Dockerfile` and `render/` (the live Render deployment); `render.yaml` is at the repo root. |
 | `scripts/dev.ps1` | One-command local start on Windows. |
 | `Makefile` | The same tasks for macOS/Linux (`make install`, `db`, `bootstrap`, `api`, `web`, `dev`, `test`, …). |
 | `benchmark/real/` | A harness to run Probity on **your own** invoices against your own labels. The invoices, labels and reports folders are git-ignored and never committed. |
@@ -137,6 +137,31 @@ The web app follows along live through server-sent events (`GET /api/v1/cases/{i
   spoofed replies. See `test_safety_eval.py`, `test_could_not_verify.py`, `test_secret_leaks.py`, `test_masking.py`, `test_sod_mfa.py`
   and `test_autoclear_gate.py`.
 - **Frontend:** no unit tests or linter yet. `npm run typecheck` and `npm run build` are the checks.
+
+## Deployment
+
+The live app (https://probity-3xgk.onrender.com) is deployed from the **`real-data`** branch. Every push to it triggers a new deploy.
+
+```mermaid
+flowchart LR
+    PR[Pull request merged into real-data] --> R[Render builds infra/render.Dockerfile]
+    R --> S[One web service:<br/>API + built web app]
+    S --> N[(Neon<br/>PostgreSQL + file storage)]
+    S -.-> C[Clerk]
+```
+
+- **One container on Render's free plan** serves the API and the built web app from the same address, so there's no proxy and no CORS.
+  It's configured by `render.yaml` and `infra/render.Dockerfile`.
+- **Investigations run inside that process** (`TASK_BACKEND=inline`), so there must be **exactly one instance**: no worker, scheduler
+  or Redis.
+- **Every start runs the migrations** against the production database. So:
+  - a new migration must work on real data;
+  - it must also grant access to the `probity_app` user (as `0004`/`0005` do), or the app gets "permission denied";
+  - a new **required** setting must be added in Render's Environment page **before** the code that needs it is merged.
+- **Live settings and keys** live in Render's dashboard, never in the repo.
+- **The free plan sleeps** after 15 minutes without visitors, and the next visit takes about a minute.
+- Full guide and free-tier limits: [infra/render/README.md](../infra/render/README.md). A self-hosted Docker + Cloudflare alternative is
+  in [infra/cloudflare/README.md](../infra/cloudflare/README.md).
 
 ## No mock or demo mode
 
