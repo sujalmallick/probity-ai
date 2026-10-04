@@ -99,13 +99,19 @@ class Settings(BaseSettings):
     sentry_dsn: str | None = None
     metrics_token: str | None = None  # if set, /metrics requires "Authorization: Bearer <token>"
 
+    # --- usage limits. Reaching one stops the case cleanly and says which limit was hit.
+    workspace_daily_case_limit: int = 25  # investigations started per workspace per UTC day
+    workspace_daily_token_limit: int = 3_000_000  # AI tokens (input + output) per workspace per UTC day
+    case_token_limit: int = 200_000  # AI tokens (input + output) per case
+    case_web_search_limit: int = 10  # web searches per case
+    max_upload_mb: int = 10  # invoice upload size
     # --- hard per-case budgets (Guardrails G7)
     max_depth: int = 2
     max_retries: int = 2
     max_llm_calls: int = 40
-    max_tokens: int = 150_000
-    max_web_calls: int = 25
-    max_seconds: int = 240
+    max_web_calls: int = 25  # all outbound web requests (RDAP, search, page fetch)
+    max_seconds: int = 240  # wall clock per investigation run
+    case_stall_seconds: int = 900  # a running case with no progress for this long is ended by the watchdog
 
     show_landing_page: bool = True
     cors_origins: str = "http://localhost:5180,http://127.0.0.1:5180"
@@ -178,6 +184,15 @@ class Settings(BaseSettings):
                 p.append("ENV=prod needs STORAGE_BACKEND=s3")
             if not self.clamav_host:
                 p.append("ENV=prod needs CLAMAV_HOST (uploads are virus-scanned)")
+            if not self.metrics_token or len(self.metrics_token) < 32:
+                p.append("ENV=prod needs METRICS_TOKEN (at least 32 random characters): /metrics aggregates every workspace")
+            for name, url in (("DATABASE_URL", self.database_url), ("DATABASE_MIGRATE_URL", self.database_migrate_url)):
+                if url and url.startswith("postgresql") and not re.search(r"[?&]sslmode=(require|verify-ca|verify-full)\b", url):
+                    p.append(f"ENV=prod needs {name} with sslmode=require (or verify-full): invoice data must not cross the network in clear")
+            if self.redis_url and not (self.redis_url.startswith("rediss://") or re.match(r"redis://[^@/]*:[^@/]+@", self.redis_url)):
+                p.append("ENV=prod needs REDIS_URL with a password (redis://:password@host) or TLS (rediss://)")
+            if self.inbound_email_secret and len(self.inbound_email_secret) < 32:
+                p.append("INBOUND_EMAIL_SECRET must be at least 32 random characters in ENV=prod")
         return p
 
     def integration_status(self) -> list[tuple[str, str, str]]:

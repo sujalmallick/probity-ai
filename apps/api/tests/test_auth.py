@@ -11,22 +11,21 @@ from probity.config import ConfigError, Settings
 from probity.db.models import AuditLog, User, Workspace
 from helpers import API
 
-REMOVED = [("get", "/auth/demo-users"), ("post", "/auth/demo-login"), ("post", "/demo/seed"), ("get", "/demo/files/x.pdf"),
+REMOVED = [("get", "/auth/config"), ("get", "/auth/demo-users"), ("post", "/auth/demo-login"), ("post", "/demo/seed"), ("get", "/demo/files/x.pdf"),
            ("post", "/demo/vendor-reply/case_x"), ("put", "/demo/speed"), ("get", "/benchmark/summary")]
 
 
 @pytest.mark.parametrize("method,path", REMOVED)
-def test_demo_and_benchmark_endpoints_are_gone(client, world, method, path):
+def test_demo_and_benchmark_endpoints_do_not_exist(client, world, method, path):
     r = getattr(client, method)(f"{API}{path}", headers=login(client, "owner"))
-    assert r.status_code == 410
+    assert r.status_code in (404, 405)
 
 
 def test_public_config_has_no_demo_or_mock_modes(client):
     cfg = client.get(f"{API}/app/config").json()
-    assert cfg["auth"] == {"mode": "clerk", "sign_up": True, "demo_login": False}
-    assert not any(cfg["features"][k] for k in ("demo", "benchmark", "simulated_inbox"))
+    assert cfg["auth"] == {"mode": "clerk", "sign_up": True}
+    assert set(cfg["features"]) == {"landing_page"}
     assert cfg["integrations"]["gst_registry"] == "unavailable"
-    assert client.get(f"{API}/auth/config").json()["mode"] == "clerk"
 
 
 def test_settings_have_no_mode_switches():
@@ -131,3 +130,25 @@ def test_unverified_email_cannot_sign_in(client, db, clerk, monkeypatch):
 def test_only_owner_invites(client, world, role, code):
     r = client.post(f"{API}/workspace/invitations", headers=login(client, role), json={"email": f"x-{role}@company.test", "role": "viewer"})
     assert r.status_code == code
+
+
+def test_unknown_api_path_is_404_not_the_web_app(client):
+    r = client.get(f"{API}/no-such-endpoint")
+    assert r.status_code == 404 and "json" in r.headers["content-type"]
+
+
+def test_expired_invitation_is_ignored(client, world, clerk):
+    from datetime import datetime, timedelta, timezone
+
+    from probity.db.models import Invitation
+
+    owner = login(client, "owner")
+    assert client.post(f"{API}/workspace/invitations", headers=owner, json={"email": "late@company.test", "role": "approver"}).status_code == 201
+    with owner_session() as s:
+        inv = s.scalars(select(Invitation).where(Invitation.email == "late@company.test")).one()
+        inv.created_at = datetime.now(timezone.utc) - timedelta(days=8)
+    listed = client.get(f"{API}/workspace/invitations", headers=owner).json()["items"]
+    assert listed[0]["expired"] is True and listed[0]["expires_at"]
+    clerk["user_late"] = ("late@company.test", "Late Person")
+    me = client.get(f"{API}/me", headers=bearer("user_late")).json()
+    assert me["workspace"]["id"] != world.workspace_id and me["role"] == "owner"  # did not join with the stale invite

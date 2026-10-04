@@ -40,8 +40,8 @@ def draft_email(s, ctx: CaseCtx, case) -> dict:  # type: ignore[no-untyped-def]
     else:
         to, recipient_verified, contact_name = (fv(ex, "vendor_email") or ""), False, "Accounts Team"
     vendor_name = b["vendor"].name if b["vendor"] else (fv(ex, "vendor_name") or "Vendor")
-    inv_no, total = fv(ex, "invoice_number"), fv(ex, "total")
-    po = fv(ex, "po_number")
+    inv_no, total = safe_reference(fv(ex, "invoice_number")), fv(ex, "total")
+    po = safe_reference(fv(ex, "po_number"))
     items = [
         "Confirmation of the bank account to be used for this payment, from your registered accounts contact",
         "A bank letter or cancelled cheque on company letterhead for that account",
@@ -65,7 +65,8 @@ def draft_email(s, ctx: CaseCtx, case) -> dict:  # type: ignore[no-untyped-def]
     fallback = None
     try:
         out = llm.generate(schema=DraftOut, system=system,
-                           user=f"Vendor: {vendor_name}\nInvoice: {inv_no}\nAmount: {format_inr(total)}\nPO: {po}\nSign as: Accounts Payable, {signature}",
+                           user=wrap_untrusted("invoice_fields", f"Vendor: {vendor_name}\nInvoice: {inv_no}\nAmount: {format_inr(total)}\nPO: {po}")
+                           + f"\nSign as: Accounts Payable, {signature}",
                            tier="fast", tags={**ctx.tags, "agent": AGENT, "prompt_version": pv}, budget=ctx.budget)
     except llm.LLMFailed as e:
         out = template()
@@ -82,6 +83,19 @@ def draft_email(s, ctx: CaseCtx, case) -> dict:  # type: ignore[no-untyped-def]
 _URGENCY = re.compile(r"(?i)\b(urgent(?:ly)?|immediately|asap|today itself|within (?:the )?hour|right away)\b")
 _NEW_INSTR = re.compile(r"(?i)\b(pay(?:ment)? to (?:the )?new|use (?:the )?new account|change(?:d)? (?:our|the) (?:bank|account))\b")
 _SENTENCES = re.compile(r".+?(?:[.!?](?=\s|$)|\n|$)")  # sentence ends at punctuation followed by space, so domains stay whole
+
+
+_REF_OK = re.compile(r"[A-Za-z0-9][A-Za-z0-9/_.\-]{0,39}")
+_LINKISH = re.compile(r"(?i)(https?:|www\.|@|\.[a-z]{2,}(?:/|$))")
+
+
+def safe_reference(ref: str | None) -> str | None:
+    """Invoice / PO numbers end up in the email to the vendor's verified contact. A value that looks like a link or
+    domain ("x1.evil.example/pay") would turn our own verification email into a phishing relay, so it is replaced."""
+    if not ref:
+        return ref
+    ref = str(ref).strip()
+    return ref if _REF_OK.fullmatch(ref) and not _LINKISH.search(ref) else "(as shown on the invoice)"
 
 
 class ReplyStatement(BaseModel):

@@ -1,118 +1,147 @@
-# System Architecture
+# Probity architecture (for contributors)
 
-## 1. Principles
-1. **Investigate, then act within boundaries.** AI produces evidence; humans/policy authorize actions.
-2. **Specialist agents, ~7, no overlap.** Each answers exactly one question.
-3. **Agents don't trust agents.** Claim → Evidence → Verification → Risk Engine. The risk engine only consumes verified claims.
-4. **Deterministic first.** Checksums, arithmetic, duplicates, bank diffs run as code. LLMs interpret; they never decide facts.
-5. **Durable & resumable.** Long-running, pausable workflow (human gate, vendor wait) via LangGraph checkpointer.
-6. **Everything is explainable.** Score = sum of stored, versioned signal contributions.
+A short map of how Probity is put together, so you know where to look before changing something. For what each feature does, see
+[FEATURES.md](FEATURES.md). For the safety rules behind the design, see [Guardrails.md](Guardrails.md) and [DECISIONS.md](DECISIONS.md).
 
-## 2. High-level topology
+## The big picture
+
+```mermaid
+flowchart LR
+    U[Browser] -->|HTTPS + live updates| W[Web app<br/>React + Vite<br/>apps/web]
+    W -->|/api/v1| A[API<br/>FastAPI<br/>apps/api]
+    A --> G[Investigation graph<br/>LangGraph agents]
+    G --> R[Risk engine<br/>pure code]
+    A --> DB[(PostgreSQL<br/>row-level security)]
+    G --> DB
+    A -. sign-in tokens .-> C[Clerk]
+    G -. reading, queries, summaries .-> L[Anthropic Claude]
+    G -. web search .-> T[Tavily]
+    G -. domain age .-> RD[RDAP]
+    A -. email .-> E[Resend]
+    A -. optional .-> Q[Redis + Celery worker]
 ```
- React Web ──HTTPS──► FastAPI ──► LangGraph runtime ──► LLM providers
-     ▲  SSE              │             │  │  │
-     └───────────────────┤             │  │  └─► Tools: search, fetch, WHOIS, registry, email
-                         │             │  └────► Qdrant (vendors, cases, policies)
-                         ▼             ▼
-                    PostgreSQL ◄── Redis (queue, pubsub, cache)
-              (cases, evidence, vendors,   ▲
-               signals, audit, checkpoints)│
-                                    Celery/Arq workers
+
+One rule shapes everything: **the AI can investigate, but it cannot change the risk score.** Agents produce *claims*. Each claim must
+carry *evidence* and pass *verification*. Pure code turns verified claims into a score. A *policy gate* decides whether a person must look.
+A *human* decides about the payment. Probity never pays anything.
+
+## Folder map
+
+| Folder | What's in it |
+|---|---|
+| `apps/api/` | The backend: Python 3.12+, FastAPI, SQLAlchemy, Alembic, LangGraph. Settings live in `apps/api/.env`. |
+| `apps/api/src/probity/api/` | HTTP endpoints. `main.py` (cases, documents, decisions, team, policy), `vendors.py`, `workspace.py` (config, onboarding, imports, notes, notifications), `records.py` (past invoices and POs), `risk.py` (policy-driven second view), `deps.py` (auth and rate limits), `limits.py` (body size). |
+| `apps/api/src/probity/agents/` | The investigation steps, one file each (see the table below). |
+| `apps/api/src/probity/graph/build.py` | Wires the agents into a LangGraph graph, with retries and "partial" handling. |
+| `apps/api/src/probity/risk/engine.py` | **The risk engine.** Weights, tiers, scoring. Pure code, no AI. |
+| `apps/api/src/probity/risk/` (other files) | The policy-driven second view (`invoice_scoring.py`, `case_scoring.py`, `narrate.py`, `invoice_policy.example.json`). |
+| `apps/api/src/probity/signals/detectors.py` | The deterministic checks (bank change, duplicate, price anomaly, PO, dates, …) as pure functions. |
+| `apps/api/src/probity/evidence/` | The claim/evidence model and the verifier (cite-or-drop, recomputing numbers, quote checks). |
+| `apps/api/src/probity/ingestion/` | Reading uploads: file-type sniffing, PDF/email/text extraction, field parser, validators, active-content and virus checks, isolated parsing. |
+| `apps/api/src/probity/guardrails/` | Encryption and masking of account numbers (`crypto.py`); prompt-injection detection, redaction and neutral-language rules (`text.py`). |
+| `apps/api/src/probity/llm/` | The single gateway to Claude (`client.py`) and the versioned prompts (`prompts/`). |
+| `apps/api/src/probity/tools/` | Outside lookups: safe web fetch (SSRF protection), Tavily search, RDAP domain age, usage budgets. |
+| `apps/api/src/probity/db/` | Database models, sessions (sets the workspace for row-level security), the audit hash chain, migrations. |
+| `apps/api/src/probity/` (top-level files) | `config.py` (settings and start-up checklist), `bootstrap.py` (create/upgrade the schema), `check.py` (live integration checks), `services.py` (case lifecycle, decisions, emails), `auth.py` (Clerk), `mailer.py`, `notify.py`, `importer.py` (CSV), `baseline.py`, `sanity.py`, `trace.py`, `report.py` (PDF export), `worker.py` (Celery), `observability.py`, `storage.py`. |
+| `apps/api/tests/` | The backend test suite. Test data is built by `tests/factories/`. |
+| `apps/web/` | The frontend: React 18, Vite, TypeScript, Tailwind, Clerk. Pages in `src/pages/`, shared pieces in `src/components/`, API client and helpers in `src/lib/`. |
+| `infra/` | Docker: `docker-compose.dev.yml` (PostgreSQL for development, plus optional Redis), `docker-compose.yml` (full stack), Dockerfiles, nginx config, `postgres/` (creates the `probity_app` database user). |
+| `scripts/dev.ps1` | One-command local start on Windows. |
+| `Makefile` | The same tasks for macOS/Linux (`make install`, `db`, `bootstrap`, `api`, `web`, `dev`, `test`, …). |
+| `benchmark/real/` | A harness to run Probity on **your own** invoices against your own labels. The invoices, labels and reports folders are git-ignored and never committed. |
+| `docs/` | These docs, plus the product and safety specs (PRD, Guardrails, Security, Decisions, API contract, failure audit). |
+
+## The life of one case
+
+```mermaid
+flowchart TD
+    UP[Upload: PDF / .eml / text] --> DOC[document]
+    DOC --> ORCH[orchestrator / planner]
+    ORCH --> VEN[vendor_investigator]
+    ORCH --> TRX[transaction_analyst]
+    VEN --> J[join]
+    TRX --> J
+    J -->|only if the plan asks| WEB[web_research]
+    J --> VER[verification]
+    WEB --> VER
+    VER --> RISK[risk_engine: pure code]
+    RISK --> AN[case_analyst]
+    AN --> GATE[policy_gate]
+    GATE -->|every condition met| AC[AUTO_CLEARED]
+    GATE -->|otherwise| AH[AWAITING_HUMAN]
+    AH --> DEC{approver decides}
+    DEC --> APP[APPROVED] & REJ[REJECTED] & VEND[AWAITING_VENDOR] & DEEP[investigate further]
+    AC & APP & REJ --> CL[CLOSED: outcome saved to memory]
 ```
 
-## 3. Agent roster
-| # | Agent | Question it answers | Inputs | Outputs |
-|---|---|---|---|---|
-| 1 | Orchestrator/Planner | What is this and what must be checked? | doc + case context | `plan` (task graph) |
-| 2 | Document Intelligence | What does this invoice contain? | file | typed fields + confidence + snippets |
-| 3 | Vendor Investigator | Who is this entity; same as claimed? | vendor fields, master data | entity match + claims |
-| 4 | Web Research | What external evidence exists? | entity identifiers | sourced findings (evidence) |
-| 5 | Transaction Analyst | Is the transaction abnormal vs our data? | invoice + history + PO | signals + claims (mostly deterministic) |
-| 6 | Evidence Verification | Are the claims supported? | claims + evidence | verified/refuted/unverified |
-| 7 | Case Analyst | How do we explain this; what next? | verified claims + engine output | summary, recommendation (score comes from the code-only risk engine, not this agent) |
-| + | Action Agent (post-gate) | What should happen next? | decision | drafts/emails, follow-ups, reply analysis |
+1. **Upload** (`POST /api/v1/documents`). The file is checked: size, real file type, dangerous PDF content, virus scan if configured,
+   duplicates. Then it's stored.
+2. **Create a case** (`POST /api/v1/cases`). The case runs inline in the API process by default, or on a Celery worker if
+   `TASK_BACKEND=celery`. Status moves QUEUED → EXTRACTING → INVESTIGATING → VERIFYING → SCORING.
+3. **Agents** add **claims**, each with **evidence**: what the invoice says vs. what your records say. A check that can't run is recorded
+   as **"could not verify"** with a reason, and adds no points.
+4. **Verification** keeps a claim only if its evidence supports it, recomputing numbers and quotes in code. Claims without evidence are dropped.
+5. The **risk engine** adds up the points of verified claims only. The **case analyst** explains the result in plain English but can't
+   change it.
+6. The **policy gate** auto-clears only if every condition holds (see [FEATURES.md](FEATURES.md#4-could-not-verify-and-auto-clear)).
+   Otherwise the case waits for a person.
+7. A person **decides**: approve, reject, request verification, or investigate further. An optional email to the vendor goes out only after
+   an approver sends it. Vendor replies stay unverified until an approver confirms them out-of-band.
+8. **Closing** the case records the outcome in **case memory**, which the next invoice from that vendor sees.
 
-## 4. LangGraph workflow
-```
-START → ingest → document_agent → validate_fields ─┐ (low-confidence → human_correction interrupt, optional)
-                                                   ▼
-                                              orchestrator(plan)
-                                                   │
-                       ┌───────────────────────────┼─────────────────────────┐
-                       ▼ (parallel fan-out)        ▼                         ▼
-                 vendor_investigator          transaction_analyst      (memory_lookup)
-                       │
-                       ▼
-                 web_research (conditional: vendor unknown / signals / policy)
-                       └───────────────┬─────────────────────────┘
-                                       ▼ (fan-in)
-                               evidence_verification
-                                       │  (refuted/unverified → bounded retry ≤2 → deeper_research)
-                                       ▼
-                                 risk_engine ──► case_analyst
-                                       ▼
-                                 policy_gate ──► LOW & complete → auto_clear ─► finalize
-                                       │
-                                       ▼
-                               human_gate (interrupt)
-                  ┌────────────┬───────┴───────┬─────────────────┐
-                  ▼            ▼               ▼                 ▼
-               approve      reject    request_verification   investigate_further
-                  │            │               │                 │ (loop to planner, depth+1, ≤2)
-                  │            │      action_agent → send → wait(interrupt/timer)
-                  │            │               │ reply → verify → risk_engine (re-score)
-                  └────────────┴───────┬───────┘
-                                       ▼
-                                  finalize → write_case_memory → END
-```
-### Shared state (TypedDict/Pydantic)
-`case_id, workspace_id, document, extraction, plan, claims[], evidence[], signals[], risk, recommendation, decision, drafts[], depth, errors[], budget{tokens, calls, seconds}, trace_id`.
+The web app follows along live through server-sent events (`GET /api/v1/cases/{id}/events`). Every step is written to the audit log.
 
-### Control rules (from langgraph-multi-agent lessons)
-- **Deterministic termination:** loop counters (`depth`, `retries`) in state; routers end the graph when exceeded. No LLM decides to stop.
-- **Grounded state:** research nodes store raw source text/URLs in state (never only prose summaries) so downstream nodes can verify.
-- **Cite-or-drop validator node** before the risk engine rejects claims with no evidence.
-- **Budgets:** per-case caps on LLM tokens, web calls, wall-clock; exceeding degrades to `FAILED_PARTIAL` with lowered confidence, never silent success.
+### Where each agent lives
 
-## 5. Evidence model
-`Evidence` (immutable, content-hashed) ← referenced by → `Claim` ← referenced by → `RiskSignal` ← summed by → `RiskScore`. Verification flips claim status, never edits evidence.
-Evidence is structured, not prose: `{source, field, value}` for internal/document facts (e.g. `invoice.bank_account = XXXX9812` vs `vendor_history.bank_account = XXXX1234`), plus `source_ref` + `excerpt` for web/registry pages. Agents return claims with evidence attached; they never return bare findings. Source tiers: T1 government/registry/internal verified records, T2 reputable business/news/directories, T3 forums/unverified.
+| Step | File | Uses the AI? |
+|---|---|---|
+| Document reader | `agents/document.py` | Only to fill missing fields; its value must appear word for word in the document |
+| Planner (orchestrator) | `agents/orchestrator.py` | No |
+| Vendor investigator | `agents/vendor.py` | No |
+| Transaction analyst | `agents/transaction.py` (checks in `signals/detectors.py`) | No |
+| Web researcher | `agents/web.py` | To write search queries (falls back to standard queries) |
+| Evidence verifier | `agents/verification.py` + `evidence/verifier.py` | Only to check that a quoted source supports a claim |
+| Risk engine | `risk/engine.py` (called from `agents/risk_case.py`) | **Never** |
+| Case analyst and policy gate | `agents/risk_case.py` | Analyst writes the summary; the gate is pure code |
+| Action (drafts, vendor replies) | `agents/action.py` | Drafts and reply reading, with labelled rule-based fallbacks |
 
-## 6. Verification pipeline (per claim)
-1. Evidence present? else `unverified`.
-2. Deterministic match (number/string/date present in excerpt or internal record) → `verified`.
-3. Else LLM entailment judged against excerpt only (no parametric knowledge), returns `supports|contradicts|neutral` + quoted span; span must exist in excerpt (string check).
-4. Contradiction scan across other evidence.
-5. Confidence = f(tier, match type, corroboration count).
+**Rule:** if the AI is unavailable, every step still finishes, using rules instead, and labels the result "rule-based fallback, AI unavailable".
 
-## 7. Risk engine
-The risk engine is **pure code, not an agent**. `score = clamp( Σ points of fired signals backed by verified claims , 0, 100)`.
-- Points from the versioned weights table (Feature.md F7; core weights sum to 100; tenant-overridable). Tiers: LOW 0–29, MEDIUM 30–59, HIGH 60–79, CRITICAL 80–100.
-- Statistical: Isolation Forest anomaly score mapped to ≤10 points (only when ≥30 history rows, else skipped and noted). Unit-price z-score feeds the deterministic `price_anomaly` signal.
-- No LLM adjustment of any kind. The Case Analyst explains the score; it cannot change it.
-- Only `verified` claims count fully; `unverified` capped at 0 points (shown as "unconfirmed").
-- `explain()` returns the contribution list; same inputs + weights version → same score.
+## Database and migrations
 
-## 8. Data model (PostgreSQL)
-`workspaces, users, vendors, vendor_bank_accounts(first_seen,last_seen,verified), vendor_domains, vendor_addresses, vendor_contacts, documents, cases, invoices, invoice_fields, line_items, purchase_orders, po_lines, investigations (runs), agent_runs, evidence, claims, risk_signals, risk_scores, decisions, drafts, messages, case_memory, graph_edges(src_type,src_id,rel,dst_type,dst_id,case_id), audit_log (append-only), policy, weights_versions, checkpoints`.
-Key constraints: unique `(workspace_id, sha256)` on documents; unique normalized `(workspace_id, vendor_id, invoice_number)` flagged not blocked; audit_log append-only (no UPDATE/DELETE grants).
+- **PostgreSQL only.** There are two database users:
+  - `DATABASE_MIGRATE_URL` (the schema owner) runs migrations.
+  - `DATABASE_URL` is what the app uses. It's the `probity_app` user, which **cannot bypass row-level security**.
+- **Row-level security.** Every workspace-owned table has a policy that only shows rows for the current workspace. The app sets that
+  workspace at the start of each transaction (`db/session.py`). The audit log and evidence can't be edited or deleted (database triggers).
+- **Migrations** use Alembic and live in `apps/api/src/probity/db/migrations/versions/` (`0001_…`, `0002_…`, …). There's no
+  `alembic.ini`. Use the project's commands, from `apps/api`:
+  - `python -m probity.bootstrap`: create or upgrade the schema to the latest migration.
+  - `python -m probity.bootstrap --reset --yes`: wipe and recreate (development only; refused when `ENV=prod`).
+  - `python -m probity.db.migrate revision -m "short description"`: generate a new migration from model changes. Then read and fix it
+    by hand, and make sure `downgrade()` really reverses `upgrade()`.
+- The API **refuses to start** if the database isn't at the latest migration.
+- `bootstrap` only creates the schema. **It never inserts data**: users come from Clerk sign-in, and everything else is entered by them.
 
-## 9. Vector collections (Qdrant)
-`vendors_{ws}` (name/address embeddings for fuzzy entity match), `cases_{ws}` (summaries for memory retrieval), `policy_{ws}` (optional). Payload carries `workspace_id` filter on every query.
+## How the tests work
 
-## 10. Relationship graph
-MVP: `graph_edges` table + recursive CTE for "vendors sharing bank/address/domain/phone within 2 hops". Optional Neo4j mirror fed by outbox events.
+- Location: `apps/api/tests/`. Run with `python -m pytest -q` from `apps/api` (see [SETUP.md](SETUP.md#9-run-the-tests)).
+- **Throwaway database:** `conftest.py` connects to PostgreSQL with `TEST_POSTGRES_ADMIN_URL`, creates the `probity_app` user if needed and
+  a fresh `probity_test_<random>` database, runs the migrations, and drops it at the end. Tables are emptied between tests. Row-level security
+  is on, as in real use.
+- **Factories, not fixtures files:** `tests/factories/` builds workspaces, users, vendors, history, POs and invoice PDFs in code
+  (`build_world()`, `clean_spec()`, `bank_change_spec()`, …). There's no seed data anywhere in the app.
+- **Fakes only in tests:** `conftest.py` replaces the AI, RDAP, web search and page fetching, email and Clerk with in-memory fakes, and
+  ignores your `apps/api/.env`. The app has **no switch** for this, so tests never use your keys.
+- **Safety tests** cover the Guardrails: injection, made-up results, overclaiming, SSRF, personal data, auto-clear abuse, loops and
+  spoofed replies. See `test_safety_eval.py`, `test_could_not_verify.py`, `test_secret_leaks.py`, `test_masking.py`, `test_sod_mfa.py`
+  and `test_autoclear_gate.py`.
+- **Frontend:** no unit tests or linter yet. `npm run typecheck` and `npm run build` are the checks.
 
-## 11. Async execution
-API enqueues `run_case(case_id)` → worker executes graph with Postgres checkpointer → publishes events to Redis pubsub → API fan-outs SSE. Human gate and vendor wait are `interrupt()` pauses resumed by `/decision` and `/vendor-reply` or timer.
+## No mock or demo mode
 
-## 12. Failure handling
-Per-agent timeout + retry (exp. backoff, ≤2). Tool failure → `agent.failed` event, graph continues with reduced-confidence flag. LLM provider fallback chain. Idempotent nodes (keyed by `case_id+node+input_hash`) so resume is safe.
+There is **no mock, demo, offline or cached mode in the app code**. That includes no fake AI switch, no seeded demo workspace and no
+recorded replies. `config.py` says so, and tests fail if such settings or routes reappear (`test_auth.py`, `test_could_not_verify.py`).
 
-## 13. Deployment
-Docker Compose (api, worker, web, postgres, redis, qdrant) for dev/demo; K8s/Render manifests for prod (see reference repos). Stateless api/worker; secrets via env/secret manager.
-
-## 14. Demo fallback mode
-`TOOLS_MODE=live|cached|mock`. `cached` replays recorded web/registry/WHOIS responses keyed by query so the demo is deterministic offline.
-`LLM_MODE=live|cached|mock`. `cached` replays recorded LLM responses keyed by `prompt_version + input_hash`; `mock` returns deterministic schema-valid outputs. `AUTH_MODE=local` (non-prod only) uses seeded demo users with locally signed JWTs instead of Clerk/Supabase. Together these make `docker compose up` + `make seed` run the full demo with no network.
+When something isn't available, Probity says **"could not verify"** and holds the invoice if that check was required. It never fakes a
+result. Fakes exist only inside `apps/api/tests/`. Please keep it that way.

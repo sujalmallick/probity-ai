@@ -8,6 +8,7 @@ across API and worker processes without a push gateway.
 from __future__ import annotations
 
 import time
+from functools import lru_cache
 
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Counter, Gauge, Histogram, generate_latest
 from sqlalchemy import func, select, text
@@ -31,18 +32,24 @@ def observe_request(method: str, route: str, status: int, seconds: float) -> Non
     HTTP_LATENCY.labels(method, route).observe(seconds)
 
 
+@lru_cache(maxsize=1)
+def _owner_engine(url: str):  # type: ignore[no-untyped-def]
+    """One small pool for scrapes (a new engine per scrape leaked a connection pool every time)."""
+    from sqlalchemy import create_engine
+
+    return create_engine(url, pool_pre_ping=True, pool_size=1, max_overflow=0)
+
+
 def _refresh_business_metrics() -> None:
     """Aggregate across all workspaces (operator view). Uses the migrate/owner connection on Postgres
     because row-level security intentionally hides cross-tenant rows from the app role."""
     from datetime import datetime, timedelta, timezone
 
-    from sqlalchemy import create_engine
-
     from probity.db.models import AgentEvent, Case, ClaimRow, LLMCall
     from probity.db.session import get_engine
 
     st = get_settings()
-    eng = create_engine(st.database_migrate_url, pool_pre_ping=True) if st.database_migrate_url else get_engine()
+    eng = _owner_engine(st.database_migrate_url) if st.database_migrate_url else get_engine()
     tel = eng
     since = datetime.now(timezone.utc) - timedelta(hours=24)
     with eng.connect() as c:

@@ -245,3 +245,21 @@ def test_scanned_image_is_refused_with_a_clear_message(client, world):
 def test_users_never_cross_workspaces(client, world):
     with owner_session() as s:
         assert {u.workspace_id for u in s.scalars(select(User))} == {world.workspace_id}
+
+
+def test_inbound_webhook_rejects_future_replays_and_non_objects(client, world, settings, fake_lookups):
+    fake_lookups.domains[NEW_DOMAIN] = 21
+    settings(INBOUND_EMAIL_SECRET="s3cret", EMAIL_REPLY_DOMAIN="reply.probity-tests.invalid", EMAIL_ALLOWLIST=VENDOR_A.contact_email)
+    acc, appr = login(client, "accountant"), login(client, "approver")
+    case = run_case(client, acc, bank_change_spec())
+    send_verification(client, case, appr)
+    payload = {"from": VENDOR_A.contact_email, "to": [f"case+{case['id']}@reply.probity-tests.invalid"], "subject": "RE",
+               "text": "We moved our banking to a new account ending 9812 last month."}  # no dkim result at all
+    assert _signed(client, payload, ts=time.time() + 120).status_code == 401  # from the future
+    assert _signed(client, ["not", "an", "object"]).status_code == 400
+    r = _signed(client, payload)
+    assert r.status_code == 200, r.text
+    assert any(i.startswith("Unauthenticated sender") for i in r.json()["indicators"])
+    assert _signed(client, payload).status_code == 409  # identical body replayed
+    msg = client.get(f"{API}/cases/{case['id']}", headers=acc).json()["messages"][-1]
+    assert msg["direction"] == "in" and any(i.startswith("Unauthenticated sender") for i in msg["indicators"])  # stored, not only returned

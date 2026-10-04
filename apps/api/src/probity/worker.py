@@ -30,9 +30,32 @@ app.conf.update(
     task_soft_time_limit=_settings.max_seconds + 60,
     broker_connection_retry_on_startup=True,
     task_default_queue="probity",
-    beat_schedule={"followups": {"task": "probity.followups", "schedule": 15 * 60.0}},
+    # JSON only: a broker message must never be able to make the worker unpickle attacker-chosen objects.
+    task_serializer="json",
+    result_serializer="json",
+    accept_content=["json"],
+    beat_schedule={
+        "followups": {"task": "probity.followups", "schedule": 15 * 60.0},
+        "watchdog": {"task": "probity.watchdog", "schedule": 60.0},  # end cases whose run died (stuck-case recovery)
+    },
     timezone="UTC",
 )
+
+
+def task_problem(case, workspace_id: str, depth: int, max_depth: int) -> str | None:  # type: ignore[no-untyped-def]
+    """Why a run_case message must not be executed, or None. Broker messages are not trusted: anyone who can write
+    to the queue could otherwise re-run or deepen any tenant's case (burning LLM/web budget, replacing claims)."""
+    if case is None:
+        return "missing"
+    if case.workspace_id != workspace_id:
+        return "workspace mismatch"
+    if not 0 <= depth <= max_depth:
+        return f"depth {depth} outside 0..{max_depth}"
+    if depth == 0 and case.status != "QUEUED":
+        return f"already processed ({case.status})"
+    if depth > 0 and (case.status != "INVESTIGATING" or depth != (case.depth or 0) + 1):
+        return f"no investigate-further pending at depth {depth} (status {case.status}, depth {case.depth})"
+    return None
 
 
 @app.task(name="probity.run_case", bind=True, max_retries=0)
@@ -42,12 +65,9 @@ def run_case(self, workspace_id: str, case_id: str, depth: int = 0) -> str:  # t
     from probity.db.session import session_scope
 
     with session_scope(workspace_id) as s:
-        c = s.get(Case, case_id)
-        if c is None:
-            log.warning("case.missing", case_id=case_id)
-            return "missing"
-        if depth == 0 and c.status not in ("QUEUED",):
-            log.info("case.already_processed", case_id=case_id, status=c.status)
+        problem = task_problem(s.get(Case, case_id), workspace_id, depth, get_settings().max_depth)
+        if problem:
+            log.warning("case.task_refused", case_id=case_id, workspace_id=workspace_id, depth=depth, reason=problem)
             return "skipped"
     log.info("case.start", case_id=case_id, workspace_id=workspace_id, depth=depth)
     if depth == 0:
@@ -62,3 +82,10 @@ def followups() -> int:
     from probity import services
 
     return services.check_followups()
+
+
+@app.task(name="probity.watchdog")
+def watchdog() -> int:
+    from probity import services
+
+    return services.watchdog()

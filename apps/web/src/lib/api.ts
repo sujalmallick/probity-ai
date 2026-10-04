@@ -1,3 +1,5 @@
+import { currentConfig } from "./config";
+
 export type Role = "viewer" | "accountant" | "approver" | "owner";
 export type Tier = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
 
@@ -10,10 +12,8 @@ export interface Me {
 }
 
 // ---------------------------------------------------------------- tokens
-// Clerk mode: a getter backed by Clerk's session (fresh short-lived JWT per call).
-// Local demo mode: the token issued by /auth/demo-login, kept in localStorage.
+// Clerk session: a getter that returns a fresh short-lived JWT per call.
 
-const KEY = "probity.session";
 let tokenGetter: (() => Promise<string | null>) | null = null;
 let onUnauthorized: (() => void) | null = null;
 
@@ -24,30 +24,8 @@ export function setUnauthorizedHandler(fn: (() => void) | null) {
   onUnauthorized = fn;
 }
 
-export function getLocalSession(): { token: string; user: Me } | null {
-  try {
-    const raw = localStorage.getItem(KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
-  }
-}
-
-let memorySession: { token: string; user: Me } | null = null;
-
-export function setLocalSession(s: { token: string; user: Me } | null) {
-  memorySession = s;
-  try {
-    if (s) localStorage.setItem(KEY, JSON.stringify(s));
-    else localStorage.removeItem(KEY);
-  } catch {
-    /* storage unavailable — session lives for this tab only */
-  }
-}
-
 async function token(): Promise<string | null> {
-  if (tokenGetter) return tokenGetter();
-  return (getLocalSession() ?? memorySession)?.token ?? null;
+  return tokenGetter ? tokenGetter() : null;
 }
 
 // ---------------------------------------------------------------- requests
@@ -71,10 +49,17 @@ export async function api<T = any>(path: string, init: RequestInit = {}): Promis
   const res = await fetch(`/api/v1${path}`, { ...init, headers });
   if (!res.ok) {
     let msg = res.statusText;
+    let code: string | undefined;
     try {
-      msg = (await res.json()).error?.message ?? msg;
+      const body = await res.json();
+      msg = body.error?.message ?? msg;
+      code = body.error?.code;
     } catch {
       /* non-JSON error */
+    }
+    if (res.status === 413 || code === "payload_too_large") {
+      const { max_upload_mb, max_import_mb } = currentConfig().limits;
+      msg = `That's too large to upload. Invoices can be up to ${max_upload_mb} MB and CSV files up to ${max_import_mb} MB.`;
     }
     if (res.status === 401) onUnauthorized?.();
     throw new ApiError(res.status, msg);

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { AlertTriangle, CheckCircle2, ChevronDown, CircleDashed, Loader2, ShieldAlert, ShieldCheck, X, XCircle } from "lucide-react";
+import { AlertTriangle, BotOff, CheckCircle2, ChevronDown, CircleDashed, Loader2, SearchX, ShieldAlert, ShieldCheck, X, XCircle } from "lucide-react";
 import { STATUS_LABEL, tierColor, tierSoft } from "../lib/format";
 
 export function TierChip({ tier, score }: { tier?: string; score?: number }) {
@@ -142,5 +142,35 @@ export function MenuButton({ label, icon, items, align = "right", up = false }: 
         </div>
       )}
     </div>
+  );
+}
+
+export type Fallback = { kind?: string; label?: string; reason?: string } | null | undefined;
+const FALLBACK_LABEL = "rule-based fallback, AI unavailable";
+
+/** Shown next to any result the server produced with rules because the AI was unavailable. Tooltip = why. */
+export function FallbackBadge({ fb, className = "" }: { fb: Fallback; className?: string }) {
+  if (!fb) return null;
+  const label = fb.label || FALLBACK_LABEL;
+  const text = fb.reason ? `${label}: ${fb.reason}` : label;
+  return (
+    <span
+      tabIndex={0}
+      title={fb.reason || label}
+      aria-label={text}
+      className={`inline-flex items-center gap-1 rounded-md border border-dashed border-medium/50 bg-medium-soft px-1.5 py-0.5 text-[11px] font-medium whitespace-nowrap text-medium align-middle ${className}`}
+    >
+      <BotOff size={11} aria-hidden />{label}
+    </span>
+  );
+}
+
+/** A check or claim that could not be verified because a tool or data source failed. Never shown as a pass. */
+export function CouldNotVerify({ reason, className = "" }: { reason?: string | null; className?: string }) {
+  return (
+    <span className={`inline-flex items-start gap-1 text-xs font-medium text-medium ${className}`}>
+      <SearchX size={13} className="mt-px shrink-0" aria-hidden />
+      <span>Could not verify{reason ? `: ${reason}` : ""}</span>
+    </span>
   );
 }

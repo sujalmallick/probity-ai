@@ -55,7 +55,7 @@ def case_invoice(case: Case) -> dict:
 
 def workspace_history(s: Session, workspace_id: str, exclude_case_id: str | None = None) -> list[dict]:
     q = (select(HistoricalInvoice, Vendor.name).join(Vendor, Vendor.id == HistoricalInvoice.vendor_id, isouter=True)
-         .where(HistoricalInvoice.workspace_id == workspace_id).order_by(HistoricalInvoice.invoice_date))
+         .where(HistoricalInvoice.workspace_id == workspace_id, HistoricalInvoice.approved_at.is_not(None)).order_by(HistoricalInvoice.invoice_date))
     return [
         {"vendor": name, "vendor_id": h.vendor_id, "invoice_no": h.invoice_number, "total": _major(h.total_minor), "invoice_date": h.invoice_date,
          "bank_account_hmac": h.bank_hmac, "bank_last4": h.bank_last4}

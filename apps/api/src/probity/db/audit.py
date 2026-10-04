@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import json
 import threading
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any
@@ -25,6 +26,7 @@ from probity.db.models import AuditLog
 
 GENESIS = "0" * 64
 _lock = threading.Lock()  # SQLite (single writer); Postgres uses a per-workspace advisory lock held until commit
+AUDIT_LOCK_TIMEOUT = "15s"  # longest an audit write waits for another writer of the same workspace
 
 
 @lru_cache
@@ -73,11 +75,21 @@ def audit(
     data = json.loads(json.dumps(data or {}, default=str))  # hash exactly what the JSON column will return
     request_id = request_id or request_context.request_id.get()  # set per API request by the middleware
     ts = datetime.now(timezone.utc)  # set here (not by the column default) because the hash covers it
-    with _lock:
-        if s.get_bind().dialect.name == "postgresql":
+    postgres = s.get_bind().dialect.name == "postgresql"
+    # Postgres: the per-workspace advisory lock alone serialises writers across threads and processes until the
+    # transaction commits. Taking the process-wide _lock as well could deadlock: a request holding the advisory lock
+    # and writing a second entry waited for _lock, held by a thread waiting for that same advisory lock. Postgres
+    # can't see a wait inside Python, so every audit write in the process hung. _lock is kept only for databases
+    # without advisory locks (SQLite in local runs).
+    with nullcontext() if postgres else _lock:
+        if postgres:
             # Serialise writers per workspace until this transaction commits: API and worker processes appending
-            # concurrently would otherwise both chain from the same previous row (a false tamper alarm).
+            # concurrently would otherwise both chain from the same previous row (a false tamper alarm). A bounded
+            # wait turns a stuck writer into an error instead of a silent hang.
+            previous = s.scalar(text("SELECT current_setting('lock_timeout')"))
+            s.execute(text("SELECT set_config('lock_timeout', :t, true)"), {"t": AUDIT_LOCK_TIMEOUT})
             s.execute(text("SELECT pg_advisory_xact_lock(hashtext(:ws))"), {"ws": workspace_id})
+            s.execute(text("SELECT set_config('lock_timeout', :t, true)"), {"t": previous})
         last = s.scalars(
             select(AuditLog).where(AuditLog.workspace_id == workspace_id).order_by(AuditLog.id.desc()).limit(1)
         ).first()

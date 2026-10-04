@@ -25,7 +25,7 @@ from probity.config import get_settings
 from probity.db.models import LLMCall
 from probity.db.session import telemetry_scope
 from probity.guardrails.text import redact
-from probity.tools.base import Budget
+from probity.tools.base import Budget, BudgetExceeded
 
 T = TypeVar("T", bound=BaseModel)
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
@@ -60,6 +60,17 @@ def _record(tags: dict, model: str, ok: bool, started: float, tin: int = 0, tout
             ))
     except Exception:  # noqa: BLE001 - telemetry must never break a case
         pass
+
+
+def workspace_tokens_today(workspace_id: str) -> int:
+    from datetime import datetime, timezone
+
+    from sqlalchemy import func, select
+
+    start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    with telemetry_scope(workspace_id) as s:
+        return int(s.scalar(select(func.coalesce(func.sum(LLMCall.tokens_in + LLMCall.tokens_out), 0))
+                            .where(LLMCall.workspace_id == workspace_id, LLMCall.ts >= start)) or 0)
 
 
 def transport(schema: type[T], system: str, content: str | list[dict[str, Any]], model: str) -> tuple[T, int, int]:
@@ -114,9 +125,16 @@ def generate(
     model = st.llm_model_reasoning if tier == "reasoning" else st.llm_model_fast
     if redact_input and isinstance(user, str):
         user = redact(user).text
+    ws = tags.get("workspace_id")
+    if ws and ws != "-":
+        limit = st.workspace_daily_token_limit
+        if workspace_tokens_today(ws) >= limit:
+            if budget is not None and "workspace_daily_tokens" not in budget.exhausted:
+                budget.exhausted.append("workspace_daily_tokens")
+            raise BudgetExceeded("workspace_daily_tokens", limit)
+    approx = (len(system) + (len(user) if isinstance(user, str) else 4000)) // 4
     if budget is not None:
-        approx = len(system) + (len(user) if isinstance(user, str) else 4000)
-        budget.charge_llm(tokens=approx // 4)
+        budget.charge_llm(tokens=approx)
     content: str | list[dict[str, Any]] = user
     tin = tout = 0
     last: Exception | None = None
@@ -124,6 +142,8 @@ def generate(
         try:
             out, i, o = transport(schema, system, content, model)
             tin, tout = tin + i, tout + o
+            if budget is not None:
+                budget.add_tokens(i + o - approx)  # count real input + output tokens, not just the estimate
             out = schema.model_validate(out.model_dump())  # validate again: never trust a transport blindly
             _record(tags, model, True, started, tin, tout)
             return out

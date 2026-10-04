@@ -21,7 +21,7 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-ADMIN_URL = os.environ.get("TEST_POSTGRES_ADMIN_URL", "postgresql+psycopg://probity:probity@localhost:5434/postgres")
+ADMIN_URL = os.environ.get("TEST_POSTGRES_ADMIN_URL", "postgresql+psycopg://probity:probity@127.0.0.1:5434/postgres")
 _DB = f"probity_test_{uuid.uuid4().hex[:10]}"
 _tmp = Path(tempfile.mkdtemp(prefix="probity-test-"))
 ISSUER = "https://clerk.probity-tests.invalid"
@@ -219,7 +219,7 @@ class FakeLookups:
     def web_search(self, query, budget):  # type: ignore[no-untyped-def]
         if self.search_status == "not_configured":
             return lookups.SearchOutcome("not_configured", query, reason="web search is not configured (TAVILY_API_KEY missing)")
-        budget.charge_web()
+        budget.charge_web(search=True)  # same accounting as the real web_search
         if self.search_status != "ok":
             return lookups.SearchOutcome("error", query, reason="search service unreachable (test)")
         hits = [h for key, hs in self.search.items() if key.lower() in query.lower() for h in hs]

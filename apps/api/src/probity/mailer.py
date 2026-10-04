@@ -87,7 +87,7 @@ def send_invitation(email: str, inviter: str, role: str) -> str | None:
     st = get_settings()
     try:
         _send(email, f"{inviter} invited you to Probity",
-              f"{inviter} invited you to join their Probity workspace as {role}.\n\nSign in with this email address at {st.public_app_url} to accept.\n\nProbity — Evidence before payment.")
+              f"{inviter} invited you to join their Probity workspace as {role}.\n\nSign in with this email address at {st.public_app_url} within 7 days to accept.\n\nProbity — Evidence before payment.")
     except MailError as e:
         log.warning("mail.invitation_not_sent", error=str(e))
         return str(e)

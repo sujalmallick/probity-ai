@@ -12,11 +12,14 @@ from typing import Any
 
 MB = 1024 * 1024
 DEFAULT_LIMIT = 1 * MB
-# Most specific prefix first. Upload limit = 15 MB document + multipart overhead; imports = 5 MB CSV + overhead.
-ROUTE_LIMITS: list[tuple[str, str, int]] = [
-    ("POST", "/api/v1/documents", 16 * MB),
-    ("POST", "/api/v1/imports/", 6 * MB),
-]
+# Most specific prefix first. Uploads = MAX_UPLOAD_MB document + 1 MB multipart overhead; imports = 5 MB CSV + overhead.
+def _route_limits() -> list[tuple[str, str, int]]:
+    from probity.config import get_settings
+
+    return [
+        ("POST", "/api/v1/documents", (get_settings().max_upload_mb + 1) * MB),
+        ("POST", "/api/v1/imports/", 6 * MB),
+    ]
 
 
 class _TooLarge(Exception):
@@ -24,14 +27,15 @@ class _TooLarge(Exception):
 
 
 def limit_for(method: str, path: str) -> int:
-    for m, prefix, limit in ROUTE_LIMITS:
+    for m, prefix, limit in _route_limits():
         if method == m and (path == prefix or path.startswith(prefix)):
             return limit
     return DEFAULT_LIMIT
 
 
 async def _reject(send: Any, limit: int) -> None:
-    body = json.dumps({"error": {"code": "payload_too_large", "message": f"request body exceeds {limit // MB or 1} MB", "details": {}}}).encode()
+    body = json.dumps({"error": {"code": "payload_too_large", "message": f"request body exceeds {limit // MB or 1} MB",
+                                 "retryable": False, "ref": None}}).encode()
     await send({"type": "http.response.start", "status": 413,
                 "headers": [(b"content-type", b"application/json; charset=utf-8"), (b"content-length", str(len(body)).encode()),
                             (b"x-content-type-options", b"nosniff")]})

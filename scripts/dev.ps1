@@ -43,8 +43,8 @@ if (-not (Test-Path $envFile)) {
     Step "Creating apps\api\.env (first run only)"
     & $py -m probity.bootstrap --generate-secrets | Out-Null
     $text = Get-Content $envFile -Raw
-    $text = $text -replace '(?m)^DATABASE_URL=.*$', 'DATABASE_URL=postgresql+psycopg://probity_app:probity_app@localhost:5434/probity'
-    $text = $text -replace '(?m)^DATABASE_MIGRATE_URL=.*$', 'DATABASE_MIGRATE_URL=postgresql+psycopg://probity:probity@localhost:5434/probity'
+    $text = $text -replace '(?m)^DATABASE_URL=.*$', 'DATABASE_URL=postgresql+psycopg://probity_app:probity_app@127.0.0.1:5434/probity'
+    $text = $text -replace '(?m)^DATABASE_MIGRATE_URL=.*$', 'DATABASE_MIGRATE_URL=postgresql+psycopg://probity:probity@127.0.0.1:5434/probity'
     Set-Content -Path $envFile -Value $text -Encoding utf8 -NoNewline
 }
 
@@ -60,6 +60,11 @@ if ($status -ne 0) {
     Write-Host "  EMAIL_ALLOWLIST       your own address(es), comma-separated (only these receive email)"
     exit 1
 }
+
+Step "Checking integrations (one small real request each)"
+Push-Location $api
+& $py -m probity.check
+Pop-Location
 
 $webEnv = Join-Path $web ".env.local"
 if (-not ((Test-Path $webEnv) -and (Select-String -Path $webEnv -Pattern '^VITE_CLERK_PUBLISHABLE_KEY=\S+' -Quiet))) {

@@ -43,9 +43,13 @@ class State(TypedDict, total=False):
 
 
 def _set_status(ctx: CaseCtx, status: str) -> None:
+    from probity.services import CaseStopped
+
     with session_scope(ctx.workspace_id) as s:
         c = s.get(Case, ctx.case_id)
         assert c is not None
+        if c.status == "FAILED":
+            raise CaseStopped(ctx.case_id)  # ended by the watchdog or restart recovery: stop this run
         c.status = status
 
 
@@ -62,10 +66,18 @@ def _guard(name: str, fn: Callable[[CaseCtx, State], dict], checks_on_fail: list
                 last = e
                 break
             except Exception as e:  # noqa: BLE001
+                from probity.services import CaseStopped
+
+                if isinstance(e, CaseStopped):
+                    raise  # the case was ended elsewhere; don't retry or record a step failure
                 last = e
                 if attempt < retries:
                     time.sleep(0.2 * (2**attempt))
-        ctx.emit("agent.failed", agent=name, status="failed", message=f"{name} failed: {last}" + ("" if fatal else " — continuing with reduced confidence"))
+                continue
+        if isinstance(last, BudgetExceeded):
+            ctx.emit("agent.failed", agent=name, status="failed", message=f"{name} stopped — {last}", data={"limit": last.limit})
+        else:
+            ctx.emit("agent.failed", agent=name, status="failed", message=f"{name} failed: {last}" + ("" if fatal else " — continuing with reduced confidence"))
         if fatal:
             raise RuntimeError(f"{name}: {last}") from last
         with session_scope(ctx.workspace_id) as s:

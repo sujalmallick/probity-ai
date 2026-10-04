@@ -16,6 +16,7 @@ from probity.agents.common import fv, load_case, record_claim, vendor_bundle
 from probity.db.session import session_scope
 from probity.events import CaseCtx, rule_based_fallback
 from probity.evidence.models import AgentClaim, EvidenceIn
+from probity.guardrails.text import wrap_untrusted
 from probity.llm import client as llm
 from probity.tools import lookups
 from probity.tools.base import BudgetExceeded
@@ -66,7 +67,8 @@ def run(ctx: CaseCtx, depth: int) -> dict:
     try:
         pv, system = llm.load_prompt("web_research", "queries")
         queries = llm.generate(
-            schema=Queries, system=system, user=f"Vendor name: {name}\nSender domain: {sender}\nKnown domains: {official}\nDepth: {depth}",
+            schema=Queries, system=system,
+            user=wrap_untrusted("invoice_fields", f"Vendor name: {name}\nSender domain: {sender}") + f"\nKnown domains: {official}\nDepth: {depth}",
             tier="fast", tags={**ctx.tags, "agent": AGENT, "prompt_version": pv}, budget=ctx.budget,
         ).queries[:6]
     except llm.LLMFailed as e:
@@ -75,6 +77,7 @@ def run(ctx: CaseCtx, depth: int) -> dict:
         ctx.progress(AGENT, f"AI could not write search queries ({e.reason}); using standard rule-based queries", fallback="rule_based_queries")
 
     sources = 0
+    scanned = 0  # pages (or snippets) about this vendor that were actually read and scanned for adverse findings
     findings = 0
     searched: list[str] = []
     failures: list[str] = []
@@ -111,8 +114,11 @@ def run(ctx: CaseCtx, depth: int) -> dict:
                     text = h.snippet
                 if name.split()[0].lower() not in text.lower():
                     continue  # page doesn't mention the entity → not reported
-                if "complaints" in q and ADVERSE.search(text):
-                    m = ADVERSE.search(text)
+                scanned += 1
+                # Every page about the vendor is scanned, whatever query found it (AI-written queries rarely contain
+                # the word "complaints"; scanning only those let adverse pages through unread).
+                m = ADVERSE.search(text)
+                if m:
                     quote = _excerpt(text, m.group(0), 160)  # type: ignore[union-attr]
                     record_claim(s, ctx, AGENT, AgentClaim(
                         claim=f"A third-party source reports complaints mentioning {name} ({h.url}).",
@@ -130,18 +136,27 @@ def run(ctx: CaseCtx, depth: int) -> dict:
                 evidence=[EvidenceIn(source="web", field="listed_website", value=dom, source_ref=url, excerpt=excerpt, tier=tier)],
                 confidence=0.8, severity="info", assertion={"op": "quote", "evidence": "$0", "quote": quote},
             ))
+        coverage = f"{len(searched)} of {len(queries)} searches completed, {scanned} pages about the vendor read"
         if not searched:
             check = ctx.unverifiable(AGENT, "external_reputation", failures[0] if failures else "no search could be run")
+        elif findings:
+            check = {"status": "fired", "reason": coverage}
+        elif scanned == 0:
+            # Searches ran but nothing about the vendor could be read: that is not evidence of a clean record.
+            check = ctx.unverifiable(AGENT, "external_reputation", f"no public pages about the vendor could be read ({coverage})")
         else:
-            if findings == 0:
-                record_claim(s, ctx, AGENT, AgentClaim(
-                    claim=f"No adverse public findings located in {sources} sources ({len(searched)} of {len(queries)} searches completed).",
-                    evidence=[EvidenceIn(source="web", field="search_log", value=sources, source_ref="search:" + " | ".join(searched), excerpt="Queries: " + "; ".join(searched), tier=2)],
-                    confidence=0.7, severity="info", assertion={"op": "info"},
-                ))
-            check = {"status": "passed" if findings == 0 else "fired", "reason": f"{len(searched)} of {len(queries)} searches completed, {sources} sources"}
+            record_claim(s, ctx, AGENT, AgentClaim(
+                claim=f"No adverse public findings in {scanned} pages about the vendor ({len(searched)} of {len(queries)} searches completed).",
+                evidence=[EvidenceIn(source="web", field="search_log", value=scanned, source_ref="search:" + " | ".join(searched), excerpt="Queries: " + "; ".join(searched), tier=2)],
+                confidence=0.7, severity="info", assertion={"op": "info"},
+            ))
             if failures:
-                check["warnings"] = failures[:5]
+                # Some searches failed: what was read is clean, but the check is incomplete and says so.
+                check = ctx.unverifiable(AGENT, "external_reputation", f"only {coverage}; no adverse findings in what was read")
+            else:
+                check = {"status": "passed", "reason": coverage}
+        if failures:
+            check["warnings"] = failures[:5]
         if fallback:
             check["fallback"] = fallback
 

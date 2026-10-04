@@ -20,21 +20,19 @@ Owner: IMPLEMENTATION (backend). Consumers: apps/web. Machine-readable schema: [
 ```json
 {
   "env": "dev|test|prod", "version": "0.1.0",
-  "auth": { "mode": "clerk", "sign_up": true, "demo_login": false },
-  "features": { "landing_page": true, "demo": false, "benchmark": false, "simulated_inbox": false },
+  "auth": { "mode": "clerk", "sign_up": true },
+  "features": { "landing_page": true },
   "integrations": { "ai": "live|missing", "web_search": "live|missing", "domain_lookup": "live", "gst_registry": "unavailable",
                     "email": "live|missing", "email_allowlist_only": true, "storage": "cloud|local", "antivirus": "on|off",
                     "background_jobs": "inline|worker|missing" },
   "limits": { "max_upload_mb": 15, "max_import_mb": 5 }
 }
 ```
-There is no demo, offline or mock mode. `features.demo/benchmark/simulated_inbox` and `auth.demo_login` are always `false` and will
-be removed once the web app stops reading them. Show a **Live** indicator; list integrations that are `missing` as
+There is no demo, offline or mock mode. Show a **Live** indicator; list integrations that are `missing` as
 "not configured — affected checks report *could not verify*".
 
-`GET /auth/config` → `{mode: "clerk", demo_login: false}` (kept for compatibility; prefer `/app/config`).
-Removed (answer **410 Gone** until the web app no longer calls them, then deleted): `GET /auth/demo-users`, `POST /auth/demo-login`,
-`POST /demo/seed`, `GET /demo/files/{name}`, `POST /demo/vendor-reply/{id}`, `PUT /demo/speed`, `GET /benchmark/summary`.
+The demo and benchmark endpoints (`/auth/config`, `/auth/demo-users`, `/auth/demo-login`, `/demo/*`, `/benchmark/summary`) have been
+deleted (404) now that the web app no longer calls them.
 
 ### Check results ("could not verify")
 `case.checks[<name>] = {status, reason, ...}` with `status` one of `passed | fired | skipped | could_not_verify | failed`.
@@ -185,3 +183,49 @@ PUT validates weights/tiers/escalation rules → 400 with the problems; DELETE r
   `PUT /vendors/{id}/gst-manual {legal_name?, status: Active|Cancelled|Suspended, note?}` (accountant+) and `DELETE` (204);
   invitations return `email_sent`/`email_note`; email to addresses outside `EMAIL_ALLOWLIST` → 400 and audited `email.blocked`.
   Migration 0007 (`vendors.gst_manual`).
+- 2026-10-04 — v2.1: removed endpoints deleted (were 410), `/auth/config` deleted, always-false config keys removed; unknown `/api/*` paths return JSON 404 (never the web app).
+- 2026-10-04 — v2.2: **error shape** for every API error: `{error: {code, message, retryable, ref}}` (`message` is safe to show;
+  `ref` = request id, also in `X-Request-ID`). Codes include `bad_request`, `forbidden`, `not_found`, `conflict`,
+  `unsupported_document` (415, e.g. scans/images refused at upload before anything is stored), `validation_error` (422),
+  `payload_too_large` (413), `limit_reached` (429), `internal_error` (500, retryable). Usage limits (`/app/config.limits`):
+  `max_upload_mb` 10, `workspace_daily_cases` 25, `case_tokens` 200,000, `workspace_daily_tokens` 3,000,000,
+  `case_web_searches` 10. A per-case limit stops the investigation cleanly with "Limit reached: <limit> (<SETTING>)".
+  Currency: `validation.currency {ok, detail, reason}`; anything but INR (or no stated currency) is held and never converted;
+  `amount.currency` shows what the invoice states (`USD`, `MIXED`, `UNRECOGNISED`, or null when not stated).
+- 2026-10-04 — v2.3: `recommendation.gate.limits_reached: [message]` and a gate reason "Stopped early — Limit reached: …" when a
+  usage limit stopped the case; a failed currency check gives the reason "Currency: <why> (held; amounts are never converted)" instead of
+  "document validation failed" (other failed document checks read "document validation failed: <check>"); for non-INR or unstated
+  currency `checks.price_anomaly` is `could_not_verify` (never compared with INR history). SSE `agent.failed` for a limit carries
+  `data.limit`. `CASE_STALL_SECONDS` (default 900) is a setting.
+- 2026-10-04 — v3.0 (Phase 3, real data entry):
+  - **Baseline approval.** Past invoices and POs carry `status: "approved" | "pending"`, `source: "import" | "manual" | "case"`,
+    `entered_by {id,name}`, `approved_by {id,name}`, `approved_at`. Only approved rows feed price/PO/quantity comparisons;
+    pending rows still count for duplicate detection. Rows added by approver/owner are approved; accountants' rows are pending; an
+    accountant's edit puts an approved row back to pending. Checks explain it: "… N past invoice(s) are waiting for approver
+    approval", "PO <n> is waiting for approver approval".
+  - `GET /vendors/{id}/history` → `{items, approved, pending}`; `POST /vendors/{id}/history {invoice_number, invoice_date, total,
+    currency:"INR", bank_account_number?, po_number?, line_items:[{description, qty, unit_price}]}` (accountant+; 409 duplicate number;
+    422 non-INR); `PATCH /vendors/{id}/history/{hid} {invoice_date?, total?, po_number?, line_items?}`;
+    `DELETE /vendors/{id}/history/{hid}` (approved rows: approver+; rows from a decided case: 409); `POST /history/approve {ids}` (approver · MFA).
+  - `GET /purchase-orders?vendor_id=&status=approved|pending`; `POST /purchase-orders {vendor_id, po_number, po_date, lines:[{description,
+    qty, unit_price}]}` (409 duplicate); `PATCH /purchase-orders/{id} {po_date?, lines?}`; `DELETE /purchase-orders/{id}`;
+    `POST /purchase-orders/approve {ids}` (approver · MFA).
+  - `GET /baseline/pending` → `{invoices, purchase_orders, invoice_items, po_items}` — the approver's queue.
+  - `GET /vendors/{id}`: `invoices` counts approved, new `invoices_pending`; `price_history[]` and `purchase_orders[]` items carry `id`,
+    `status`, `source`. Onboarding gains step `approve_records`.
+  - CSV import: vendor names match exactly (case-insensitive); imported rows are pending unless the importer is approver+.
+  - Vendor `PATCH`: changing `name`, `gstin` or `address` needs approver (403 otherwise); notes/website/archived stay accountant+.
+  - Out-of-band confirmation: `known_channel` must be `true` (else 400); a note that repeats the vendor's reply → 400.
+  - Draft send with `override_unverified_recipient: true` also needs `override_reason` (≥ 10 letters/digits; audited).
+- 2026-10-04 — v3.1 (Phase 4): `POST /cases/{id}/retry` (accountant+) → 201 `{case_id, number, status, retry_of}` for a FAILED case: a new
+  case runs the same document and corrections from the start; the failed case stays FAILED with `recommendation.retried_as`, the new one
+  has `recommendation.retry_of`; 409 if not FAILED or already retried; counts against the daily investigation limit.
+  CLI `python -m probity.check` verifies each integration (see README).
+- 2026-10-04 — v3.2 (Phase 6): `GET /cases/{id}/trace` (any role) → `{case_id, status, agents:[{agent, status: done|failed|skipped|running|not_run,
+  started_at, finished_at, seconds, steps[], checks{name:{status,reason}}, could_not_verify[{check,reason}], fallbacks[{what,label,message}],
+  errors[], ai{calls, failed, tokens_in, tokens_out, latency_ms, models[]}, claims{total, verified, unverified, refuted, dropped}}],
+  totals{ai_calls, ai_failed, tokens, could_not_verify, fallbacks, budget}, sanity{ok, problems[{code,message}], checked_at}}`.
+  Sanity checks run at the gate and on every re-score: `recommendation.sanity {ok, problems, checked_at}`; any problem holds the case
+  with the reason "Sanity check failed: <message>". Codes: score_mismatch, tier_mismatch, unverified_points, points_without_evidence,
+  foreign_evidence, unsupported_all_clear, currency_compared, unlabelled_fallback, amount_mismatch, unsafe_auto_clear.
+  CLI `python -m probity.sanity [--workspace] [--days]` re-checks stored cases.

@@ -37,9 +37,8 @@ def app_config() -> dict:
     return {
         "env": st.env,
         "version": __version__,
-        "auth": {"mode": "clerk", "sign_up": True, "demo_login": False},
-        # demo/benchmark/simulated_inbox stay false until the web app stops reading them, then they are removed.
-        "features": {"landing_page": st.show_landing_page, "demo": False, "benchmark": False, "simulated_inbox": False},
+        "auth": {"mode": "clerk", "sign_up": True},
+        "features": {"landing_page": st.show_landing_page},
         "integrations": {
             "ai": status["ai"],
             "web_search": status["web_search"],
@@ -51,7 +50,9 @@ def app_config() -> dict:
             "antivirus": status["antivirus"],
             "background_jobs": status["background_jobs"],
         },
-        "limits": {"max_upload_mb": 15, "max_import_mb": 5},
+        "limits": {"max_upload_mb": st.max_upload_mb, "max_import_mb": 5, "workspace_daily_cases": st.workspace_daily_case_limit,
+                   "case_tokens": st.case_token_limit, "workspace_daily_tokens": st.workspace_daily_token_limit,
+                   "case_web_searches": st.case_web_search_limit},
     }
 
 
@@ -64,8 +65,10 @@ def onboarding(user: User = Depends(current_user), s: Session = Depends(db)) -> 
     vendors = count(select(func.count()).select_from(Vendor).where(Vendor.workspace_id == ws, Vendor.archived.is_(False)))
     verified_accts = count(select(func.count()).select_from(VendorBankAccount).where(VendorBankAccount.workspace_id == ws, VendorBankAccount.verified.is_(True)))
     verified_contacts = count(select(func.count()).select_from(VendorContact).where(VendorContact.workspace_id == ws, VendorContact.verified.is_(True)))
-    history = count(select(func.count()).select_from(HistoricalInvoice).where(HistoricalInvoice.workspace_id == ws))
-    pos = count(select(func.count()).select_from(PurchaseOrder).where(PurchaseOrder.workspace_id == ws))
+    history = count(select(func.count()).select_from(HistoricalInvoice).where(HistoricalInvoice.workspace_id == ws, HistoricalInvoice.approved_at.is_not(None)))
+    pos = count(select(func.count()).select_from(PurchaseOrder).where(PurchaseOrder.workspace_id == ws, PurchaseOrder.approved_at.is_not(None)))
+    pending = (count(select(func.count()).select_from(HistoricalInvoice).where(HistoricalInvoice.workspace_id == ws, HistoricalInvoice.approved_at.is_(None)))
+               + count(select(func.count()).select_from(PurchaseOrder).where(PurchaseOrder.workspace_id == ws, PurchaseOrder.approved_at.is_(None))))
     members = count(select(func.count()).select_from(User).where(User.workspace_id == ws, User.active.is_(True)))
     cases = count(select(func.count()).select_from(Case).where(Case.workspace_id == ws))
     policy_reviewed = bool(get_policy(s.get(Workspace, ws)).get("reviewed_at"))
@@ -76,10 +79,15 @@ def onboarding(user: User = Depends(current_user), s: Session = Depends(db)) -> 
          "action": {"type": "route", "to": "/vendors"}, "why": "Bank-change detection compares every invoice with accounts you have verified."},
         {"key": "verified_contacts", "title": "Add verified vendor contacts", "required": False, "done": verified_contacts > 0, "detail": f"{verified_contacts} verified contact(s)",
          "action": {"type": "route", "to": "/vendors"}, "why": "Verification emails go only to contacts you trust — never to the address printed on an invoice."},
-        {"key": "history", "title": "Import past invoices", "required": True, "done": history >= 10, "detail": f"{history} historical invoice(s); 10+ recommended",
+        {"key": "history", "title": "Import past invoices", "required": True, "done": history >= 10,
+         "detail": f"{history} approved past invoice(s); 10+ recommended" + (f" · {pending} record(s) waiting for approval" if pending else ""),
          "action": {"type": "import", "kind": "invoices"}, "why": "Price anomalies and duplicates are judged against your own payment history."},
         {"key": "purchase_orders", "title": "Import purchase orders", "required": False, "done": pos > 0, "detail": f"{pos} PO(s)",
          "action": {"type": "import", "kind": "purchase_orders"}, "why": "Enables quantity-vs-PO and missing-PO checks."},
+        {"key": "approve_records", "title": "Approve past invoices and POs", "required": False, "done": pending == 0,
+         "detail": f"{pending} record(s) waiting" if pending else "nothing waiting",
+         "action": {"type": "route", "to": "/vendors?pending=1"},
+         "why": "Records entered by an accountant count in comparisons only after an approver accepts them."},
         {"key": "team", "title": "Invite your approver", "required": False, "done": members > 1, "detail": f"{members} member(s)",
          "action": {"type": "route", "to": "/settings/team"}, "why": "Decisions on held invoices need someone with the approver role."},
         {"key": "policy", "title": "Review risk policy", "required": False, "done": policy_reviewed, "detail": "auto-clear limit, research threshold, MFA",

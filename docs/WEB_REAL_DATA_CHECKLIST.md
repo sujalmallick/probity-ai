@@ -67,7 +67,7 @@ IMPLEMENTATION (backend) does not edit `apps/web`. Branch: `real-data` (local; c
 - Email send (`POST …/drafts/{id}/send`) may return 400 "Email isn't configured…" or "Blocked: <addr> isn't on EMAIL_ALLOWLIST…".
   Show the message as-is.
 
-**410 → delete protocol:** the removed endpoints keep answering 410 only until the UI stops calling them. When your changes stop
+**410 → delete protocol (done 2026-10-04: routes and transitional keys deleted):** the removed endpoints keep answering 410 only until the UI stops calling them. When your changes stop
 calling them, message IMPLEMENTATION with the list; IMPLEMENTATION then deletes the routes and the transitional always-false config
 keys, and you re-run the done-check. Never call a removed endpoint from new code.
 

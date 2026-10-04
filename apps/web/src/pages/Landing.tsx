@@ -210,7 +210,7 @@ function Hero({ signInTo }: { signInTo: string }) {
         <div className="absolute inset-0 z-10 flex items-center justify-center">
           <motion.img
             src="/landing/hero-dashboard.webp"
-            alt="The Probity dashboard: cases that need a decision, key numbers, the case queue and the risk mix"
+            alt="Preview of the Probity dashboard layout: key numbers, cases that need a decision, the case queue and the risk mix"
             width={2048}
             height={1280}
             style={{ y: dashY, mixBlendMode: "luminosity" }}
@@ -316,8 +316,7 @@ const FOOTER_COLUMNS = [
     title: "Project",
     links: [
       { label: "Source code", href: REPO_URL },
-      { label: "Benchmark", href: `${REPO_URL}/tree/main/benchmark` },
-      { label: "Run it locally", href: `${REPO_URL}#quick-start-offline-no-api-keys` },
+      { label: "README", href: `${REPO_URL}#readme` },
     ],
   },
 ];
@@ -344,7 +343,7 @@ function Footer({ signInTo }: { signInTo: string }) {
             <h2 className="max-w-xl text-4xl leading-tight font-medium tracking-[-1.5px] md:text-5xl">
               Put evidence before <span className="font-serif font-normal italic">every</span> payment.
             </h2>
-            <p className="mt-3 text-base text-muted-foreground">Open source. Runs fully offline with demo data.</p>
+            <p className="mt-3 text-base text-muted-foreground">Open source. Every payment decision stays with a person.</p>
           </div>
           <div className="flex flex-wrap items-center gap-3">
             <Button asChild size="pill">

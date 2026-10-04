@@ -45,3 +45,12 @@ def get(ref: str) -> bytes:
         return _s3().get_object(Bucket=bucket, Key=key)["Body"].read()
     path = ref.removeprefix("local:")
     return Path(path).read_bytes()
+
+
+def delete(ref: str) -> None:
+    """Remove a stored object (used by the integration check's round trip)."""
+    if ref.startswith("s3://"):
+        bucket, key = ref[5:].split("/", 1)
+        _s3().delete_object(Bucket=bucket, Key=key)
+        return
+    Path(ref.removeprefix("local:")).unlink(missing_ok=True)

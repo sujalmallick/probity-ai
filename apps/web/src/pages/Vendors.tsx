@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
-  Archive, ArchiveRestore, ArrowLeft, Building2, CircleDashed, CreditCard, FileUp, Globe, History, Mail, Pencil, Plus, Search, ShieldCheck, Trash2,
+  Archive, ArchiveRestore, ArrowLeft, Building2, CircleDashed, CreditCard, FileUp, Globe, History, Landmark, Mail, Pencil, Plus, Search, ShieldCheck, Trash2,
 } from "lucide-react";
 import { api, can, del, patch, post, type Role } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { inr, isoDate, relTime } from "../lib/format";
 import { RelGraph } from "../components/RelGraph";
-import { Modal, Skeleton, Spinner, TierChip } from "../components/ui";
+import { CouldNotVerify, Modal, Skeleton, Spinner, TierChip } from "../components/ui";
 
 type Any = Record<string, any>;
 type Verification = { by?: { id: string; name: string } | null; at?: string | null; method?: string | null; note?: string | null };
@@ -301,6 +301,8 @@ export function VendorDetail() {
 
       {actionErr && <div role="alert" className="rounded-lg bg-high-soft p-3 text-sm text-high">{actionErr}</div>}
 
+      <GstSection vendor={v} canEdit={canEdit} onChanged={load} />
+
       <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
         {(["bank", "domain", "contact"] as Kind[]).map((k) => (
           <ItemSection
@@ -540,3 +542,122 @@ function RemoveModal({ kind, item, vendorId, onClose, onDone }: { kind: Kind; it
 }
 
 
+
+// ---------------------------------------------------------------- GST registration
+
+const GST_STATUSES = ["Active", "Cancelled", "Suspended"] as const;
+
+/** No GST registry provider is connected, so the registry status is always "could not verify". A person may record what they
+ *  saw on the GST portal; that entry is labelled as manual and is never shown as verified. */
+function GstSection({ vendor, canEdit, onChanged }: { vendor: Any; canEdit: boolean; onChanged: () => void }) {
+  const gst = vendor.gst ?? {};
+  const m = vendor.gst_manual as Any | null;
+  const [editing, setEditing] = useState(false);
+  const [legalName, setLegalName] = useState("");
+  const [status, setStatus] = useState<string>("Active");
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const noGstin = !vendor.gstin;
+  const blockedWhy = !canEdit ? "Requires accountant role" : noGstin ? "Add the vendor's GSTIN first" : "";
+
+  const open = () => {
+    setLegalName(m?.legal_name ?? "");
+    setStatus(m?.status ?? "Active");
+    setNote(m?.note ?? "");
+    setErr(null);
+    setEditing(true);
+  };
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setErr(null);
+    try {
+      await api(`/vendors/${vendor.id}/gst-manual`, { method: "PUT", body: JSON.stringify({ legal_name: legalName.trim() || undefined, status, note: note.trim() || undefined }) });
+      setEditing(false);
+      onChanged();
+    } catch (e: any) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const clear = async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      await del(`/vendors/${vendor.id}/gst-manual`);
+      onChanged();
+    } catch (e: any) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="card p-5" aria-labelledby="gst-title">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 id="gst-title" className="flex items-center gap-2 text-base font-semibold"><Landmark size={16} aria-hidden />GST registration</h2>
+          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+            <span className="font-mono">{vendor.gstin ?? "No GSTIN"}</span>
+            {gst.gstin_format === "valid" && <span className="text-xs text-muted">Format and checksum OK</span>}
+            {gst.gstin_format === "invalid" && <span className="text-xs font-medium text-high">Format or checksum is invalid</span>}
+          </div>
+          <div className="mt-1.5 text-sm">
+            <span className="text-muted">Registry status: </span><CouldNotVerify reason={gst.registry_reason} />
+          </div>
+        </div>
+        {!editing && (
+          <button className="btn !py-1.5 text-sm" disabled={!!blockedWhy} title={blockedWhy} onClick={open}>
+            <Pencil size={14} aria-hidden />{m ? "Update manual entry" : "Enter manually"}
+          </button>
+        )}
+      </div>
+
+      {m && !editing && (
+        <div className="mt-4 rounded-xl border border-dashed border-line bg-surface-2 px-4 py-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="text-sm">
+              <span className="font-medium">{m.legal_name ?? "No legal name entered"}</span>
+              <span className="text-muted"> · {m.status}</span>
+            </div>
+            <button className="text-xs text-muted hover:text-high hover:underline disabled:cursor-not-allowed disabled:opacity-45" disabled={!canEdit || busy} title={canEdit ? "" : "Requires accountant role"} onClick={clear}>Remove</button>
+          </div>
+          <div className="mt-1 text-xs text-muted">{m.label}</div>
+          {m.note && <div className="mt-1 text-xs text-muted italic">“{m.note}”</div>}
+          {m.stale && <div className="mt-1.5 text-xs font-medium text-medium">Entered for a different GSTIN ({m.gstin}). Update it for the current GSTIN.</div>}
+        </div>
+      )}
+
+      {editing && (
+        <form onSubmit={save} className="mt-4 flex flex-col gap-3 rounded-xl border border-line p-4" noValidate>
+          <p className="text-xs text-muted">Record what you saw on the official GST portal. It will be shown as a manual entry with your name, not as verified.</p>
+          <div className="grid gap-3 sm:grid-cols-[1fr_180px]">
+            <div className="flex flex-col gap-1">
+              <label htmlFor="gst-name" className="text-sm font-medium">Legal name</label>
+              <input id="gst-name" className="input" value={legalName} onChange={(e) => setLegalName(e.target.value)} autoFocus />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label htmlFor="gst-status" className="text-sm font-medium">Status</label>
+              <select id="gst-status" className="input" value={status} onChange={(e) => setStatus(e.target.value)}>
+                {GST_STATUSES.map((x) => <option key={x}>{x}</option>)}
+              </select>
+            </div>
+          </div>
+          <div className="flex flex-col gap-1">
+            <label htmlFor="gst-note" className="text-sm font-medium">Note <span className="font-normal text-muted">(optional)</span></label>
+            <input id="gst-note" className="input" value={note} onChange={(e) => setNote(e.target.value)} placeholder="Where and when you checked" />
+          </div>
+          {err && <p role="alert" className="text-sm text-high">{err}</p>}
+          <div className="flex justify-end gap-2">
+            <button type="button" className="btn" onClick={() => setEditing(false)}>Cancel</button>
+            <button type="submit" className="btn btn-primary" disabled={busy}>{busy && <Spinner />}Save manual entry</button>
+          </div>
+        </form>
+      )}
+      {err && !editing && <p role="alert" className="mt-2 text-sm text-high">{err}</p>}
+    </section>
+  );
+}

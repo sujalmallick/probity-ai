@@ -28,12 +28,12 @@ export default function Team() {
   };
   useEffect(load, [owner]);
 
-  const run = async (fn: () => Promise<unknown>, ok: string) => {
+  const run = async <T,>(fn: () => Promise<T>, ok: string | ((r: T) => string)) => {
     setBusy(true);
     setMsg(null);
     try {
-      await fn();
-      setMsg({ ok: true, text: ok });
+      const r = await fn();
+      setMsg({ ok: true, text: typeof ok === "function" ? ok(r) : ok });
       load();
     } catch (e: any) {
       setMsg({ ok: false, text: e.message });
@@ -51,7 +51,7 @@ export default function Team() {
       {msg && <div className={`rounded-lg p-3 text-sm ${msg.ok ? "bg-low-soft text-low" : "bg-high-soft text-high"}`}>{msg.text}</div>}
 
       {owner && (
-        <form className="card flex flex-col gap-3 p-4 md:flex-row md:items-end" onSubmit={(e) => { e.preventDefault(); run(() => post("/workspace/invitations", { email, role }).then(() => setEmail("")), `Invitation created for ${email}. They join this workspace when they sign in with that email.`); }}>
+        <form className="card flex flex-col gap-3 p-4 md:flex-row md:items-end" onSubmit={(e) => { e.preventDefault(); const invited = email; run(() => post<{ email_sent?: boolean; email_note?: string }>("/workspace/invitations", { email: invited, role }).then((r) => { setEmail(""); return r; }), (r) => r?.email_sent ? `Invitation emailed to ${invited}. They join this workspace when they sign in with that email.` : `Invitation created for ${invited}, but no email was sent${r?.email_note ? `: ${r.email_note}` : ""}. Ask them to sign up with that email.`); }}>
           <label className="flex-1">
             <span className="label">Invite by email</span>
             <input className="input mt-1" type="email" required placeholder="colleague@company.com" value={email} onChange={(e) => setEmail(e.target.value)} />

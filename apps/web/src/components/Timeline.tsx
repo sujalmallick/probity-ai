@@ -1,5 +1,5 @@
 import { Check, CircleSlash, Clock, X } from "lucide-react";
-import { Spinner } from "./ui";
+import { CouldNotVerify, Spinner } from "./ui";
 
 export interface AgentEvent {
   seq: number;
@@ -27,7 +27,7 @@ type State = "queued" | "running" | "done" | "failed" | "skipped";
 export function agentStates(events: AgentEvent[]) {
   const st: Record<string, { state: State; message: string }> = {};
   for (const e of events) {
-    if (!e.agent) continue;
+    if (!e.agent || e.type === "check.could_not_verify") continue;
     const cur = st[e.agent] ?? { state: "queued", message: "" };
     if (e.type === "agent.started" || e.type === "agent.progress") st[e.agent] = { state: "running", message: e.message };
     else if (e.type === "agent.completed") st[e.agent] = { state: "done", message: e.message };
@@ -38,8 +38,21 @@ export function agentStates(events: AgentEvent[]) {
   return st;
 }
 
+/** Checks an agent could not verify (a tool or data source failed), keyed by agent, deduplicated by check. */
+export function unverifiedByAgent(events: AgentEvent[]) {
+  const out: Record<string, { check: string; reason: string }[]> = {};
+  for (const e of events) {
+    if (e.type !== "check.could_not_verify") continue;
+    const check = e.data?.check ?? "";
+    const list = (out[e.agent ?? "case"] ??= []).filter((x) => x.check !== check || !check);
+    out[e.agent ?? "case"] = [...list, { check, reason: e.data?.reason ?? e.message }];
+  }
+  return out;
+}
+
 export function Timeline({ events, running }: { events: AgentEvent[]; running: boolean }) {
   const st = agentStates(events);
+  const cnv = unverifiedByAgent(events);
   return (
     <ol className="flex flex-col gap-0.5" aria-live="polite">
       {STEPS.map((s) => {
@@ -58,6 +71,9 @@ export function Timeline({ events, running }: { events: AgentEvent[]; running: b
               {cur.message && (cur.state !== "done" || s.agent !== "document") && (
                 <div className="truncate text-xs text-muted" title={cur.message}>{cur.message}</div>
               )}
+              {(cnv[s.agent] ?? []).map((x) => (
+                <CouldNotVerify key={x.check + x.reason} className="mt-0.5 block" reason={`${x.check ? x.check.replace(/_/g, " ") + " — " : ""}${x.reason}`} />
+              ))}
             </div>
           </li>
         );

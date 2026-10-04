@@ -1,17 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
-  AlertTriangle, ArrowLeft, ArrowRight, Braces, Brain, Building2, CheckCircle2, ChevronDown, ChevronRight, ClipboardList, Download, FileText, Globe, HelpCircle,
+  AlertTriangle, ArrowLeft, ArrowRight, BarChart3, Braces, Brain, Building2, CheckCircle2, ChevronDown, ChevronRight, ClipboardList, Download, FileText, Globe, HelpCircle,
   History, Landmark, Mail, MailCheck, MessageSquare, MoreHorizontal, PhoneCall, Search, Send, ShieldAlert, ShieldCheck, ThumbsDown, ThumbsUp, UserCheck, Workflow, XCircle,
 } from "lucide-react";
 import { api, can, fetchBlob, post, streamEvents, type Role } from "../lib/api";
 import { useAuth } from "../lib/auth";
-import { useAppConfig } from "../lib/config";
 import { evValue, inr, isoDate, relTime, RUNNING, tierColor } from "../lib/format";
 import { Gauge } from "../components/Gauge";
 import { RelGraph } from "../components/RelGraph";
 import { ActivityLog, Timeline, type AgentEvent } from "../components/Timeline";
-import { Drawer, MenuButton, Modal, Skeleton, Spinner, StatusChip, VerifyBadge } from "../components/ui";
+import { CouldNotVerify, Drawer, FallbackBadge, MenuButton, Modal, Skeleton, Spinner, StatusChip, TierChip, VerifyBadge } from "../components/ui";
 
 type Any = Record<string, any>;
 
@@ -34,10 +33,19 @@ const SRC_LABEL: Record<string, string> = {
   web: "Web", domain: "Domain registry", vendor_reply: "Vendor reply", approver: "Approver",
 };
 
+// Server-side rules (services.REASON_MIN_ALNUM): a meaningful reason has at least this many letters or digits.
+const REASON_MIN = 10;
+const alnum = (t: string) => (t.match(/[\p{L}\p{N}]/gu) ?? []).length;
+const TIERS = ["LOW", "MEDIUM", "HIGH", "CRITICAL"];
+/** Highest tier the case ever reached. Approval and rejection rules use it, not the current tier. */
+const peakTier = (c: Any): string =>
+  [c.risk?.tier, ...(c.score_history ?? []).map((h: Any) => h.tier)].filter((t) => TIERS.includes(t)).sort((a, b) => TIERS.indexOf(b) - TIERS.indexOf(a))[0] ?? "LOW";
+/** "not checked — AI unavailable (…)" notes from the verifier, shown on the claim itself. */
+const aiNote = (claim?: Any): string | null => (typeof claim?.verifier_notes === "string" && claim.verifier_notes.startsWith("not checked — AI unavailable") ? claim.verifier_notes : null);
+
 export default function CaseView() {
   const { id = "" } = useParams();
   const { user } = useAuth();
-  const cfg = useAppConfig();
   const nav = useNavigate();
   const [c, setC] = useState<Any | null>(null);
   const [events, setEvents] = useState<AgentEvent[]>([]);
@@ -49,6 +57,7 @@ export default function CaseView() {
   const [pipeline, setPipeline] = useState(false);
   const [showQuiet, setShowQuiet] = useState(false);
   const [fullOnPhone, setFullOnPhone] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
   const refetchTimer = useRef<number | undefined>(undefined);
 
   const load = useCallback(async () => {
@@ -108,6 +117,13 @@ export default function CaseView() {
   const RecIcon = risk.tier === "LOW" || c.status === "AUTO_CLEARED" ? ShieldCheck : risk.tier === "MEDIUM" ? AlertTriangle : ShieldAlert;
   const decided = ["APPROVED", "REJECTED", "AUTO_CLEARED"].includes(c.status);
   const latestReply = (c.messages ?? []).filter((m: Any) => m.direction === "in").slice(-1)[0];
+  const peak = peakTier(c);
+  const reasonTiers = ["HIGH", "CRITICAL"];
+  const unverifiedChecks = Object.entries((c.checks ?? {}) as Record<string, Any>).filter(([, v]) => v?.status === "could_not_verify");
+  // An approval that still needs someone else: the server's decision event says why.
+  const waitingMsg = awaiting && [...events].reverse().find((e) => e.type === "decision.recorded")?.status === "waiting"
+    ? [...events].reverse().find((e) => e.type === "decision.recorded")!.message
+    : null;
 
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-5 pb-24 lg:pb-0">
@@ -141,6 +157,13 @@ export default function CaseView() {
         </div>
       </header>
 
+      {(notice || waitingMsg) && (
+        <div role="status" className="fade-in flex items-start gap-3 rounded-xl border border-line bg-surface px-4 py-3 text-sm">
+          <ThumbsUp size={16} className="mt-0.5 shrink-0" aria-hidden />
+          <span>{waitingMsg ?? notice}</span>
+        </div>
+      )}
+
       {memoryClaims.map((m) => (
         <div key={m.id} className="fade-in flex items-start gap-3 rounded-xl border border-line bg-surface px-4 py-3 text-sm">
           <Brain size={17} className="mt-0.5 shrink-0" aria-hidden />
@@ -165,8 +188,16 @@ export default function CaseView() {
                 <span className="shrink-0 text-xs font-medium">View pipeline</span>
               </button>
             )}
+            {!running && unverifiedChecks.length > 0 && (
+              <div className="mb-3 rounded-lg border border-dashed border-medium/50 bg-medium-soft/40 px-3 py-2.5">
+                <div className="mb-1 text-xs font-semibold text-medium">{unverifiedChecks.length === 1 ? "1 check" : `${unverifiedChecks.length} checks`} could not be verified</div>
+                <ul className="flex flex-col gap-1">
+                  {unverifiedChecks.map(([k, v]) => <li key={k} className="text-xs"><span className="font-medium">{k.replace(/_/g, " ")}</span> · <CouldNotVerify reason={v.reason} /></li>)}
+                </ul>
+              </div>
+            )}
             {!running && anomalies.length === 0 && (
-              <div className="flex items-center gap-2 text-sm text-muted"><CheckCircle2 size={16} className="text-low" aria-hidden />Every check that ran came back clean.</div>
+              <div className="flex items-center gap-2 text-sm text-muted"><CheckCircle2 size={16} className="text-low" aria-hidden />{unverifiedChecks.length ? "Every check that ran came back clean." : "Every check came back clean."}</div>
             )}
             <div className="flex flex-col gap-2">
               {anomalies.map((f) => <Finding key={f.signal} f={f} claim={claimById[f.claim_id]} evById={evById} />)}
@@ -183,7 +214,10 @@ export default function CaseView() {
                   <ul className="mt-2 flex flex-col gap-1.5 pl-5">
                     {quiet.map((x: Any) => (
                       <li key={x.id} className="flex items-start justify-between gap-3 text-sm">
-                        <span className="text-muted">{x.statement}</span>
+                        <span className="text-muted">
+                          {x.statement}
+                          {aiNote(x) && <span className="mt-0.5 block text-xs text-medium">{aiNote(x)}</span>}
+                        </span>
                         {x.status !== "verified" && <VerifyBadge status={x.status} />}
                       </li>
                     ))}
@@ -212,7 +246,15 @@ export default function CaseView() {
                 </ul>
               )}
               <ul className="flex flex-col gap-2">
-                {replyClaims.map((r) => <li key={r.id} className="flex items-start justify-between gap-3 text-sm"><span>{r.statement.split(" (unverified")[0]}</span><VerifyBadge status={r.status} /></li>)}
+                {replyClaims.map((r) => (
+                  <li key={r.id} className="flex items-start justify-between gap-3 text-sm">
+                    <span>
+                      {r.statement.split(" (unverified")[0]} <FallbackBadge fb={r.data?.fallback} className="ml-1" />
+                      {aiNote(r) && <span className="mt-0.5 block text-xs text-medium">{aiNote(r)}</span>}
+                    </span>
+                    <VerifyBadge status={r.status} />
+                  </li>
+                ))}
               </ul>
               {pendingReply.length > 0 && (
                 <div className="mt-4 flex flex-wrap items-center gap-3">
@@ -241,6 +283,12 @@ export default function CaseView() {
             {!running && (
               <div className="mt-2 flex items-center gap-1.5 text-base font-semibold" style={{ color: risk.tier ? tierColor[risk.tier] : undefined }} title={gate?.reasons?.join("; ")}>
                 <RecIcon size={17} aria-hidden />{rec}
+              </div>
+            )}
+            {!running && c.summary && (
+              <div className="mt-3 w-full border-t border-line pt-3 text-left">
+                <p className="line-clamp-4 text-xs leading-5 text-muted" title={c.summary}>{c.summary}</p>
+                {c.recommendation?.summary_fallback && <FallbackBadge fb={c.recommendation.summary_fallback} className="mt-1.5" />}
               </div>
             )}
             {gate?.dual_approval && awaiting && (
@@ -273,15 +321,7 @@ export default function CaseView() {
             <section className="card fade-in flex flex-col gap-2 p-4">
               <div className="flex items-center gap-2 text-sm font-semibold"><MailCheck size={16} aria-hidden />Email sent</div>
               <div className="text-xs text-muted">To {sent.to_email} · follow up {isoDate(sent.followup_at)}</div>
-              {cfg.features.simulated_inbox ? (
-                <>
-                  <div className="label mt-2">Simulated inbox</div>
-                  <button className="btn" disabled={!can(role, "accountant")} title={!can(role, "accountant") ? "Requires accountant role" : ""} onClick={() => post(`/demo/vendor-reply/${id}?kind=legit`).then(load)}>Deliver vendor reply</button>
-                  <button className="btn !text-xs text-muted" disabled={!can(role, "accountant")} onClick={() => post(`/demo/vendor-reply/${id}?kind=spoof`).then(load)}>Deliver spoofed reply</button>
-                </>
-              ) : (
-                <div className="text-xs text-muted">Waiting for the vendor's reply.</div>
-              )}
+              <RecordReply caseId={id} sent={sent} canPost={can(role, "accountant")} onDone={load} />
             </section>
           )}
         </aside>
@@ -318,14 +358,23 @@ export default function CaseView() {
         </Drawer>
       )}
 
-      {modal === "approve" && <DecisionModal title="Approve payment" kind="APPROVE" needReason={["HIGH", "CRITICAL"].includes(risk.tier)} id={id} onDone={() => { setModal(null); load(); }} onClose={() => setModal(null)} />}
-      {modal === "reject" && <DecisionModal title="Reject invoice" kind="REJECT" needReason id={id} onDone={() => { setModal(null); load(); }} onClose={() => setModal(null)} />}
+      {modal === "approve" && (
+        <DecisionModal
+          title="Approve payment" kind="APPROVE" needReason={reasonTiers.includes(peak)} peak={peak} id={id} onClose={() => setModal(null)}
+          onDone={(status) => {
+            setModal(null);
+            setNotice(status === "AWAITING_HUMAN" ? "Your approval is recorded. This case still needs another approver before payment." : null);
+            load();
+          }}
+        />
+      )}
+      {modal === "reject" && <DecisionModal title="Reject invoice" kind="REJECT" needReason peak={peak} id={id} onDone={() => { setModal(null); setNotice(null); load(); }} onClose={() => setModal(null)} />}
       {modal === "investigate" && <DecisionModal title="Investigate further" kind="INVESTIGATE_FURTHER" needReason={false} id={id} onDone={() => { setModal(null); setEvents([]); load(); }} onClose={() => setModal(null)} />}
       {modal === "verify" && <DecisionModal title="Request vendor verification" kind="REQUEST_VERIFICATION" needReason={false} id={id} onDone={async () => { await load(); setModal("draft"); }} onClose={() => setModal(null)}
         hint="Probity drafts a neutral email to the vendor's verified contact. Nothing is sent until you approve it." />}
       {modal === "draft" && draft && <DraftModal draft={draft} id={id} canSend={isApprover} onClose={() => setModal(null)} onSent={() => { setModal(null); load(); }} />}
-      {modal === "oob" && <OOBModal claims={pendingReply} id={id} onClose={() => setModal(null)} onDone={() => { setModal(null); load(); }} />}
-      {modal === "close" && <CloseModal id={id} onClose={() => setModal(null)} onDone={() => { setModal(null); load(); }} />}
+      {modal === "oob" && <OOBModal claims={pendingReply} id={id} bankLast4={c.invoice?.bank_account?.last4} onClose={() => setModal(null)} onDone={() => { setModal(null); load(); }} />}
+      {modal === "close" && <CloseModal id={id} rejected={c.status === "REJECTED"} onClose={() => setModal(null)} onDone={() => { setModal(null); load(); }} />}
       {draft && modal === null && awaiting && (
         <button className="btn btn-primary fixed right-5 bottom-24 z-30 shadow-lg lg:bottom-5" onClick={() => setModal("draft")}><Mail size={15} aria-hidden />Review draft email</button>
       )}
@@ -435,6 +484,7 @@ function Finding({ f, claim, evById }: { f: Any; claim?: Any; evById: Record<str
           <div className="flex flex-wrap items-center gap-2">
             <span className="font-semibold">{f.label}</span>
             <VerifyBadge status={claim?.status ?? (f.status === "counted" ? "verified" : "unverified")} />
+            {aiNote(claim) && <span className="text-[11px] font-medium text-medium" title={claim!.verifier_notes}>Not checked: AI unavailable</span>}
           </div>
           {(d.observed || d.baseline) && (
             <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-muted">
@@ -451,7 +501,7 @@ function Finding({ f, claim, evById }: { f: Any; claim?: Any; evById: Record<str
       {open && claim && (
         <div className="border-t border-line px-3 py-3">
           <div className="text-sm">{claim.statement}</div>
-          <div className="mt-1 text-xs text-muted">Verifier: {claim.verifier_notes}</div>
+          <div className={`mt-1 text-xs ${aiNote(claim) ? "font-medium text-medium" : "text-muted"}`}>Verifier: {claim.verifier_notes}</div>
           <div className="mt-2 flex flex-col gap-2">
             {claim.evidence_ids.map((eid: string) => evById[eid] && <EvidenceCard key={eid} e={evById[eid]} />)}
           </div>
@@ -512,7 +562,7 @@ function WhyPanel({ why }: { why: Any }) {
 }
 
 function Tabs({ tab, setTab, c, evidence, id }: { tab: string; setTab: (t: string) => void; c: Any; evidence: Any[]; id: string }) {
-  const tabs = [["evidence", `Evidence · ${evidence.length}`], ["document", "Invoice"], ["checks", "Checks"], ["graph", "Graph"], ["comms", "Messages"], ["audit", "Audit log"]];
+  const tabs = [["evidence", `Evidence · ${evidence.length}`], ["document", "Invoice"], ["checks", "Checks"], ["risk", "Invoice risk"], ["graph", "Graph"], ["comms", "Messages"], ["audit", "Audit log"]];
   return (
     <div className="card">
       <div className="flex gap-1 overflow-x-auto border-b border-line px-2" role="tablist" aria-label="Case details">
@@ -524,6 +574,7 @@ function Tabs({ tab, setTab, c, evidence, id }: { tab: string; setTab: (t: strin
         {tab === "evidence" && <div className="flex flex-col gap-2">{evidence.map((e) => <EvidenceCard key={e.id} e={e} />)}</div>}
         {tab === "document" && <DocumentTab c={c} />}
         {tab === "checks" && <ChecksTab c={c} />}
+        {tab === "risk" && <InvoiceRiskTab id={id} />}
         {tab === "graph" && <GraphTab vendorId={c.vendor_id} />}
         {tab === "comms" && <CommsTab c={c} />}
         {tab === "audit" && <AuditTab id={id} />}
@@ -541,16 +592,28 @@ function GraphTab({ vendorId }: { vendorId: string | null }) {
 
 function DocumentTab({ c }: { c: Any }) {
   const [url, setUrl] = useState<string | null>(null);
+  const [mime, setMime] = useState("");
+  const [docErr, setDocErr] = useState(false);
   useEffect(() => {
     let u: string | null = null;
-    if (c.document?.id) fetchBlob(`/api/v1/documents/${c.document.id}/file`).then((b) => { u = URL.createObjectURL(b); setUrl(u); }).catch(() => {});
+    if (c.document?.id) fetchBlob(`/api/v1/documents/${c.document.id}/file`).then((b) => { u = URL.createObjectURL(b); setMime(b.type); setUrl(u); }).catch(() => setDocErr(true));
     return () => { if (u) URL.revokeObjectURL(u); };
   }, [c.document?.id]);
   const fields = Object.entries((c.invoice ?? {}) as Record<string, Any>).filter(([k]) => k !== "line_items");
   return (
     <div className="grid gap-4 xl:grid-cols-2">
       <div className="min-h-[420px] overflow-hidden rounded-lg border border-line bg-surface-2">
-        {url ? <iframe title="Invoice document" src={url} className="h-[520px] w-full" /> : <div className="p-4 text-sm text-muted">Loading document…</div>}
+        {/* blob: URLs don't inherit the server's CSP sandbox, so the frame is sandboxed here. Only PDFs and images render inline. */}
+        {docErr ? <div className="p-4 text-sm text-high">Couldn't load the document.</div>
+          : !url ? <div className="p-4 text-sm text-muted">Loading document…</div>
+          : mime === "application/pdf" ? <iframe title="Invoice document" src={url} sandbox="" className="h-[520px] w-full" />
+          : mime.startsWith("image/") ? <img src={url} alt="Invoice document" className="max-h-[520px] w-full object-contain" />
+          : (
+            <div className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center text-sm text-muted">
+              <FileText size={22} aria-hidden />This file type isn't shown in the browser.
+              <a className="btn" href={url} download={c.document?.filename ?? "document"}><Download size={14} aria-hidden />Download {c.document?.filename ?? "file"}</a>
+            </div>
+          )}
       </div>
       <div className="flex flex-col gap-3">
         <div>
@@ -562,6 +625,7 @@ function DocumentTab({ c }: { c: Any }) {
                   <td className="py-1.5 pr-2 text-muted">{k.replace(/_/g, " ")}</td>
                   <td className="py-1.5 pr-2 font-medium break-all">
                     {typeof f.value === "number" && /total|subtotal|tax/.test(k) ? inr(f.value, true) : String(f.value ?? "—")}
+                    {f.fallback && <div className="mt-1"><FallbackBadge fb={f.fallback} /></div>}
                     {f.via === "human_correction" && (
                       <div className="text-xs font-normal text-medium">Corrected by a person · document said: {f.original ? String(f.original.raw ?? f.original.value ?? "—") : "(not found)"}</div>
                     )}
@@ -611,11 +675,18 @@ function ChecksTab({ c }: { c: Any }) {
         <div className="label mb-1">Checks (what ran, what didn't, why)</div>
         <ul className="flex flex-col gap-1 text-sm">
           {Object.entries((c.checks ?? {}) as Record<string, Any>).map(([k, v]: [string, Any]) => (
-            <li key={k} className="flex items-center justify-between gap-2">
-              <span>{k.replace(/_/g, " ")}</span>
-              <span className="text-xs" style={{ color: v.status === "fired" ? "var(--high)" : v.status === "failed" ? "var(--high)" : v.status === "skipped" ? "var(--medium)" : "var(--low)" }}>
-                {v.status}{v.reason ? ` · ${v.reason}` : ""}
-              </span>
+            <li key={k} className="flex flex-col gap-1 border-t border-line py-1.5 first:border-t-0">
+              <div className="flex items-start justify-between gap-2">
+                <span>{k.replace(/_/g, " ")}</span>
+                {v.status === "could_not_verify" ? (
+                  <CouldNotVerify reason={v.reason} className="max-w-[65%] text-right" />
+                ) : (
+                  <span className="text-right text-xs" style={{ color: v.status === "fired" || v.status === "failed" ? "var(--high)" : v.status === "skipped" ? "var(--muted)" : "var(--low)" }}>
+                    {v.status === "skipped" ? "not applicable" : v.status}{v.reason ? ` · ${v.reason}` : ""}
+                  </span>
+                )}
+              </div>
+              {v.fallback && <FallbackBadge fb={v.fallback} className="self-start" />}
             </li>
           ))}
         </ul>
@@ -655,29 +726,45 @@ function AuditTab({ id }: { id: string }) {
   );
 }
 
-function DecisionModal({ title, kind, needReason, id, onDone, onClose, hint }: { title: string; kind: string; needReason: boolean; id: string; onDone: () => void; onClose: () => void; hint?: string }) {
+function DecisionModal({ title, kind, needReason, peak, id, onDone, onClose, hint }: {
+  title: string; kind: string; needReason: boolean; peak?: string; id: string; onDone: (status?: string) => void; onClose: () => void; hint?: string;
+}) {
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const tooShort = needReason && alnum(reason) < REASON_MIN;
   const submit = async () => {
+    if (tooShort) return;
     setBusy(true);
+    setErr(null);
     try {
-      await post(`/cases/${id}/decision`, { decision: kind, reason });
-      onDone();
+      const r = await post<{ status: string }>(`/cases/${id}/decision`, { decision: kind, reason: reason.trim() });
+      onDone(r?.status);
     } catch (e: any) {
       setErr(e.message);
       setBusy(false);
     }
   };
+  const why = kind === "REJECT" ? "Say why the invoice is rejected." : peak && ["HIGH", "CRITICAL"].includes(peak) ? `This case reached ${peak}, so a written reason is required.` : "";
   return (
     <Modal title={title} onClose={onClose}>
       {hint && <p className="mb-3 text-sm text-muted">{hint}</p>}
       <label className="label" htmlFor="reason">Reason {needReason ? "(required)" : "(optional)"}</label>
-      <textarea id="reason" className="input mt-1 h-24" value={reason} onChange={(e) => setReason(e.target.value)} placeholder={kind === "APPROVE" ? "e.g. Bank change confirmed by phone with known contact" : ""} />
-      {err && <div className="mt-2 text-sm text-high">{err}</div>}
+      <textarea
+        id="reason" className="input mt-1 h-24 placeholder:text-muted/60" value={reason} onChange={(e) => setReason(e.target.value)}
+        placeholder={kind === "APPROVE" ? "e.g. The account change was confirmed by phone with a contact on file." : kind === "REJECT" ? "e.g. The vendor did not confirm the new account." : ""}
+        aria-describedby="reason-hint"
+      />
+      {needReason && (
+        <div id="reason-hint" className="mt-1 flex justify-between gap-2 text-xs text-muted">
+          <span>{why} At least {REASON_MIN} letters or digits. Saved to the audit log.</span>
+          <span className="shrink-0 tabular-nums">{Math.min(alnum(reason), REASON_MIN)}/{REASON_MIN}</span>
+        </div>
+      )}
+      {err && <div role="alert" className="mt-2 rounded-lg bg-high-soft p-2.5 text-sm text-high">{err}</div>}
       <div className="mt-4 flex justify-end gap-2">
         <button className="btn" onClick={onClose}>Cancel</button>
-        <button className="btn btn-primary" disabled={busy || (needReason && reason.trim().length < 5)} onClick={submit}>{busy && <Spinner />}Confirm</button>
+        <button className="btn btn-primary" disabled={busy || tooShort} title={tooShort ? `Write a reason with at least ${REASON_MIN} letters or digits.` : ""} onClick={submit}>{busy && <Spinner />}Confirm</button>
       </div>
     </Modal>
   );
@@ -709,6 +796,11 @@ function DraftModal({ draft, id, canSend, onClose, onSent }: { draft: Any; id: s
           ? <span className="inline-flex items-center gap-1 rounded bg-low-soft px-1.5 py-0.5 text-xs font-semibold text-low"><ShieldCheck size={12} />Verified vendor-master contact</span>
           : <span className="inline-flex items-center gap-1 rounded bg-high-soft px-1.5 py-0.5 text-xs font-semibold text-high"><ShieldAlert size={12} />From the invoice — may belong to the sender of a suspicious invoice</span>}
       </div>
+      {draft.fallback && (
+        <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg bg-surface-2 px-3 py-2 text-xs text-muted">
+          <FallbackBadge fb={draft.fallback} />The standard neutral template was used. Read it before sending.
+        </div>
+      )}
       <label className="label" htmlFor="subj">Subject</label>
       <input id="subj" className="input mb-3 mt-1" value={subject} onChange={(e) => setSubject(e.target.value)} />
       <label className="label" htmlFor="body">Body</label>
@@ -728,32 +820,35 @@ function DraftModal({ draft, id, canSend, onClose, onSent }: { draft: Any; id: s
 
 // Same minimum as the server (services.OOB_NOTE_MIN_CHARS).
 const OOB_NOTE_MIN = 20;
-const OOB_EXAMPLE = "Called R. Kulkarni on the number on file (+91 20 4000 1000); confirmed the new HDFC account and billing domain.";
 
-function OOBModal({ claims, id, onClose, onDone }: { claims: Any[]; id: string; onClose: () => void; onDone: () => void }) {
-  const cfg = useAppConfig();
+function OOBModal({ claims, id, bankLast4, onClose, onDone }: { claims: Any[]; id: string; bankLast4?: string; onClose: () => void; onDone: () => void }) {
   const [sel, setSel] = useState<string[]>(claims.map((c) => c.id));
   const [method, setMethod] = useState("phone_known_contact");
   const [knownChannel, setKnownChannel] = useState(false);
   const [note, setNote] = useState("");
+  const [digits, setDigits] = useState("");
   const [touched, setTouched] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const len = note.trim().length;
   const noteShort = len < OOB_NOTE_MIN;
+  // Confirming a bank statement verifies the account this invoice pays, so the approver types the digits they confirmed.
+  const needsDigits = claims.some((x) => sel.includes(x.id) && x.data?.kind === "bank");
   const blocker = !sel.length
     ? "Select at least one statement you verified."
     : !knownChannel
       ? "Confirm you used a channel already on file."
-      : noteShort
-        ? `Describe what you verified in at least ${OOB_NOTE_MIN} characters.`
-        : "";
+      : needsDigits && !/^\d{4}$/.test(digits)
+        ? "Enter the last 4 digits of the account the vendor confirmed."
+        : noteShort
+          ? `Describe what you verified in at least ${OOB_NOTE_MIN} characters.`
+          : "";
   const submit = async () => {
     if (blocker) return;
     setBusy(true);
     setErr(null);
     try {
-      await post(`/cases/${id}/out-of-band-confirmation`, { claim_ids: sel, method, note: note.trim(), known_channel: true });
+      await post(`/cases/${id}/out-of-band-confirmation`, { claim_ids: sel, method, note: note.trim(), known_channel: true, confirmed_account_last4: needsDigits ? digits : undefined });
       onDone();
     } catch (e: any) {
       setErr(e.message);
@@ -784,23 +879,24 @@ function OOBModal({ claims, id, onClose, onDone }: { claims: Any[]; id: string; 
         <div className="label mb-2">Before you confirm</div>
         <label className="flex items-start gap-2 text-sm">
           <input type="checkbox" className="mt-1" checked={knownChannel} onChange={(e) => setKnownChannel(e.target.checked)} />
-          <span>I used a phone number or channel <b>already on file</b>, not one from the invoice or the reply.</span>
+          <span>I used a phone number or email <b>already on file</b>, not one from the invoice or the reply.</span>
         </label>
       </div>
 
-      <div className="flex items-end justify-between gap-2">
-        <label className="label" htmlFor="note">What did you verify, and with whom?</label>
-        {cfg.features.demo && (
-          <button type="button" className="text-xs text-muted underline-offset-2 hover:text-ink hover:underline" onClick={() => { setNote(OOB_EXAMPLE); setTouched(true); }}>
-            Demo: fill example
-          </button>
-        )}
-      </div>
+      {needsDigits && (
+        <div className="mb-4">
+          <label className="label" htmlFor="oob-digits">Last 4 digits of the account the vendor confirmed</label>
+          <input id="oob-digits" className="input mt-1 w-32 tabular-nums" inputMode="numeric" maxLength={4} autoComplete="off" value={digits} onChange={(e) => setDigits(e.target.value.replace(/\D/g, ""))} />
+          <div className="mt-1 text-xs text-muted">This invoice pays the account ending {bankLast4 ? `XXXX${bankLast4}` : "(none)"}. Only that account can be confirmed; if the vendor named a different one, don't confirm.</div>
+        </div>
+      )}
+
+      <label className="label" htmlFor="note">What did you verify, and with whom?</label>
       <textarea
         id="note"
         className="input mt-1 h-24 placeholder:text-muted/60"
         value={note}
-        placeholder={`e.g. ${OOB_EXAMPLE}`}
+        placeholder="Who you contacted, which number or email on file you used, and what they confirmed."
         aria-invalid={touched && noteShort}
         aria-describedby="note-hint"
         onChange={(e) => setNote(e.target.value)}
@@ -823,17 +919,14 @@ function OOBModal({ claims, id, onClose, onDone }: { claims: Any[]; id: string; 
   );
 }
 
-const CLOSE_MIN = 10;
-const CLOSE_EXAMPLE = "Bank-account change verified out-of-band with the known contact on file.";
-
-function CloseModal({ id, onClose, onDone }: { id: string; onClose: () => void; onDone: () => void }) {
-  const cfg = useAppConfig();
-  const [outcome, setOutcome] = useState("CLEARED");
+function CloseModal({ id, rejected, onClose, onDone }: { id: string; rejected: boolean; onClose: () => void; onDone: () => void }) {
+  const [outcome, setOutcome] = useState(rejected ? "CONFIRMED_ISSUE" : "CLEARED");
   const [resolution, setResolution] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const short = resolution.trim().length < CLOSE_MIN;
+  const short = alnum(resolution) < REASON_MIN;
   const submit = async () => {
+    if (short) return;
     setBusy(true);
     setErr(null);
     try {
@@ -849,21 +942,121 @@ function CloseModal({ id, onClose, onDone }: { id: string; onClose: () => void; 
       <p className="mb-3 text-sm text-muted">Only human-confirmed outcomes become case memory. The next invoice from this vendor will reference it.</p>
       <label className="label" htmlFor="outcome">Outcome</label>
       <select id="outcome" className="input mb-3 mt-1" value={outcome} onChange={(e) => setOutcome(e.target.value)}>
-        <option value="CLEARED">Cleared — anomalies explained and verified</option>
+        {!rejected && <option value="CLEARED">Cleared — anomalies explained and verified</option>}
         <option value="CONFIRMED_ISSUE">Confirmed issue — weight on future invoices</option>
         <option value="INCONCLUSIVE">Inconclusive</option>
       </select>
-      <div className="flex items-end justify-between gap-2">
-        <label className="label" htmlFor="res">Resolution</label>
-        {cfg.features.demo && <button type="button" className="text-xs text-muted underline-offset-2 hover:text-ink hover:underline" onClick={() => setResolution(CLOSE_EXAMPLE)}>Demo: fill example</button>}
+      {rejected && <p className="-mt-1 mb-3 text-xs text-muted">A rejected invoice can't be closed as cleared.</p>}
+      <label className="label" htmlFor="res">Resolution (required)</label>
+      <textarea id="res" className="input mt-1 h-20 placeholder:text-muted/60" value={resolution} placeholder="What was established, and how." aria-describedby="res-hint" onChange={(e) => setResolution(e.target.value)} />
+      <div id="res-hint" className="mt-1 flex justify-between gap-2 text-xs text-muted">
+        <span>At least {REASON_MIN} letters or digits. Saved to case memory and the audit log.</span>
+        <span className="shrink-0 tabular-nums">{Math.min(alnum(resolution), REASON_MIN)}/{REASON_MIN}</span>
       </div>
-      <textarea id="res" className="input mt-1 h-20 placeholder:text-muted/60" value={resolution} placeholder={`e.g. ${CLOSE_EXAMPLE}`} aria-describedby="res-hint" onChange={(e) => setResolution(e.target.value)} />
-      <div id="res-hint" className="mt-1 text-xs text-muted">What was established, and how. At least {CLOSE_MIN} characters.</div>
       {err && <div role="alert" className="mt-2 rounded-lg bg-high-soft p-2.5 text-sm text-high">{err}</div>}
       <div className="mt-4 flex justify-end gap-2">
         <button className="btn" onClick={onClose}>Cancel</button>
-        <button className="btn btn-primary" disabled={busy || short} title={short ? `Write a resolution of at least ${CLOSE_MIN} characters.` : ""} onClick={submit}>{busy && <Spinner />}Close & save to memory</button>
+        <button className="btn btn-primary" disabled={busy || short} title={short ? `Write a resolution with at least ${REASON_MIN} letters or digits.` : ""} onClick={submit}>{busy && <Spinner />}Close & save to memory</button>
       </div>
     </Modal>
+  );
+}
+
+/** Record a vendor reply that arrived outside Probity (e.g. in your own inbox). Its statements stay unverified. */
+function RecordReply({ caseId, sent, canPost, onDone }: { caseId: string; sent: Any; canPost: boolean; onDone: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [from, setFrom] = useState(sent?.to_email ?? "");
+  const [subject, setSubject] = useState(sent?.subject ? `Re: ${sent.subject}` : "");
+  const [body, setBody] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  if (!open) {
+    return (
+      <>
+        <div className="text-xs text-muted">Waiting for the vendor's reply.</div>
+        <button className="btn mt-1" disabled={!canPost} title={canPost ? "" : "Requires accountant role"} onClick={() => setOpen(true)}>
+          <Mail size={15} aria-hidden />Record vendor reply
+        </button>
+      </>
+    );
+  }
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!/^\S+@\S+\.\S+$/.test(from.trim())) return setErr("Enter the email address the reply came from.");
+    if (!body.trim()) return setErr("Paste the reply text.");
+    setBusy(true);
+    setErr(null);
+    try {
+      await post(`/cases/${caseId}/vendor-reply`, { from_email: from.trim(), subject: subject.trim(), body: body.trim() });
+      setOpen(false);
+      setBody("");
+      onDone();
+    } catch (e: any) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <form onSubmit={submit} className="mt-1 flex flex-col gap-2" noValidate>
+      <div className="label mt-1">Record vendor reply</div>
+      <label className="sr-only" htmlFor="rr-from">From</label>
+      <input id="rr-from" type="email" className="input" placeholder="From (email address)" value={from} onChange={(e) => setFrom(e.target.value)} autoFocus />
+      <label className="sr-only" htmlFor="rr-subj">Subject</label>
+      <input id="rr-subj" className="input" placeholder="Subject" value={subject} onChange={(e) => setSubject(e.target.value)} />
+      <label className="sr-only" htmlFor="rr-body">Reply text</label>
+      <textarea id="rr-body" className="input h-28" placeholder="Paste the reply text" value={body} onChange={(e) => setBody(e.target.value)} />
+      {err && <p role="alert" className="text-xs text-high">{err}</p>}
+      <p className="text-[11px] text-muted">The reply's statements stay unverified. Only an approver's out-of-band confirmation can change the score.</p>
+      <div className="flex justify-end gap-2">
+        <button type="button" className="btn !py-1 text-xs" onClick={() => { setOpen(false); setErr(null); }}>Cancel</button>
+        <button type="submit" className="btn btn-primary !py-1 text-xs" disabled={busy}>{busy && <Spinner size={12} />}Record reply</button>
+      </div>
+    </form>
+  );
+}
+
+/** Policy-based second view of the invoice. It never changes the case score. */
+function InvoiceRiskTab({ id }: { id: string }) {
+  const [r, setR] = useState<Any | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const run = () => {
+    setLoading(true);
+    setErr(null);
+    api(`/cases/${id}/invoice-risk?narrate=true`).then(setR).catch((e) => setErr(e.message)).finally(() => setLoading(false));
+  };
+  useEffect(run, [id]);
+  if (loading && !r) return <div className="flex flex-col gap-2"><Skeleton className="h-16" /><Skeleton className="h-32" /></div>;
+  if (err) return <div role="alert" className="rounded-lg bg-high-soft p-3 text-sm text-high">{err} <button className="ml-2 underline" onClick={run}>Try again</button></div>;
+  if (!r) return null;
+  const n = r.narrative ?? {};
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-wrap items-center gap-3">
+        <BarChart3 size={16} className="text-muted" aria-hidden />
+        <TierChip tier={r.tier} score={typeof r.final_score === "number" ? Math.round(r.final_score * 100) : undefined} />
+        <span className="text-xs text-muted">Policy view · {r.meta?.history_size ?? 0} past invoices compared · does not change the case score</span>
+      </div>
+      <div>
+        <p className="text-sm">{n.summary ?? r.explanation?.text}</p>
+        {n.fallback && <FallbackBadge fb={n.fallback} className="mt-1.5" />}
+        {!n.fallback && n.source === "template" && n.note && <p className="mt-1 text-xs text-muted">{n.note}</p>}
+        {(n.key_points ?? []).length > 0 && <ul className="mt-2 flex list-disc flex-col gap-1 pl-5 text-sm text-muted">{n.key_points.map((k: string) => <li key={k}>{k}</li>)}</ul>}
+      </div>
+      <table className="w-full text-sm">
+        <thead><tr className="text-left text-xs text-muted"><th className="py-1.5 font-medium">Signal</th><th className="py-1.5 font-medium">Score</th><th className="py-1.5 font-medium">Evidence</th></tr></thead>
+        <tbody>
+          {(r.signals ?? []).map((sg: Any) => (
+            <tr key={sg.signal} className="border-t border-line align-top">
+              <td className="py-1.5 pr-3">{String(sg.signal).replace(/_/g, " ")}</td>
+              <td className="py-1.5 pr-3 tabular-nums">{sg.score === null || sg.score === undefined ? <span className="text-medium">unknown</span> : Math.round(sg.score * 100) / 100}</td>
+              <td className="py-1.5 text-xs text-muted">{sg.evidence ?? "—"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {(r.warnings ?? []).length > 0 && <ul className="flex flex-col gap-1 text-xs text-medium">{r.warnings.map((w: string) => <li key={w}>{w}</li>)}</ul>}
+    </div>
   );
 }

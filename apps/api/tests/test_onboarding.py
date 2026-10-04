@@ -83,9 +83,18 @@ def test_empty_workspace_to_first_investigation(client, empty_ws):
     assert rep["created"] == 1
     assert len(client.get(f"{API}/imports", headers=acc).json()["items"]) == 3
 
+    # an accountant's imports wait for an approver before they count as a baseline
     ob = client.get(f"{API}/workspace/onboarding", headers=owner).json()
     done = {st["key"]: st["done"] for st in ob["steps"]}
-    assert done["vendors"] and done["verified_bank"] and done["history"] and done["purchase_orders"] and not done["first_case"]
+    assert not done["history"] and not done["purchase_orders"] and not done["approve_records"]
+    pend = client.get(f"{API}/baseline/pending", headers=appr).json()
+    assert pend["invoices"] == 12 and pend["purchase_orders"] == 1
+    assert client.post(f"{API}/history/approve", headers=appr, json={"ids": [i["id"] for i in pend["invoice_items"]]}).json() == {"approved": 12}
+    assert client.post(f"{API}/purchase-orders/approve", headers=appr, json={"ids": [p["id"] for p in pend["po_items"]]}).json() == {"approved": 1}
+
+    ob = client.get(f"{API}/workspace/onboarding", headers=owner).json()
+    done = {st["key"]: st["done"] for st in ob["steps"]}
+    assert done["vendors"] and done["verified_bank"] and done["history"] and done["purchase_orders"] and done["approve_records"] and not done["first_case"]
 
     # --- an invoice against the imported baseline: three verified anomalies
     doc = client.post(f"{API}/documents", headers=acc, files={"file": ("invoice.pdf", pdf(bank_change_spec()), "application/pdf")}).json()
@@ -103,7 +112,8 @@ def test_vendor_management_rules(client, empty_ws):
     owner, appr, acc = hdr(client, "owner"), hdr(client, "approver"), hdr(client, "accountant")
     assert client.post(f"{API}/vendors", headers=acc, json={"name": "Bad", "gstin": BAD_GSTIN}).status_code == 400
     v = client.post(f"{API}/vendors", headers=acc, json={"name": VENDOR_B.name, "gstin": VENDOR_B.gstin, "website": f"https://www.{VENDOR_B.domain}/"}).json()
-    assert v["pan"] == VENDOR_B.pan
+    assert v["pan"] == "XXXXXX" + VENDOR_B.pan[-4:]  # accountants see only the last 4
+    assert client.get(f"{API}/vendors/{v['id']}", headers=appr).json()["pan"] == VENDOR_B.pan
     assert client.post(f"{API}/vendors", headers=acc, json={"name": "Dup", "gstin": VENDOR_B.gstin}).status_code == 409
     vid = v["id"]
     # accountants may add *unverified* accounts; verifying requires an approver and a note

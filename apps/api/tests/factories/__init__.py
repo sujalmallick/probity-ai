@@ -24,6 +24,12 @@ from probity.ingestion.validators import make_gstin, normalize_invoice_number
 ROLES = [("owner", 1), ("approver", 2), ("accountant", 1), ("viewer", 1)]
 
 
+def _now():  # type: ignore[no-untyped-def]
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc)
+
+
 @dataclass
 class VendorSpec:
     name: str
@@ -90,7 +96,8 @@ def make_user(s, workspace_id: str, role: str, email: str | None = None, name: s
     return u
 
 
-def make_vendor(s, workspace_id: str, spec: VendorSpec, today: date, *, history: bool = True, verified: bool = True) -> Vendor:  # type: ignore[no-untyped-def]
+def make_vendor(s, workspace_id: str, spec: VendorSpec, today: date, *, history: bool = True, verified: bool = True,
+                approved: bool = True) -> Vendor:  # type: ignore[no-untyped-def]
     v = Vendor(workspace_id=workspace_id, name=spec.name, gstin=spec.gstin, pan=spec.pan, address=spec.address, website=spec.domain)
     s.add(v)
     s.flush()
@@ -111,14 +118,17 @@ def make_vendor(s, workspace_id: str, spec: VendorSpec, today: date, *, history:
             s.add(HistoricalInvoice(workspace_id=workspace_id, vendor_id=v.id, invoice_number=no, invoice_number_norm=normalize_invoice_number(no),
                                     invoice_date=today - timedelta(days=30 * (12 - k) + 5), total_minor=sub + sub * 18 // 100,
                                     bank_last4=crypto.last4(spec.account), bank_hmac=hm, po_number=None,
-                                    line_items=[{"description": spec.item, "qty": q, "unit_price_minor": p, "amount_minor": sub}]))
+                                    line_items=[{"description": spec.item, "qty": q, "unit_price_minor": p, "amount_minor": sub}],
+                                    source="import", approved_by="test-setup", approved_at=_now() if approved else None))
     s.flush()
     return v
 
 
-def make_po(s, workspace_id: str, vendor: Vendor, number: str, item: str, qty: int, unit_price: int, po_date: date) -> PurchaseOrder:  # type: ignore[no-untyped-def]
+def make_po(s, workspace_id: str, vendor: Vendor, number: str, item: str, qty: int, unit_price: int, po_date: date,  # type: ignore[no-untyped-def]
+            approved: bool = True) -> PurchaseOrder:
     po = PurchaseOrder(workspace_id=workspace_id, vendor_id=vendor.id, po_number=number, po_date=po_date,
-                       lines=[{"description": item, "qty": qty, "unit_price_minor": unit_price}])
+                       lines=[{"description": item, "qty": qty, "unit_price_minor": unit_price}],
+                       source="import", approved_by="test-setup" if approved else None, approved_at=_now() if approved else None)
     s.add(po)
     s.flush()
     return po

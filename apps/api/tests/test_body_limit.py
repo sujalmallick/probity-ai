@@ -7,13 +7,15 @@ from probity.api.limits import MB, limit_for
 
 
 def test_limits_per_route():
-    assert limit_for("POST", "/api/v1/documents") == 16 * MB
+    from probity.config import get_settings
+
+    assert limit_for("POST", "/api/v1/documents") == (get_settings().max_upload_mb + 1) * MB  # upload + multipart overhead
     assert limit_for("POST", "/api/v1/imports/vendors") == 6 * MB
     assert limit_for("POST", "/api/v1/cases") == 1 * MB
 
 
 def test_oversized_upload_refused_without_auth(client):
-    r = client.post(f"{API}/documents", files={"file": ("big.pdf", b"%PDF-1.4\n" + b"0" * (17 * MB), "application/pdf")})
+    r = client.post(f"{API}/documents", files={"file": ("big.pdf", b"%PDF-1.4\n" + b"0" * (40 * MB), "application/pdf")})
     assert r.status_code == 413 and r.json()["error"]["code"] == "payload_too_large"
 
 

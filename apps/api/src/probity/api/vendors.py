@@ -91,13 +91,22 @@ def _verification(s: Session, v: Vendor, item, kind: str, key: str, names: dict,
     return {"by": {"id": by, "name": names.get(by, by)} if by else None, "at": iso(at), "method": method, "note": note}
 
 
-def vendor_summary(s: Session, v: Vendor) -> dict:
+def masked_pan(pan: str | None, user: User | None) -> str | None:
+    """Full PAN for approver+; others see the last 4 characters. (A GSTIN embeds the PAN, so this only protects PANs
+    entered for vendors without a GSTIN; the GSTIN itself is printed on every invoice.)"""
+    if not pan or user is None or svc.ROLES.index(user.role) >= svc.ROLES.index("approver"):
+        return pan
+    return "X" * (len(pan) - 4) + pan[-4:]
+
+
+def vendor_summary(s: Session, v: Vendor, user: User | None = None) -> dict:
     q = lambda stmt: s.scalar(stmt) or 0  # noqa: E731
     last = s.scalar(select(func.max(HistoricalInvoice.invoice_date)).where(HistoricalInvoice.vendor_id == v.id))
     return {
-        "id": v.id, "name": v.name, "gstin": v.gstin, "pan": v.pan, "address": v.address, "website": v.website,
+        "id": v.id, "name": v.name, "gstin": v.gstin, "pan": masked_pan(v.pan, user), "address": v.address, "website": v.website,
         "archived": v.archived, "notes": v.notes, "created_at": iso(v.created_at),
-        "invoices": q(select(func.count()).select_from(HistoricalInvoice).where(HistoricalInvoice.vendor_id == v.id)),
+        "invoices": q(select(func.count()).select_from(HistoricalInvoice).where(HistoricalInvoice.vendor_id == v.id, HistoricalInvoice.approved_at.is_not(None))),
+        "invoices_pending": q(select(func.count()).select_from(HistoricalInvoice).where(HistoricalInvoice.vendor_id == v.id, HistoricalInvoice.approved_at.is_(None))),
         "last_invoice_date": last.isoformat() if last else None,
         "cases": q(select(func.count()).select_from(Case).where(Case.vendor_id == v.id)),
         "open_cases": q(select(func.count()).select_from(Case).where(Case.vendor_id == v.id, Case.status.in_(["AWAITING_HUMAN", "AWAITING_VENDOR"]))),
@@ -118,7 +127,7 @@ def list_vendors(q: str = "", include_archived: bool = False, limit: int = Query
     if q.strip():
         like = f"%{q.strip()}%"
         stmt = stmt.where(or_(Vendor.name.ilike(like), Vendor.gstin.ilike(like)))
-    return {"items": [vendor_summary(s, v) for v in s.scalars(stmt.order_by(Vendor.name).limit(limit))]}
+    return {"items": [vendor_summary(s, v, user) for v in s.scalars(stmt.order_by(Vendor.name).limit(limit))]}
 
 
 class VendorIn(BaseModel):
@@ -142,7 +151,7 @@ def create_vendor(body: VendorIn, request: Request, user: User = Depends(current
         s.add(VendorDomain(workspace_id=user.workspace_id, vendor_id=v.id, domain=v.website, verified=False))
     graph_rel.index_vendor_master(s, user.workspace_id)
     audit(s, user.workspace_id, user.id, "vendor.created", v.id, {"name": v.name, "gstin": gstin}, request.state.request_id)
-    return vendor_summary(s, v)
+    return vendor_summary(s, v, user)
 
 
 @router.get("/vendors/{vendor_id}")
@@ -156,15 +165,17 @@ def get_vendor(vendor_id: str, user: User = Depends(current_user), s: Session = 
                                 .order_by(AuditLog.id.desc())))
     ver = lambda item, kind, key: _verification(s, v, item, kind, key, names, audit_rows)  # noqa: E731
     return {
-        **vendor_summary(s, v),
+        **vendor_summary(s, v, user),
         "accounts": [{"id": a.id, "account": crypto.mask(a.last4), "ifsc": a.ifsc, "verified": a.verified, "verified_method": a.verified_method,
                       "verification": ver(a, "bank", crypto.mask(a.last4)),
                       "first_seen": a.first_seen.isoformat() if a.first_seen else None, "last_seen": a.last_seen.isoformat() if a.last_seen else None} for a in q(VendorBankAccount)],
         "domains": [{"id": d.id, "domain": d.domain, "verified": d.verified, "verified_method": d.verified_method, "verification": ver(d, "domain", d.domain)} for d in q(VendorDomain)],
         "contacts": [{"id": c.id, "name": c.name, "email": c.email, "phone": c.phone, "verified": c.verified, "verified_method": c.verified_method,
                       "verification": ver(c, "contact", c.email)} for c in q(VendorContact)],
-        "price_history": [{"date": h.invoice_date.isoformat(), "invoice_number": h.invoice_number, "total_minor": h.total_minor, "items": h.line_items} for h in hist],
-        "purchase_orders": [{"po_number": p.po_number, "po_date": p.po_date.isoformat(), "lines": p.lines} for p in q(PurchaseOrder)],
+        "price_history": [{"id": h.id, "date": h.invoice_date.isoformat(), "invoice_number": h.invoice_number, "total_minor": h.total_minor,
+                           "items": h.line_items, "status": "approved" if h.approved_at else "pending", "source": h.source} for h in hist],
+        "purchase_orders": [{"id": p.id, "po_number": p.po_number, "po_date": p.po_date.isoformat(), "lines": p.lines,
+                             "status": "approved" if p.approved_at else "pending", "source": p.source} for p in q(PurchaseOrder)],
         "prior_cases": [{"case_id": m.case_id, "outcome": m.outcome, "summary": m.summary, "peak_score": m.peak_score, "peak_tier": m.peak_tier, "at": iso(m.created_at)}
                         for m in s.scalars(select(CaseMemory).where(CaseMemory.vendor_id == v.id))],
         "gst": {
@@ -231,8 +242,11 @@ def update_vendor(vendor_id: str, body: VendorPatch, request: Request, user: Use
     v = _vendor(s, user, vendor_id)
     before = {"name": v.name, "gstin": v.gstin, "address": v.address, "website": v.website, "archived": v.archived}
     data = body.model_dump(exclude_unset=True)
+    # Name, GSTIN and address are the baseline for the identity and address checks: changing them needs an approver.
+    identity_changed = [k for k in ("name", "gstin", "address") if k in data and (data[k] or None) != (getattr(v, k) or None)]
+    if identity_changed:
+        svc.require_role(user, "approver")
     if "gstin" in data:
-        svc.require_role(user, "approver")  # identity data drives the identity-mismatch signal
         v.gstin = _check_gstin(s, user.workspace_id, data["gstin"], exclude_id=v.id)
     for k in ("name", "address", "notes", "archived"):
         if k in data:
@@ -241,7 +255,7 @@ def update_vendor(vendor_id: str, body: VendorPatch, request: Request, user: Use
         v.website = normalize_domain(data["website"]) if data["website"] else None
     graph_rel.index_vendor_master(s, user.workspace_id)
     audit(s, user.workspace_id, user.id, "vendor.updated", v.id, {"before": before, "changes": data}, request.state.request_id)
-    return vendor_summary(s, v)
+    return vendor_summary(s, v, user)
 
 
 # ---------------------------------------------------------------- bank accounts

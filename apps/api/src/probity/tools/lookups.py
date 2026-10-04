@@ -106,7 +106,7 @@ def web_search(query: str, budget: Budget) -> SearchOutcome:
     key = get_settings().tavily_api_key
     if not key:
         return SearchOutcome("not_configured", query, reason="web search is not configured (TAVILY_API_KEY missing)")
-    budget.charge_web()
+    budget.charge_web(search=True)
     try:
         r = httpx.post("https://api.tavily.com/search", json={"query": query, "max_results": 5, "search_depth": "basic", "include_answer": False},
                        headers={"Authorization": f"Bearer {key}"}, timeout=15)

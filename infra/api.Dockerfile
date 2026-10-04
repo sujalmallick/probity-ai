@@ -1,9 +1,12 @@
 FROM python:3.12-slim
 RUN useradd -m probity
 WORKDIR /app
+# Exact dependency versions from the lock (runtime + worker + s3), then the app itself without re-resolving.
+COPY apps/api/requirements-full.lock apps/api/requirements-full.lock
+RUN pip install --no-cache-dir -r apps/api/requirements-full.lock
 COPY apps/api/pyproject.toml apps/api/pyproject.toml
 COPY apps/api/src apps/api/src
-RUN pip install --no-cache-dir -e "apps/api[worker,s3]"
+RUN pip install --no-cache-dir --no-deps ./apps/api
 USER probity
 WORKDIR /app/apps/api
 EXPOSE 8000

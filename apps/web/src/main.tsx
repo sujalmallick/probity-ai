@@ -1,13 +1,12 @@
 import React, { useEffect, useState } from "react";
 import ReactDOM from "react-dom/client";
 import { BrowserRouter, Link, Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
-import { ClerkProvider, SignedIn, SignedOut, SignIn, SignUp, UserButton, useAuth as useClerkAuth, useClerk } from "@clerk/clerk-react";
-import { BarChart3, Brain, Building2, FilePlus2, Gauge as GaugeIcon, LogOut, Menu, Moon, PanelLeftClose, PanelLeftOpen, Settings, Sun, Users, WifiOff, X } from "lucide-react";
+import { ClerkProvider, SignedIn, SignedOut, UserButton, useAuth as useClerkAuth, useClerk } from "@clerk/clerk-react";
+import { Brain, Building2, FilePlus2, Gauge as GaugeIcon, LogOut, Menu, Moon, PanelLeftClose, PanelLeftOpen, Settings, Sun, Users, X } from "lucide-react";
 import "./index.css";
 import { AuthCtx, useAuth } from "./lib/auth";
-import { api, getLocalSession, setLocalSession, setTokenGetter, setUnauthorizedHandler, type Me } from "./lib/api";
-import Login from "./pages/Login";
-import { ForgotPasswordLocal, SignUpLocal } from "./pages/AuthHelp";
+import { api, setTokenGetter, type Me } from "./lib/api";
+import Login, { SignInUnavailable, SignUpPage } from "./pages/Login";
 import Landing from "./pages/Landing";
 import Dashboard from "./pages/Dashboard";
 import NewCase from "./pages/NewCase";
@@ -15,21 +14,13 @@ import CaseView from "./pages/CaseView";
 import { VendorDetail, Vendors } from "./pages/Vendors";
 import ImportPage from "./pages/Import";
 import Memory from "./pages/Memory";
-import Benchmark from "./pages/Benchmark";
 import SettingsPage from "./pages/Settings";
 import Team from "./pages/Team";
 import { Spinner } from "./components/ui";
-import { isFallbackConfig, loadAppConfig, offlineIntegrations, useAppConfig } from "./lib/config";
+import { loadAppConfig, unavailableIntegrations, useAppConfig } from "./lib/config";
 import { LogoMark } from "./components/Logo";
-import { AuthLayout } from "./components/AuthLayout";
 
 const CLERK_KEY = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY as string | undefined;
-
-// Clerk's form sits inside our own auth card, so drop its card chrome and header.
-const CLERK_APPEARANCE = {
-  variables: { colorPrimary: "#fafafa", colorTextOnPrimaryBackground: "#0a0a0a", colorBackground: "transparent", colorText: "#fafafa", colorTextSecondary: "#a6a6a6", colorInputBackground: "#0a0a0a", colorInputText: "#fafafa", borderRadius: "0.75rem" },
-  elements: { rootBox: "w-full", cardBox: "w-full !shadow-none !border-0", card: "!bg-transparent !shadow-none !border-0 !p-0", header: "hidden", footer: "!bg-transparent" },
-};
 
 const ROLE_HINT: Record<string, string> = {
   viewer: "Read only",
@@ -51,10 +42,9 @@ function Brand({ size = 8, tagline = false }: { size?: number; tagline?: boolean
 }
 
 function Shell({ children }: { children: React.ReactNode }) {
-  const { user, mode, signOut } = useAuth();
+  const { user, signOut } = useAuth();
   const cfg = useAppConfig();
   const location = useLocation();
-  const offline = cfg.features.demo ? offlineIntegrations(cfg) : [];
   const [theme, setTheme] = useState<string | null>(() => readPref("probity.theme"));
   const [collapsed, setCollapsed] = useState(() => readPref("probity.sidebar") === "collapsed");
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -79,7 +69,6 @@ function Shell({ children }: { children: React.ReactNode }) {
     { to: "/cases/new", icon: FilePlus2, label: "New case" },
     { to: "/vendors", icon: Building2, label: "Vendors" },
     { to: "/memory", icon: Brain, label: "Case memory" },
-    ...(cfg.features.benchmark ? [{ to: "/benchmark", icon: BarChart3, label: "Benchmark" }] : []),
     { to: "/settings/policy", icon: Settings, label: "Policy" },
     { to: "/settings/team", icon: Users, label: "Team" },
   ];
@@ -106,7 +95,7 @@ function Shell({ children }: { children: React.ReactNode }) {
   const userCard = user && (
     <div className="card px-3 py-3">
       <div className="flex items-center gap-2">
-        {mode === "clerk" && <UserButton />}
+        <UserButton />
         <div className="min-w-0">
           <div className="truncate text-sm font-semibold">{user.name}</div>
           <div className="truncate text-[11px] text-muted">{user.workspace?.name}</div>
@@ -114,14 +103,9 @@ function Shell({ children }: { children: React.ReactNode }) {
       </div>
       <div className="mt-1 text-[11px] text-muted">{user.role} · {ROLE_HINT[user.role]}</div>
       <div className="mt-2 flex gap-1">
-        <button className="btn flex-1 !px-2 !py-1 text-xs" onClick={signOut}><LogOut size={13} />{mode === "clerk" ? "Sign out" : "Switch user"}</button>
+        <button className="btn flex-1 !px-2 !py-1 text-xs" onClick={signOut}><LogOut size={13} />Sign out</button>
         <button className="btn !px-2 !py-1" aria-label={dark ? "Use light theme" : "Use dark theme"} onClick={toggleTheme}>{dark ? <Sun size={13} /> : <Moon size={13} />}</button>
       </div>
-    </div>
-  );
-  const offlineBadge = offline.length > 0 && (
-    <div className="rounded-lg bg-medium-soft px-3 py-2 text-[11px] text-medium" title="Recorded tool responses and/or deterministic agents are in use">
-      <b>Offline mode</b> · {offline.join(", ")}
     </div>
   );
 
@@ -134,7 +118,8 @@ function Shell({ children }: { children: React.ReactNode }) {
           <Brand />
         </div>
         <div className="flex items-center gap-1">
-          {mode === "clerk" && <UserButton />}
+          <LiveStatus compact />
+          <UserButton />
           <button className={iconBtn} aria-label={dark ? "Use light theme" : "Use dark theme"} onClick={toggleTheme}>{dark ? <Sun size={15} /> : <Moon size={15} />}</button>
         </div>
       </header>
@@ -149,7 +134,7 @@ function Shell({ children }: { children: React.ReactNode }) {
               <button className={iconBtn} aria-label="Close menu" onClick={() => setMobileOpen(false)} autoFocus><X size={18} /></button>
             </div>
             {navList(false)}
-            <div className="mt-auto flex flex-col gap-2">{offlineBadge}{userCard}</div>
+            <div className="mt-auto flex flex-col gap-2"><LiveStatus />{userCard}</div>
           </div>
         </div>
       )}
@@ -169,21 +154,43 @@ function Shell({ children }: { children: React.ReactNode }) {
         <div className="mt-auto flex flex-col gap-2">
           {collapsed ? (
             <>
-              {offline.length > 0 && <div className="flex justify-center text-medium" title={`Offline mode · ${offline.join(", ")}`}><WifiOff size={16} aria-label="Offline mode" /></div>}
+              <div className="flex justify-center"><LiveStatus compact /></div>
               <button className={`${iconBtn} mx-auto`} aria-label={dark ? "Use light theme" : "Use dark theme"} title="Theme" onClick={toggleTheme}>{dark ? <Sun size={15} /> : <Moon size={15} />}</button>
               {user && (
-                <button className={`${iconBtn} mx-auto`} aria-label={mode === "clerk" ? "Sign out" : "Switch user"} title={`${user.name} · ${mode === "clerk" ? "Sign out" : "Switch user"}`} onClick={signOut}>
+                <button className={`${iconBtn} mx-auto`} aria-label="Sign out" title={`${user.name} · Sign out`} onClick={signOut}>
                   <LogOut size={15} />
                 </button>
               )}
             </>
           ) : (
-            <>{offlineBadge}{userCard}</>
+            <><LiveStatus />{userCard}</>
           )}
         </div>
       </aside>
       <main className="min-w-0 flex-1 px-4 py-6 md:px-10 md:py-9">{children}</main>
     </div>
+  );
+}
+
+/** "Live" status from /app/config.integrations; integrations that aren't available are listed in the tooltip. */
+function LiveStatus({ compact = false }: { compact?: boolean }) {
+  const cfg = useAppConfig();
+  const missing = unavailableIntegrations(cfg);
+  const detail = missing.length ? `Live · not available: ${missing.join(", ")}` : "Live · all integrations available";
+  return (
+    <span
+      tabIndex={0}
+      role="status"
+      title={detail}
+      aria-label={detail}
+      className={`inline-flex items-center gap-2 rounded-lg text-xs text-muted outline-offset-2 ${compact ? "p-1.5" : "px-3 py-1.5"}`}
+    >
+      <span className="relative flex h-2 w-2" aria-hidden>
+        <span className="pulse absolute inline-flex h-full w-full rounded-full bg-low opacity-60" />
+        <span className="relative inline-flex h-2 w-2 rounded-full bg-low" />
+      </span>
+      {!compact && <span>Live{missing.length ? <span className="text-muted"> · {missing.length} not available</span> : null}</span>}
+    </span>
   );
 }
 
@@ -204,7 +211,6 @@ function writePref(key: string, value: string | null) {
 }
 
 function AppRoutes() {
-  const cfg = useAppConfig();
   return (
     <Shell>
       <Routes>
@@ -215,7 +221,6 @@ function AppRoutes() {
         <Route path="/vendors/import" element={<ImportPage />} />
         <Route path="/vendors/:id" element={<VendorDetail />} />
         <Route path="/memory" element={<Memory />} />
-        {cfg.features.benchmark && <Route path="/benchmark" element={<Benchmark />} />}
         <Route path="/settings/policy" element={<SettingsPage />} />
         <Route path="/settings/team" element={<Team />} />
         <Route path="*" element={<Navigate to="/dashboard" replace />} />
@@ -228,7 +233,7 @@ function Centered({ children }: { children: React.ReactNode }) {
   return <div className="flex min-h-screen items-center justify-center p-4">{children}</div>;
 }
 
-// ---------------------------------------------------------------- Clerk (production)
+// ---------------------------------------------------------------- app (Clerk sign-in)
 
 function ClerkApp() {
   const { isLoaded, isSignedIn, getToken } = useClerkAuth();
@@ -250,24 +255,8 @@ function ClerkApp() {
       <SignedOut>
         <Routes>
           <Route path="/" element={cfg.features.landing_page ? <Landing /> : <Navigate to="/login" replace />} />
-          <Route
-            path="/login"
-            element={
-              <AuthLayout title="Welcome back" subtitle="Sign in to your Probity workspace.">
-                <SignIn routing="hash" signUpUrl={cfg.auth.sign_up ? "/sign-up" : undefined} appearance={CLERK_APPEARANCE} />
-              </AuthLayout>
-            }
-          />
-          {cfg.auth.sign_up && (
-            <Route
-              path="/sign-up"
-              element={
-                <AuthLayout title="Create an account" subtitle="Use the work email your owner invited.">
-                  <SignUp routing="hash" signInUrl="/login" appearance={CLERK_APPEARANCE} />
-                </AuthLayout>
-              }
-            />
-          )}
+          <Route path="/login" element={<Login />} />
+          {cfg.auth.sign_up && <Route path="/sign-up" element={<SignUpPage />} />}
           <Route path="*" element={<Navigate to="/login" replace />} />
         </Routes>
       </SignedOut>
@@ -283,63 +272,32 @@ function ClerkApp() {
   );
 }
 
-// ---------------------------------------------------------------- local demo auth (dev only)
-
-function LocalApp() {
-  const [user, setUser] = useState<Me | null>(() => getLocalSession()?.user ?? null);
-  useEffect(() => {
-    setUnauthorizedHandler(() => {
-      setLocalSession(null);
-      setUser(null);
-    });
-    return () => setUnauthorizedHandler(null);
-  }, []);
-  // The stored login only has the basic user; /me adds the workspace.
-  useEffect(() => {
-    if (user && !user.workspace) api<Me>("/me").then(setUser).catch(() => {});
-  }, [user?.id]);
-  const cfg = useAppConfig();
-  const signOut = () => {
-    setLocalSession(null);
-    setUser(null);
-  };
-  return (
-    <AuthCtx.Provider value={{ user, mode: "local", setUser, signOut }}>
-      <Routes>
-        <Route path="/login" element={user ? <Navigate to="/dashboard" replace /> : <Login />} />
-        <Route path="/sign-up" element={user ? <Navigate to="/dashboard" replace /> : <SignUpLocal />} />
-        <Route path="/forgot-password" element={user ? <Navigate to="/dashboard" replace /> : <ForgotPasswordLocal />} />
-        <Route path="/" element={!cfg.features.landing_page ? <Navigate to={user ? "/dashboard" : "/login"} replace /> : <Landing signedIn={!!user} />} />
-        <Route path="*" element={user ? <AppRoutes /> : <Navigate to="/login" replace />} />
-      </Routes>
-    </AuthCtx.Provider>
-  );
-}
-
 function Root() {
-  const [mode, setMode] = useState<"local" | "clerk" | null>(null);
-  const [err, setErr] = useState<string | null>(null);
+  const [ready, setReady] = useState(false);
   useEffect(() => {
-    // Load /app/config once before rendering so demo-only UI never flashes in and out.
-    loadAppConfig().then((cfg) => {
-      if (!isFallbackConfig(cfg)) return setMode(cfg.auth.mode);
-      // Config unavailable: demo parts stay hidden; the older endpoint still tells us the sign-in mode.
-      fetch("/api/v1/auth/config").then((r) => r.json()).then((c) => setMode(c.mode)).catch(() => setErr("The Probity API is unreachable."));
-    });
+    // Load /app/config once before rendering. If it fails, safe defaults are used and sign-in still works.
+    loadAppConfig().then(() => setReady(true));
   }, []);
-  // The public landing page is static; keep it up even when the API is down.
-  if (err && window.location.pathname === "/") return <BrowserRouter><Landing /></BrowserRouter>;
-  if (err) return <Centered><div className="card p-4 text-sm text-high">{err}</div></Centered>;
-  if (!mode) return <Centered><Spinner size={20} /></Centered>;
-  if (mode === "clerk") {
-    if (!CLERK_KEY) return <Centered><div className="card max-w-md p-4 text-sm text-high">The API uses Clerk, but this web build has no VITE_CLERK_PUBLISHABLE_KEY.</div></Centered>;
+  if (!ready) return <Centered><Spinner size={20} /></Centered>;
+  if (!CLERK_KEY) {
+    // No sign-in provider in this build: the public pages still render, and the sign-in and sign-up pages explain why
+    // nobody can sign in yet. Every app page leads to sign-in.
     return (
-      <ClerkProvider publishableKey={CLERK_KEY} afterSignOutUrl="/">
-        <BrowserRouter><ClerkApp /></BrowserRouter>
-      </ClerkProvider>
+      <BrowserRouter>
+        <Routes>
+          <Route path="/" element={<Landing />} />
+          <Route path="/login" element={<SignInUnavailable mode="sign-in" />} />
+          <Route path="/sign-up" element={<SignInUnavailable mode="sign-up" />} />
+          <Route path="*" element={<Navigate to="/login" replace />} />
+        </Routes>
+      </BrowserRouter>
     );
   }
-  return <BrowserRouter><LocalApp /></BrowserRouter>;
+  return (
+    <ClerkProvider publishableKey={CLERK_KEY} afterSignOutUrl="/">
+      <BrowserRouter><ClerkApp /></BrowserRouter>
+    </ClerkProvider>
+  );
 }
 
 ReactDOM.createRoot(document.getElementById("root")!).render(<React.StrictMode><Root /></React.StrictMode>);

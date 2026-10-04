@@ -1,16 +1,12 @@
 import { useEffect, useState } from "react";
 import { api, can } from "../lib/api";
 import { useAuth } from "../lib/auth";
-import { useAppConfig } from "../lib/config";
 import { inr } from "../lib/format";
-
-const SPEEDS: [number, string][] = [[0, "Instant"], [400, "Readable"], [900, "Stage (slow)"]];
 
 export default function SettingsPage() {
   const { user } = useAuth();
-  const cfg = useAppConfig();
   const [p, setP] = useState<any | null>(null);
-  const [msg, setMsg] = useState<string | null>(null);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const load = () => api("/workspace/policy").then(setP);
   useEffect(() => { load(); }, []);
   if (!p) return null;
@@ -18,10 +14,10 @@ export default function SettingsPage() {
   const save = async (patch: Record<string, unknown>) => {
     try {
       await api("/workspace/policy", { method: "PUT", body: JSON.stringify(patch) });
-      setMsg("Saved (audited).");
+      setMsg({ ok: true, text: "Saved. The change is in the audit log." });
       load();
     } catch (e: any) {
-      setMsg(e.message);
+      setMsg({ ok: false, text: e.message });
     }
   };
   const core = ["bank_account_changed", "price_anomaly", "new_domain", "identity_mismatch", "duplicate_invoice", "address_mismatch", "missing_po"];
@@ -31,7 +27,7 @@ export default function SettingsPage() {
         <h1 className="page-title">Risk policy</h1>
         <p className="text-sm text-muted">Agents discover signals; code decides the score. Weights are versioned ({p.weights_version}); changes are owner-only and audited.</p>
       </div>
-      {msg && <div className="rounded-lg bg-accent-soft p-3 text-sm text-accent">{msg}</div>}
+      {msg && <div role={msg.ok ? "status" : "alert"} className={`rounded-lg p-3 text-sm ${msg.ok ? "bg-low-soft text-low" : "bg-high-soft text-high"}`}>{msg.text}</div>}
       <div className="grid gap-4 md:grid-cols-2">
         <div className="card p-4">
           <div className="label mb-2">Weights</div>
@@ -52,11 +48,11 @@ export default function SettingsPage() {
           <div className="card p-4">
             <div className="label mb-2">Human gate</div>
             <label className="flex items-center gap-2 text-sm">
-              <input type="checkbox" disabled={!owner} checked={p.auto_clear_enabled} onChange={(e) => save({ auto_clear_enabled: e.target.checked })} />
+              <input type="checkbox" disabled={!owner} title={owner ? "" : "Requires owner role"} checked={p.auto_clear_enabled} onChange={(e) => save({ auto_clear_enabled: e.target.checked })} />
               Auto-clear LOW-risk invoices when every check completed and no indicator fired
             </label>
             <label className="mt-2 flex items-center gap-2 text-sm">
-              <input type="checkbox" disabled={!owner} checked={!!p.require_mfa_for_approvals} onChange={(e) => save({ require_mfa_for_approvals: e.target.checked })} />
+              <input type="checkbox" disabled={!owner} title={owner ? "" : "Requires owner role"} checked={!!p.require_mfa_for_approvals} onChange={(e) => save({ require_mfa_for_approvals: e.target.checked })} />
               Require multi-factor sign-in for approvals, sends and out-of-band confirmations
             </label>
             <ul className="mt-3 flex flex-col gap-1 text-sm text-muted">
@@ -67,17 +63,6 @@ export default function SettingsPage() {
             </ul>
             {!owner && <div className="mt-2 text-xs text-muted">Only the owner can change policy.</div>}
           </div>
-          {cfg.features.demo && (
-            <div className="card p-4">
-              <div className="label mb-2">Demo: agent animation speed</div>
-              <div className="flex gap-2">
-                {SPEEDS.map(([ms, label]) => (
-                  <button key={ms} disabled={!owner} className={`btn flex-1 text-xs ${(p.demo_agent_delay_ms ?? 0) === ms ? "!border-accent text-accent" : ""}`} onClick={async () => { await api(`/demo/speed?delay_ms=${ms}`, { method: "PUT" }); load(); }}>{label}</button>
-                ))}
-              </div>
-              <div className="mt-2 text-xs text-muted">Slows the live timeline so each agent step is readable on stage.</div>
-            </div>
-          )}
         </div>
       </div>
     </div>

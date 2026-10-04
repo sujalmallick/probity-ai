@@ -8,7 +8,10 @@ import { Skeleton, Spinner } from "../components/ui";
 
 type Any = Record<string, any>;
 type Kind = "vendors" | "invoices" | "purchase_orders";
-type Report = { kind: Kind; rows_total: number; rows_ok: number; error_count: number; errors: { row: number; field: string | null; message: string }[]; created: number; updated: number; dry_run: boolean; committed: boolean };
+type Report = { kind: Kind; rows_total: number; rows_ok: number; error_count: number; errors: { row: number; field: string | null; message: string }[]; preview?: Any[]; created: number; updated: number; dry_run: boolean; committed: boolean };
+// Server rule: marking rows verified in an import needs a note with at least this many letters or digits.
+const VERIFY_NOTE_MIN = 10;
+const alnum = (t: string) => (t.match(/[\p{L}\p{N}]/gu) ?? []).length;
 
 const KINDS: { key: Kind; label: string }[] = [
   { key: "vendors", label: "Vendors" },
@@ -62,6 +65,7 @@ export default function ImportPage() {
   const [err, setErr] = useState<string | null>(null);
   const [onlyProblems, setOnlyProblems] = useState(false);
   const [drag, setDrag] = useState(false);
+  const [verifyNote, setVerifyNote] = useState("");
   const input = useRef<HTMLInputElement>(null);
 
   const loadHistory = () => api<{ items: Any[] }>("/imports").then((r) => setHistory(r.items)).catch(() => setHistory([]));
@@ -70,7 +74,7 @@ export default function ImportPage() {
     api<{ items: Any[] }>("/vendors?include_archived=true").then((r) => setVendors(r.items)).catch(() => {});
     loadHistory();
   }, []);
-  const startOver = () => { setFileName(null); setGrid(null); setReport(null); setResult(null); setEdited(false); setErr(null); setOnlyProblems(false); };
+  const startOver = () => { setFileName(null); setGrid(null); setReport(null); setResult(null); setEdited(false); setErr(null); setOnlyProblems(false); setVerifyNote(""); };
   useEffect(startOver, [kind]);
 
   const dryRun = async (rows: string[][], name: string) => {
@@ -105,7 +109,8 @@ export default function ImportPage() {
     try {
       const fd = new FormData();
       fd.append("file", new Blob([toCsv(grid)], { type: "text/csv" }), fileName);
-      const r = await api<Report>(`/imports/${kind}?dry_run=false${skipInvalid ? "&skip_invalid=true" : ""}`, { method: "POST", body: fd });
+      const qs = new URLSearchParams({ dry_run: "false", ...(skipInvalid ? { skip_invalid: "true" } : {}), ...(verifiedRows ? { verification_note: verifyNote.trim() } : {}) });
+      const r = await api<Report>(`/imports/${kind}?${qs}`, { method: "POST", body: fd });
       setResult(r);
       loadHistory();
     } catch (e: any) {
@@ -160,6 +165,8 @@ export default function ImportPage() {
   }, [grid, vendors, kind]);
   const visibleCols = header.map((c, i) => ({ c, i })).filter(({ i }) => grid!.slice(1).some((r) => (r[i] ?? "").trim() !== "") || Object.values(errs).some((e) => e.fields[header[i]]));
   const badRows = Object.keys(errs).length;
+  const verifiedRows = (report?.preview ?? []).filter((r: Any) => r.bank_verified || r.contact_verified).length;
+  const noteMissing = verifiedRows > 0 && alnum(verifyNote) < VERIFY_NOTE_MIN;
   const shownRows = (grid?.slice(1) ?? []).map((r, i) => ({ r, rowNo: i + 2 })).filter(({ rowNo }) => !onlyProblems || errs[rowNo]);
   const setCell = (rowNo: number, col: number, value: string) => {
     setGrid((g) => g!.map((r, i) => {
@@ -344,17 +351,26 @@ export default function ImportPage() {
             </table>
           </div>
 
+          {verifiedRows > 0 && (
+            <div className="border-t border-line px-5 py-4">
+              <label htmlFor="imp-vnote" className="text-sm font-medium">How were these verified out-of-band?</label>
+              <p className="mb-2 text-xs text-muted">{verifiedRows} {verifiedRows === 1 ? "row marks" : "rows mark"} a bank account or contact as verified. Say how they were confirmed (required, saved to the audit log). Only approvers can import verified details.</p>
+              <textarea id="imp-vnote" className="input h-20 placeholder:text-muted/60" value={verifyNote} onChange={(e) => setVerifyNote(e.target.value)} placeholder="e.g. Each account was confirmed by phone using the contact numbers from our onboarding records." aria-describedby="imp-vnote-count" />
+              <div id="imp-vnote-count" className="mt-1 text-right text-xs text-muted tabular-nums">{Math.min(alnum(verifyNote), VERIFY_NOTE_MIN)}/{VERIFY_NOTE_MIN}</div>
+            </div>
+          )}
+
           <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line px-5 py-4">
             <p className="text-xs text-muted">{edited ? "You changed some rows. Check them again before importing." : badRows ? "Fix the highlighted cells and check again, or import only the ready rows." : "Every row is ready."}</p>
             <div className="flex flex-wrap gap-2">
               {edited && <button className="btn" disabled={!!busy} onClick={() => dryRun(grid, fileName!)}><RefreshCcw size={14} aria-hidden />Check again</button>}
               {!edited && badRows > 0 && report.rows_ok > 0 && (
-                <button className="btn" disabled={!!busy} onClick={() => commit(true)}><SkipForward size={14} aria-hidden />Import {report.rows_ok} ready, skip {report.rows_total - report.rows_ok}</button>
+                <button className="btn" disabled={!!busy || noteMissing} title={noteMissing ? "Describe how the verified rows were confirmed first" : ""} onClick={() => commit(true)}><SkipForward size={14} aria-hidden />Import {report.rows_ok} ready, skip {report.rows_total - report.rows_ok}</button>
               )}
               <button
                 className="btn btn-primary"
-                disabled={!!busy || edited || badRows > 0}
-                title={edited ? "Check the edited rows first" : badRows ? "Fix or skip the rows with problems first" : ""}
+                disabled={!!busy || edited || badRows > 0 || noteMissing}
+                title={edited ? "Check the edited rows first" : badRows ? "Fix or skip the rows with problems first" : noteMissing ? "Describe how the verified rows were confirmed first" : ""}
                 onClick={() => commit(false)}
               >
                 Import {report.rows_total} rows

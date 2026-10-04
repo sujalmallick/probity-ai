@@ -1,10 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { AlertTriangle, CheckCircle2, Copy, FileText, FileUp, Pencil, Play, Sparkles, XCircle } from "lucide-react";
-import { can, post, uploadFile } from "../lib/api";
-import { useAuth } from "../lib/auth";
-import { useAppConfig } from "../lib/config";
-import { launchDemoFile } from "../lib/launch";
+import { AlertTriangle, CheckCircle2, Copy, FileUp, Pencil, Play, XCircle } from "lucide-react";
+import { post, uploadFile } from "../lib/api";
 import { inr } from "../lib/format";
 import { Spinner } from "../components/ui";
 
@@ -23,23 +20,6 @@ export default function NewCase() {
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [drag, setDrag] = useState(false);
-  const { user } = useAuth();
-  const cfg = useAppConfig();
-  const [samples, setSamples] = useState<{ name: string; title: string; description: string }[]>([]);
-  useEffect(() => {
-    if (cfg.features.demo && can(user?.role, "accountant")) post<{ files: typeof samples }>("/demo/seed").then((r) => setSamples(r.files)).catch(() => setSamples([]));
-  }, []);
-  const runSample = async (name: string) => {
-    setBusy("Starting investigation…");
-    setErr(null);
-    try {
-      const { caseId } = await launchDemoFile(name);
-      nav(`/cases/${caseId}`);
-    } catch (e: any) {
-      setErr(e.message);
-      setBusy(null);
-    }
-  };
 
   const pick = async (f: File) => {
     setFile(f);
@@ -97,16 +77,6 @@ export default function NewCase() {
         <div className="text-xs text-muted">You'll see what was extracted — and can correct it — before anything is investigated.</div>
         <input ref={input} type="file" accept=".pdf,.png,.jpg,.jpeg,.eml,.txt" className="hidden" onChange={(e) => e.target.files?.[0] && pick(e.target.files[0])} />
       </div>
-      {samples.length > 0 && !doc && (
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="flex items-center gap-1.5 text-xs text-muted"><Sparkles size={13} aria-hidden />Or try a sample</span>
-          {samples.map((f) => (
-            <button key={f.name} className="btn !rounded-full !px-3 !py-1.5 text-xs" title={`${f.title}\n${f.description}`} disabled={!!busy} onClick={() => runSample(f.name)}>
-              <FileText size={13} className="text-muted" aria-hidden />{(f.title.split(" · ")[1] ?? f.title).replace(/\s*\(.*\)$/, "")}
-            </button>
-          ))}
-        </div>
-      )}
       {busy && <div className="flex items-center gap-2 text-sm text-muted"><Spinner />{busy}</div>}
       {err && <div className="rounded-lg bg-high-soft p-3 text-sm text-high">{err}</div>}
 

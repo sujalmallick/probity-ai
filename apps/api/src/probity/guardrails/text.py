@@ -12,8 +12,12 @@ from probity.ingestion.validators import EMAIL_RE
 _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("EMAIL", EMAIL_RE),
     ("PAN", re.compile(r"\b[A-Z]{5}[0-9]{4}[A-Z]\b")),
-    ("ACCT", re.compile(r"\b\d{9,18}\b")),
+    # International-format phone numbers ("+91 20 4000 1000", "+91-98200-12345") before ACCT claims their digits.
+    ("PHONE", re.compile(r"\+\d{1,3}(?:[ -]?\d){7,12}(?![\w])")),
+    # Account numbers, also when written in groups ("5010 0098 1298 12", "5010-0098-1298-12").
+    ("ACCT", re.compile(r"(?<![\w+])\d(?:[ -]?\d){8,17}(?![\w])")),
 ]
+# GSTIN and IFSC are left as-is on purpose: both are public registry identifiers that extraction must read verbatim.
 
 
 _ACCOUNT_RUN = re.compile(r"(?<![\w+])\d(?:[ -]?\d){8,17}(?![\w])")

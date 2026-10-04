@@ -166,6 +166,12 @@ class HistoricalInvoice(Base):
     po_number: Mapped[str | None] = mapped_column(String(80))
     line_items: Mapped[list[Any]] = mapped_column(JSONType, default=list)
     case_id: Mapped[str | None] = mapped_column(String(40))
+    # Baseline approval: only approved rows feed price/PO/address comparisons. Rows from decided cases are approved by
+    # that decision; rows typed in or imported by an accountant wait for an approver.
+    source: Mapped[str] = mapped_column(String(20), default="import", server_default="import")  # import | manual | case
+    entered_by: Mapped[str | None] = mapped_column(String(40))
+    approved_by: Mapped[str | None] = mapped_column(String(40))
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class PurchaseOrder(Base):
@@ -176,6 +182,10 @@ class PurchaseOrder(Base):
     po_number: Mapped[str] = mapped_column(String(80), index=True)
     po_date: Mapped[date] = mapped_column(Date)
     lines: Mapped[list[Any]] = mapped_column(JSONType, default=list)  # [{description, qty, unit_price_minor}]
+    source: Mapped[str] = mapped_column(String(20), default="import", server_default="import")  # import | manual
+    entered_by: Mapped[str | None] = mapped_column(String(40))
+    approved_by: Mapped[str | None] = mapped_column(String(40))
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Document(Base):

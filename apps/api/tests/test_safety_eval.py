@@ -6,7 +6,7 @@ from dataclasses import replace
 import pytest
 from conftest import login, owner_session
 from factories import NEW_DOMAIN, VENDOR_A, bank_change_spec, clean_spec, injection_spec
-from helpers import API, record_reply, run_case, send_verification
+from helpers import API, contributions, record_reply, run_case, send_verification
 from sqlalchemy import select
 
 from probity import services
@@ -29,7 +29,10 @@ def test_injection_in_invoice_cannot_lower_the_score(client):
     without = run_case(client, h, replace(injection_spec(), invoice_number="AC-5001", footer=None))
     with_inj = run_case(client, h, replace(injection_spec(), invoice_number="AC-5002"))
     fired = any(c["signal"] == "suspicious_instruction_in_document" and c["status"] == "verified" for c in with_inj["claims"])
-    assert fired and with_inj["risk"]["score"] == without["risk"]["score"] + 15
+    # The second copy has the same vendor, amount and date as the first (still open), so it is also flagged as a
+    # duplicate; this test is only about the injection, so compare every other contribution.
+    got = {k: v for k, v in contributions(with_inj).items() if k != "duplicate_invoice"}
+    assert fired and got == {**contributions(without), "suspicious_instruction_in_document": 15}, (got, contributions(without))
     assert with_inj["status"] != "AUTO_CLEARED"
 
 

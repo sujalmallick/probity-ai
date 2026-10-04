@@ -2,102 +2,136 @@
 
 **Evidence before payment.**
 
-Probity is an AI investigation team for small-business payments. It researches each invoice, cross-checks internal and external evidence, explains its reasoning, and asks a human only when risk warrants it.
+Small businesses pay invoices every day, and a single changed bank account or copied invoice can cost them dearly. Probity investigates
+each invoice before you pay it. It reads the invoice, compares it with your own records (vendors, verified bank accounts, past invoices,
+purchase orders) and with outside sources, and shows you the evidence for every concern it finds. A pure-code risk engine turns verified
+findings into a score. Low-risk invoices can be cleared automatically; anything unusual is held for a person to decide, with the reasons.
 
-> **The LLM can investigate, but it cannot manipulate the risk score.**
-> Agents discover signals. Every claim must carry structured evidence and pass verification. Code decides the score. Humans decide the payment.
+> **The AI can investigate, but it cannot change the risk score.** Agents find signals, every claim needs evidence, code computes the
+> score, and a human decides the payment.
 
-```
-Claim ──► Evidence ──► Verification ──► Risk engine (pure code) ──► Policy gate ──► Human
-```
+## Who it's for
 
-Probity runs on **your real data only**. There is no demo workspace, no seeded vendors, no offline or mock mode. When a source can't be
-checked (no key, network failure, no registry provider, not enough history) the check says **"could not verify"** in the result and the
-agent timeline, adds no risk points, and holds the invoice for a person if the check was required.
+- **The accounts person (accountant):** uploads invoices, keeps the vendor list and past invoices up to date, and fixes misread fields.
+- **The approver:** reviews held invoices, approves or rejects with a reason, and confirms changes with the vendor through a channel already on file.
+- **The vendor:** never logs in. They may get a short, neutral email asking them to confirm details, sent only after an approver approves it.
 
-## How a case works
+## How a real invoice flows
 
-| Step | What happens |
-|---|---|
-| 1. Upload | A PDF or emailed invoice (scans are not read yet). Fields are parsed deterministically; Claude fills low-confidence gaps, and only text that appears verbatim in the document is accepted |
-| 2. Investigation | Vendor match against *your* vendor list · bank account vs your verified accounts · prices vs your invoice history · PO match · domain age (RDAP) · GSTIN checksum · web research (Tavily) |
-| 3. Result | A 0–100 score from verified signals only, with the evidence for every point. Missing evidence never adds points |
-| 4. Gate | Auto-clear only when every required check was verified and nothing fired; otherwise held, with the reason (e.g. *Could not verify: bank account verification — no bank history for vendor*) |
-| 5. Action | A neutral verification email to the vendor's *verified* contact, sent only after an approver approves it, and only to `EMAIL_ALLOWLIST` until you enable real sending |
-| 6. Resolution | Vendor replies stay *unverified* until an approver confirms out-of-band through a channel already on file |
-| 7. Memory | Closed cases inform the vendor's next invoice |
+1. **Upload.** The accountant uploads a PDF or an emailed invoice. Probity reads the fields: vendor, GSTIN, invoice number, dates,
+   amounts and bank account.
+2. **Investigate.** Agents check, among other things:
+   - Is this a vendor we know?
+   - Is this the bank account we verified for them?
+   - Is the price normal for them?
+   - Have we seen this invoice before?
+   - Does it match the purchase order?
+   - How old is the sender's web domain?
+   - Is there anything public about them?
+3. **Verify.** Every finding must point to evidence: the invoice value and the record it was compared with. Findings without evidence are dropped.
+4. **Score.** Pure code adds up the verified findings into a 0 to 100 score: LOW, MEDIUM, HIGH or CRITICAL.
+5. **Gate.** If everything checked out, the invoice is cleared. If anything is unusual, or a required check **could not be verified**, it's
+   held for a person, who sees exactly why.
+6. **Decide.** The approver approves, rejects, asks the vendor to confirm, or asks for a deeper investigation. Probity recommends; it
+   never pays and never accuses anyone.
+7. **Remember.** The outcome is saved, and the vendor's next invoice is checked with that history in mind.
 
-## Run it locally (Windows)
+## Design rules
 
-Prerequisites: **Docker Desktop** (running), **Python 3.12+**, **Node 20+**, an **Anthropic API key** and a **Clerk** application.
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\dev.ps1
-```
-
-The first run starts Postgres in Docker, creates `apps/api/.env` with generated app secrets, prints the live/missing checklist and
-creates the empty database schema. Fill in the missing keys in `apps/api/.env` (and `VITE_CLERK_PUBLISHABLE_KEY` in
-`apps/web/.env.local`), run it again, and it opens the **API** (http://127.0.0.1:8010, docs at `/docs`) and the **web app**
-(http://localhost:5180). Sign up with Clerk: your first sign-in creates your workspace with you as owner. Add vendors, verified bank
-accounts and contacts, and import past invoices and POs before investigating.
-
-macOS/Linux: `make install`, `make db`, `cd apps/api && ../../.venv/bin/python -m probity.bootstrap --generate-secrets`, fill in
-`apps/api/.env`, then `make dev`.
-
-| Setting (`apps/api/.env`) | Required | Without it |
-|---|---|---|
-| `DATABASE_URL`, `DATABASE_MIGRATE_URL` | yes | the API will not start |
-| `ANTHROPIC_API_KEY` | yes | the API will not start |
-| `CLERK_ISSUER`, `CLERK_SECRET_KEY`, `CLERK_AUTHORIZED_PARTIES` | yes | the API will not start |
-| `FIELD_KEY_B64`, `HMAC_KEY` | yes (generated) | the API will not start |
-| `TAVILY_API_KEY` | no | external reputation: "could not verify" |
-| `RESEND_API_KEY`, `EMAIL_FROM`, `EMAIL_ALLOWLIST` | no | no email is sent; with them, only allowlisted addresses receive mail |
-| `TASK_BACKEND=celery`, `REDIS_URL` | no | investigations run inside the API process |
-| `STORAGE_BACKEND=s3`, `CLAMAV_HOST` | prod only | local disk, no virus scan |
-
-GST: there is no free official GSTIN lookup API, so Probity validates the GSTIN format and checksum and always shows registry status as
-"could not verify". A user can record what they read on the GST portal; it is shown as *"Entered manually by &lt;name&gt;"*, never as
-registry-verified.
-
-## Verification
-
-```
-make db && make test
-```
-
-The backend suite builds its own data in `apps/api/tests/factories`, runs against a throwaway PostgreSQL database with row-level
-security enforced, and replaces the AI, RDAP, web search, email and Clerk with fakes injected by the test suite (the app has no switch
-for this). It covers the full case flow, the auto-clear gate and "could not verify" paths, Clerk-only sign-in, the email allowlist,
-RBAC, tenant isolation, the audit hash chain and the Guardrails safety cases (injection, fabrication, overclaiming, SSRF, PII,
-auto-clear abuse, loops, spoofed replies).
+- **The AI investigates; pure code computes the risk score.** The risk engine has no AI input and no way for text to change a number.
+- **Every claim needs evidence.** No evidence means no claim. Unverified findings add zero points.
+- **"Could not verify" is never "fine".** When a check can't run (missing key, no history, network failure), Probity says so, adds no
+  points, and holds the invoice if the check was required. It never invents a result.
+- **The system never pays anything.** It recommends; people decide.
+- **A human always decides** anything that isn't clearly low-risk. Large or critical cases need two approvers.
+- **Vendor replies stay unverified** until an approver confirms them through a channel already on file (a known phone number, a bank letter,
+  in person), never through details from the email itself.
+- **Neutral wording.** Probity reports *anomalies* and *recommends a hold*. It never calls anything "fraud".
 
 ## Architecture
 
+```mermaid
+flowchart LR
+    W[Web app<br/>React + Vite] -->|/api/v1| A[API<br/>FastAPI]
+    A --> G[Agents<br/>LangGraph]
+    G --> R[Risk engine<br/>pure code]
+    A --> DB[(PostgreSQL<br/>row-level security)]
+    G --> DB
+    A -.-> C[Clerk<br/>sign-in]
+    G -.-> L[Claude<br/>AI]
+    G -.-> T[Tavily<br/>web search]
+    G -.-> RD[RDAP<br/>domain age]
+    A -.-> E[Resend<br/>email]
 ```
-React (Vite, Tailwind) ──SSE/HTTPS──► FastAPI ──► LangGraph investigation graph
-                                         │         document → orchestrator ─┬─ vendor_investigator ─┐
-                                         │                                  └─ transaction_analyst ─┴► [web_research] → verification
-                                         │         → risk_engine (code) → case_analyst → policy_gate → AUTO_CLEARED | AWAITING_HUMAN
-                                         ▼
-                           PostgreSQL (row-level security; cases, evidence, claims, signals, audit hash chain)
+
+Agents in order: document reader → planner → vendor investigator + transaction analyst → web researcher (when needed) → evidence verifier
+→ risk engine → case analyst → policy gate. Details: [docs/Architecture.md](docs/Architecture.md).
+
+## Quick start
+
+You need Git, Python 3.12+, Node 22, Docker Desktop, an Anthropic API key and a free Clerk development app. On Windows:
+
+```powershell
+git clone https://github.com/sujalmallick/probity-ai.git
+cd probity-ai
+powershell -ExecutionPolicy Bypass -File scripts\dev.ps1
 ```
 
-| Agent | Answers | Notes |
-|---|---|---|
-| Document Intelligence | What does the invoice say? | Deterministic parser first. GSTIN checksum, IFSC, arithmetic. Bank number stored as last4 + HMAC + AES-GCM |
-| Orchestrator | What must be checked? | Policy-driven plan, vendor match, case-memory lookup |
-| Vendor Investigator | Is it the same entity? | Vendor list, GSTIN checksum (+ manual GST entry), RDAP domain age |
-| Transaction Analyst | Is it abnormal vs our data? | Bank change, duplicate, price, PO quantity, dates. All pure functions |
-| Web Research | What external evidence exists? | Tavily search; findings carry URL + verbatim excerpt + source tier. SSRF-safe fetch |
-| Evidence Verification | Is each claim supported? | Cite-or-drop, recomputes from evidence values, verbatim quote check |
-| Risk engine | How serious? | **Not an agent.** Versioned weights, core weights sum to 100, tiers 0–29/30–59/60–79/80–100 |
-| Case Analyst | How do we explain it? | Writes the summary; cannot change the score. If the AI is unavailable, the engine's own summary is shown and labelled |
-| Action | What happens next? | Neutral drafts, reply analysis. Reply claims need approver out-of-band confirmation |
+The first run sets things up and tells you which keys to add. Add them and run it again, then open http://localhost:5180.
 
-Repository layout: `apps/api` (FastAPI + agents), `apps/web` (React), `docs/` (PRD, specs, decisions), `infra/` (Docker).
+**Full step-by-step guide (Windows, macOS, Linux):** [docs/SETUP.md](docs/SETUP.md). **Getting the keys:** [docs/API_KEYS.md](docs/API_KEYS.md).
 
-## Docs
+## Current status
 
-[PRD](docs/PRD.md) · [Features](docs/Feature.md) · [Architecture](docs/Architecture.md) · [Guardrails](docs/Guardrails.md) · [Security](docs/Security.md) · [API](docs/API.md) · [Decisions](docs/DECISIONS.md) · [Web real-data checklist](docs/WEB_REAL_DATA_CHECKLIST.md)
+Probity is a **hackathon prototype**. It works end to end on real data, but it hasn't been audited for production use.
 
-Probity identifies anomalies and recommends; it never executes payments and never makes accusations.
+**Working**
+- Upload text-based PDFs, emailed invoices (.eml) and text files.
+- The full agent pipeline, with "could not verify" handling and labelled fallbacks when the AI is unavailable.
+- The risk score with evidence for every point, auto-clear rules, approvals (including two-approver cases) and written reasons.
+- Vendor list with verified bank accounts, domains and contacts; CSV import of vendors, past invoices and purchase orders.
+- Neutral vendor emails (Resend, allowlist while testing), vendor replies, out-of-band confirmation.
+- Roles (viewer, accountant, approver, owner), case memory, audit log, PDF/JSON export, and workspace isolation in the database.
+
+**Planned / not yet supported**
+- **Scanned PDFs and photos:** refused today. There's no OCR.
+- **GST registry verification:** there's no free official API. Probity checks the GSTIN's format and checksum only, and shows the registry
+  status as "could not verify". You can record what you saw on the GST portal by hand; it's labelled "Entered manually".
+- **Email providers other than Resend** (no SMTP); bounce and out-of-office handling for vendor replies.
+- **Screens for some API features:** notifications, adding single past invoices and POs, the invoice-risk policy.
+- **Frontend tests and a linter.**
+- **Data retention and deletion** policy.
+
+**Known limitations**
+- Without approved history, verified bank accounts and a Tavily key, many checks say "could not verify", so a new workspace holds most invoices.
+- Non-INR invoices are held, because prices can't be compared.
+- A background worker (Redis + Celery) is optional. By default investigations run inside the API process, which is fine for one machine.
+- Running the whole stack with `make up` builds a web image without a Clerk key, so sign-in is unavailable there. Use the setup guide instead.
+
+Full list: [docs/FEATURES.md](docs/FEATURES.md).
+
+## Documentation
+
+| Doc | What it's for |
+|---|---|
+| [docs/SETUP.md](docs/SETUP.md) | Install and run it, step by step, with troubleshooting |
+| [docs/API_KEYS.md](docs/API_KEYS.md) | Every key and service: required or optional, cost, where it goes |
+| [docs/FEATURES.md](docs/FEATURES.md) | What works, what's partial, what's planned, plus ideas to work on |
+| [docs/Architecture.md](docs/Architecture.md) | How the code is organised, for contributors |
+| [docs/Guardrails.md](docs/Guardrails.md) | The safety rules and how they're enforced |
+| [docs/DECISIONS.md](docs/DECISIONS.md) | Design decisions and current limits |
+| [docs/API_CONTRACT.md](docs/API_CONTRACT.md) | The API the web app uses |
+| [docs/PRD.md](docs/PRD.md) | The original product requirements (some parts describe the earlier demo version) |
+
+## Contributing
+
+Friends and newcomers are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md): it has starter tasks, the workflow, and the checks to
+run before a pull request. To report a security problem privately, see [SECURITY.md](SECURITY.md).
+
+## License
+
+No license has been chosen yet. Until one is added, the code is not licensed for reuse.
+
+---
+
+Probity identifies anomalies and recommends a hold. It never executes payments and never makes accusations.

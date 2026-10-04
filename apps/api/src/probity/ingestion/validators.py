@@ -55,6 +55,57 @@ def parse_money_minor(raw: str | int | float | None) -> int | None:
         return None
 
 
+# Currency markers, most specific first. Probity never converts: anything but INR (or no stated currency) is held.
+CURRENCY_MARKERS: list[tuple[str, str]] = [
+    ("INR", r"₹|\bINR\b|\bRs\.?(?=\s*\d)|\brupees?\b"),
+    ("USD", r"\bUSD\b|US\s?\$|\$"),
+    ("EUR", r"\bEUR\b|€"),
+    ("GBP", r"\bGBP\b|£"),
+    ("AED", r"\bAED\b|\bdirhams?\b"),
+    ("SGD", r"\bSGD\b|S\$"),
+    ("JPY", r"\bJPY\b|¥"),
+    ("AUD", r"\bAUD\b|A\$"),
+    ("CAD", r"\bCAD\b|C\$"),
+    ("CNY", r"\bCNY\b|\bRMB\b"),
+]
+
+
+def currencies_in(text: str) -> list[str]:
+    """ISO codes of every currency marker found in `text` (in a fixed order). "S$"/"US$" are not double-counted as USD."""
+    found = []
+    t = text or ""
+    for code, pat in CURRENCY_MARKERS:
+        if code == "USD":
+            t_usd = re.sub(r"[SACsac]\$", " ", t)  # S$, A$, C$ belong to other currencies
+            if re.search(pat, t_usd):
+                found.append(code)
+        elif re.search(pat, t, flags=re.I if code in ("INR", "AED") else 0):
+            found.append(code)
+    return found
+
+
+def normalize_currency(raw: str | None) -> str | None:
+    """A stated currency label ("Currency: USD", "Indian Rupee") → ISO code, or None if not recognisable."""
+    if not raw:
+        return None
+    for code, pat in (("INR", r"indian\s*rupee"), ("USD", r"u\.?s\.?\s*dollar"), ("EUR", r"\beuros?\b"), ("GBP", r"pounds?\s*sterling"),
+                      ("SGD", r"singapore\s*dollar"), ("AUD", r"australian\s*dollar"), ("CAD", r"canadian\s*dollar")):
+        if re.search(rf"(?i){pat}", raw):
+            return code
+    codes = currencies_in(raw)
+    return codes[0] if len(codes) == 1 else None
+
+
+def format_money(minor: int | None, currency: str | None) -> str:
+    """INR with Indian grouping; other currencies as '<CODE> 1,234.56'; unknown currency is said, never assumed."""
+    if minor is None:
+        return "—"
+    if currency == "INR":
+        return format_inr(minor)
+    major = f"{abs(int(minor)) / 100:,.2f}"
+    return f"{currency} {major}" if currency else f"{major} (currency not stated)"
+
+
 def format_inr(minor: int | None) -> str:
     """Indian grouping: 56640000 → '₹5,66,400'."""
     if minor is None:
@@ -130,4 +181,9 @@ def validate_extraction(fields: dict, today: date) -> dict:
     due = parse_date(v("due_date"))
     date_ok = inv_date is not None and inv_date <= today and (due is None or due >= inv_date)
     results["dates"] = {"ok": date_ok, "detail": {"invoice_date": str(inv_date), "due_date": str(due)}}
+    cur = v("currency")
+    # Only INR is compared with your history; anything else (or no stated currency) is held and never converted.
+    results["currency"] = {"ok": cur == "INR", "detail": cur or "not stated",
+                           "reason": None if cur == "INR" else ("no currency stated on the invoice" if not cur else
+                                                                f"invoice is in {cur}; Probity only checks INR invoices and never converts")}
     return results

@@ -14,9 +14,16 @@ import re
 from email import policy
 from typing import Any
 
-from probity.ingestion.validators import EMAIL_RE, normalize_domain, parse_money_minor
+from probity.ingestion.validators import EMAIL_RE, currencies_in, normalize_currency, normalize_domain, parse_money_minor
 
-MAX_BYTES = 15 * 1024 * 1024
+
+
+def max_upload_bytes() -> int:
+    from probity.config import get_settings
+
+    return get_settings().max_upload_mb * 1024 * 1024
+
+
 MAX_PAGES = 50
 
 
@@ -100,8 +107,8 @@ SCAN_MESSAGE = "This looks like a scanned or image-only invoice. Probity can't r
 
 def extract_text(data: bytes, mime: str) -> list[str]:
     """Text per page. Untrusted documents are parsed in an isolated process with a hard time limit (isolate.py)."""
-    if len(data) > MAX_BYTES:
-        raise UnsupportedDocument("File exceeds 15 MB")
+    if len(data) > max_upload_bytes():
+        raise UnsupportedDocument(f"File exceeds {max_upload_bytes() // (1024 * 1024)} MB")
     if mime.startswith("image/"):
         raise UnsupportedDocument(SCAN_MESSAGE)
     from probity.ingestion import isolate
@@ -387,11 +394,16 @@ def parse_fields(pages: list[str], tables: list | None = None) -> dict[str, dict
         fields.pop(k, None)
     if "subtotal" not in fields and line_items:
         fields["subtotal"] = _field(sum(li["amount_minor"] for li in line_items), "sum of line items", " | ".join(li_snips)[:300], 1, 0.85)
-    if "currency" not in fields:
-        joined = " ".join(pages)
-        cur = "INR" if re.search(r"(?i)\bINR\b|₹|\bRs\.?", joined) else None
-        if cur:
-            fields["currency"] = _field(cur, cur, cur, 1, 0.9)
+    joined = " ".join(pages)
+    found = currencies_in(joined)
+    if "currency" in fields:  # a "Currency:" label states it; normalise to an ISO code
+        stated = normalize_currency(str(fields["currency"]["raw"]))
+        fields["currency"]["value"] = stated or "UNRECOGNISED"
+        if stated and any(c != stated for c in found):
+            fields["currency"]["value"] = "MIXED"  # the label says one currency, amounts are marked with another
+    elif found:
+        cur = found[0] if len(found) == 1 else "MIXED"
+        fields["currency"] = _field(cur, ", ".join(found), ", ".join(found), 1, 0.9 if cur != "MIXED" else 0.5)
     if "vendor_email" in fields:
         dom = normalize_domain(fields["vendor_email"]["value"])
         fields["sender_domain"] = _field(dom, fields["vendor_email"]["raw"], fields["vendor_email"]["evidence_snippet"], fields["vendor_email"]["page"], 0.99)
@@ -417,7 +429,7 @@ def _mask_account_in_other_fields(fields: dict[str, dict]) -> None:
 
 def extract_tables(data: bytes, mime: str) -> list:
     """Best-effort table rows from a PDF (isolated and time-limited like extract_text); [] when unavailable."""
-    if mime != "application/pdf" or len(data) > MAX_BYTES:
+    if mime != "application/pdf" or len(data) > max_upload_bytes():
         return []
     from probity.ingestion import isolate
 

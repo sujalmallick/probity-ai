@@ -43,15 +43,17 @@ def test_vendor_without_bank_history_never_auto_clears(client, world):
     assert {"check": "bank_account_verification", "status": "could_not_verify", "reason": "no bank history for vendor"} in gate(case)["could_not_verify"]
 
 
-def test_unverifiable_domain_holds_and_is_shown_in_timeline(client, world, fake_lookups):
-    """The vendor's domain is no longer verified and RDAP is unreachable: hold, with the reason in the timeline."""
+def test_unverifiable_domain_is_noted_but_does_not_block(client, world, fake_lookups):
+    """Domain age is optional enrichment (user decision): RDAP unreachable leaves an "incomplete" note on the gate and
+    the reason in the timeline, but does not hold an otherwise clean invoice."""
     with owner_session() as s:
         for d in s.scalars(select(VendorDomain).where(VendorDomain.vendor_id == world.vendors["B"].id)):
             d.verified = False
     case = run_case(client, login(client, "accountant"), clean_spec())
-    assert case["status"] == "AWAITING_HUMAN"
+    assert case["status"] == "AUTO_CLEARED", gate(case)
     assert case["checks"]["domain_verification"]["status"] == "could_not_verify"
-    assert any(r.startswith("Could not verify: domain verification — RDAP unreachable") for r in gate(case)["reasons"]), gate(case)
+    assert not any("domain verification" in r for r in gate(case)["reasons"]), gate(case)
+    assert any(n.startswith("Incomplete: domain verification — RDAP unreachable") for n in gate(case)["notes"]), gate(case)
     assert fake_lookups.rdap_calls == [VENDOR_B.domain]
     with owner_session() as s:
         events = list(s.scalars(select(AgentEvent).where(AgentEvent.case_id == case["id"], AgentEvent.type == "check.could_not_verify")))

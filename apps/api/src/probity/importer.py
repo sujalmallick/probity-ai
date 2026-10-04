@@ -14,10 +14,10 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from probity import graph_rel
+from probity import baseline, graph_rel
 from probity.db.models import HistoricalInvoice, PurchaseOrder, User, Vendor, VendorBankAccount, VendorContact, VendorDomain
 from probity.guardrails import crypto
 from probity.ingestion.validators import normalize_domain, normalize_invoice_number, parse_date, parse_money_minor, valid_gstin, valid_ifsc
@@ -133,7 +133,8 @@ def _find_vendor(s: Session, ws: str, gstin: str, name: str, cache: dict) -> Ven
     if gstin:
         v = s.scalars(select(Vendor).where(Vendor.workspace_id == ws, Vendor.gstin == gstin.upper())).first()
     if v is None and name:
-        v = s.scalars(select(Vendor).where(Vendor.workspace_id == ws, Vendor.name.ilike(name))).first()
+        # Exact (case-insensitive) name equality: `ilike` would treat % and _ in a CSV cell as wildcards.
+        v = s.scalars(select(Vendor).where(Vendor.workspace_id == ws, func.lower(Vendor.name) == name.strip().lower())).first()
     cache[key] = v
     return v
 
@@ -282,11 +283,17 @@ def import_invoices(s: Session, user: User, rows: list[dict], commit: bool) -> R
         fields = dict(invoice_number=g["number"], invoice_date=g["date"], total_minor=g["total"], po_number=g["po"] or None, line_items=g["items"],
                       bank_last4=crypto.last4(g["acct"]) if g["acct"] else None, bank_hmac=crypto.account_hmac(g["acct"]) if g["acct"] else None)
         if existing:
+            if existing.source == "case":
+                rep.err(g["row"], "invoice_number", f"{g['number']} came from a decided case and can't be overwritten by an import")
+                continue
             for k, val in fields.items():
                 setattr(existing, k, val)
+            baseline.stamp_edit(existing, user)
             rep.updated += 1
         else:
-            s.add(HistoricalInvoice(workspace_id=ws, vendor_id=vid, invoice_number_norm=norm, **fields))
+            row = HistoricalInvoice(workspace_id=ws, vendor_id=vid, invoice_number_norm=norm, **fields)
+            baseline.stamp_new(row, user, "import")
+            s.add(row)
             rep.created += 1
         if g["acct"]:  # paid history establishes the account as *seen* (not verified) for this vendor
             h = crypto.account_hmac(g["acct"])
@@ -350,9 +357,12 @@ def import_purchase_orders(s: Session, user: User, rows: list[dict], commit: boo
         existing = s.scalars(select(PurchaseOrder).where(PurchaseOrder.workspace_id == ws, PurchaseOrder.po_number == po_no)).first()
         if existing:
             existing.vendor_id, existing.po_date, existing.lines = g["vendor"].id, g["date"], g["lines"]
+            baseline.stamp_edit(existing, user)
             rep.updated += 1
         else:
-            s.add(PurchaseOrder(workspace_id=ws, vendor_id=g["vendor"].id, po_number=po_no, po_date=g["date"], lines=g["lines"]))
+            po = PurchaseOrder(workspace_id=ws, vendor_id=g["vendor"].id, po_number=po_no, po_date=g["date"], lines=g["lines"])
+            baseline.stamp_new(po, user, "import")
+            s.add(po)
             rep.created += 1
     return rep
 

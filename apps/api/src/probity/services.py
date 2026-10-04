@@ -87,6 +87,16 @@ def get_case(s: Session, workspace_id: str, case_id: str, *, for_update: bool = 
     return c
 
 
+class CaseStopped(Exception):
+    """The case was ended (watchdog or restart recovery) while this run was still going; the run stops quietly."""
+
+
+def get_logger_lazy():  # type: ignore[no-untyped-def]
+    from probity.logging import get_logger
+
+    return get_logger("pipeline")
+
+
 def _ctx(workspace_id: str, case_id: str) -> CaseCtx:
     return CaseCtx(workspace_id, case_id, Budget.from_settings())
 
@@ -140,13 +150,83 @@ def check_followups() -> int:
     return flagged
 
 
+# ---------------------------------------------------------------- stuck cases
+
+# Statuses a case passes through while the pipeline runs. A case may not sit in one of these forever.
+RUNNING_STATUSES = ("QUEUED", "EXTRACTING", "INVESTIGATING", "VERIFYING", "SCORING")
+# No progress (case update or timeline event) for this long means the run is gone: a dead worker, a hung call,
+# a killed task. Longer than the per-case time budget plus the slowest single AI call.
+WATCHDOG_INTERVAL_SECONDS = 60
+STOPPED_ON_RESTART = ("The server restarted while this invoice was being investigated, so the investigation stopped. "
+                      "Upload the invoice again to start a new investigation.")
+STOPPED_STALLED = ("The investigation stopped making progress for 15 minutes and was ended. "
+                   "Upload the invoice again to start a new investigation.")
+
+
+def _last_progress(workspace_id: str, case: Case) -> datetime:
+    from probity.db.session import telemetry_scope
+
+    last = case.updated_at or case.created_at
+    with telemetry_scope(workspace_id) as t:
+        ev = t.scalar(select(func.max(AgentEvent.ts)).where(AgentEvent.case_id == case.id))
+    if ev is not None and ev.tzinfo is None:
+        ev = ev.replace(tzinfo=timezone.utc)
+    if last is not None and last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    return max(t for t in (last, ev) if t is not None)
+
+
+def recover_stuck_cases(stale_after_seconds: float | None, message: str, code: str) -> int:
+    """End cases that are still in a running status but no longer have a run behind them, so none stays
+    "investigating" forever. stale_after_seconds=None ends every running case (used at start-up in inline mode,
+    where the in-memory work queue died with the old process). Each one is marked FAILED with a plain reason,
+    audited, announced in its timeline and notified to the accountants."""
+    from probity.logging import get_logger
+    from probity.notify import notify
+
+    now = datetime.now(timezone.utc)
+    with session_scope() as s:
+        workspaces = [w.id for w in s.scalars(select(Workspace))]
+    ended: list[tuple[str, str]] = []
+    for ws in workspaces:
+        with session_scope(ws) as s:
+            running = list(s.scalars(select(Case).where(Case.workspace_id == ws, Case.status.in_(RUNNING_STATUSES)).with_for_update(skip_locked=True)))
+            for c in running:
+                if stale_after_seconds is not None and (now - _last_progress(ws, c)).total_seconds() < stale_after_seconds:
+                    continue
+                previous = c.status
+                c.status = "FAILED"
+                c.recommendation = {**(c.recommendation or {}), "failure": {"code": code, "message": message, "previous_status": previous, "at": now.isoformat()}}
+                audit(s, ws, "system", "case.stopped", c.id, {"code": code, "previous_status": previous})
+                notify(s, ws, "accountant", "case_failed", f"Investigation of case #{c.number} stopped", message, c.id)
+                ended.append((ws, c.id))
+    for ws, case_id in ended:  # after commit, so the timeline never shows a stop that was rolled back
+        emit(ws, case_id, "agent.failed", agent="pipeline", status="failed", message=message, data={"code": code})
+    if ended:
+        get_logger("watchdog").warning("cases.stopped", code=code, count=len(ended), case_ids=[c for _, c in ended])
+    return len(ended)
+
+
+def watchdog() -> int:
+    return recover_stuck_cases(get_settings().case_stall_seconds, STOPPED_STALLED, "stalled")
+
+
+def recover_after_restart() -> int:
+    """Start-up: with the inline backend every running case lost its run when the old process died. With Celery a
+    worker may still be on it, so only stalled cases are ended (the watchdog covers the rest)."""
+    if get_settings().task_backend == "inline":
+        return recover_stuck_cases(None, STOPPED_ON_RESTART, "interrupted")
+    return watchdog()
+
+
 _SCHEDULER = {"started": False}
 
 
 def start_inline_scheduler(interval_seconds: int = 15 * 60) -> None:
     """TASK_BACKEND=inline: run periodic jobs on a daemon thread inside the API process (Celery beat does this
-    when a worker is used)."""
+    when a worker is used): the case watchdog every minute and the follow-up sweep every `interval_seconds`."""
     import threading
+    import time as _t
 
     from probity.logging import get_logger
 
@@ -156,11 +236,18 @@ def start_inline_scheduler(interval_seconds: int = 15 * 60) -> None:
     stop = threading.Event()
 
     def loop() -> None:
-        while not stop.wait(interval_seconds):
+        next_followups = _t.monotonic() + interval_seconds
+        while not stop.wait(WATCHDOG_INTERVAL_SECONDS):
             try:
-                check_followups()
+                watchdog()
             except Exception:  # noqa: BLE001 - a failed sweep is retried next interval
-                get_logger("followups").exception("followups.failed")
+                get_logger("watchdog").exception("watchdog.failed")
+            if _t.monotonic() >= next_followups:
+                next_followups = _t.monotonic() + interval_seconds
+                try:
+                    check_followups()
+                except Exception:  # noqa: BLE001 - a failed sweep is retried next interval
+                    get_logger("followups").exception("followups.failed")
 
     threading.Thread(target=loop, name="probity-scheduler", daemon=True).start()
 
@@ -175,9 +262,14 @@ def _run_inner(workspace_id: str, case_id: str, depth: int) -> None:
     started = time.monotonic()
     try:
         investigate(ctx, depth)
+    except CaseStopped:
+        get_logger_lazy().warning("case.run_abandoned", case_id=case_id, workspace_id=workspace_id)
+        return
     except Exception as e:  # noqa: BLE001
         with session_scope() as s:
             c = s.get(Case, case_id)
+            if c and c.status == "FAILED":
+                return  # already ended (watchdog or restart recovery); don't report it twice
             if c:
                 c.status = "FAILED"
                 audit(s, workspace_id, "system", "case.failed", case_id, {"error": str(e)[:300]})
@@ -234,21 +326,46 @@ def clean_corrections(corrections: dict | None) -> dict[str, str]:
     return out
 
 
-def create_case(s: Session, user: User, document_id: str, corrections: dict | None = None) -> Case:
+def create_case(s: Session, user: User, document_id: str, corrections: dict | None = None, retry_of: str | None = None) -> Case:
     require_role(user, "accountant")
     doc = s.get(Document, document_id)
     if doc is None or doc.workspace_id != user.workspace_id:
         raise LookupError("document not found")
     corrections = clean_corrections(corrections)
+    existing = s.scalars(select(Case).where(Case.workspace_id == user.workspace_id, Case.document_id == doc.id,
+                                            Case.status.notin_(("REJECTED", "FAILED")))).first()
+    if existing is not None:
+        raise Conflict(f"This document already has case #{existing.number}. Open that case instead of starting a new one.")
     n = (s.scalar(select(func.max(Case.number)).where(Case.workspace_id == user.workspace_id)) or 1840) + 1
-    case = Case(workspace_id=user.workspace_id, document_id=doc.id, number=n, corrections=corrections)
+    case = Case(workspace_id=user.workspace_id, document_id=doc.id, number=n, corrections=corrections,
+                recommendation={"retry_of": retry_of} if retry_of else {})
     s.add(case)
     s.flush()
-    audit(s, user.workspace_id, user.id, "case.created", case.id, {"document_id": doc.id, "corrections": corrections})
+    audit(s, user.workspace_id, user.id, "case.created", case.id, {"document_id": doc.id, "corrections": corrections,
+                                                                    **({"retry_of": retry_of} if retry_of else {})})
     s.commit()
     emit(user.workspace_id, case.id, "case.created", status="queued", message=f"Case #{n} created from {doc.filename}")
     _submit(_run, user.workspace_id, case.id, 0)
     return case
+
+
+def retry_case(s: Session, user: User, case_id: str) -> Case:
+    """Start a fresh investigation of a FAILED case's document. The failed case stays FAILED (its timeline and audit
+    trail are evidence of what happened) and records which case replaced it."""
+    require_role(user, "accountant")
+    old = get_case(s, user.workspace_id, case_id, for_update=True)
+    if old.status != "FAILED":
+        raise Conflict(f"case is {old.status}; only a FAILED case can be retried")
+    if (old.recommendation or {}).get("retried_as"):
+        raise Conflict(f"already retried as case {old.recommendation['retried_as']}")
+    old_id = old.id
+    old.recommendation = {**(old.recommendation or {}), "retried_as": "pending"}  # claimed under the row lock: no double retry
+    new = create_case(s, user, old.document_id, old.corrections, retry_of=old_id)  # commits, then starts the run
+    with session_scope(user.workspace_id) as s2:
+        o = s2.get(Case, old_id)
+        o.recommendation = {**(o.recommendation or {}), "retried_as": new.id}
+        audit(s2, user.workspace_id, user.id, "case.retried", old_id, {"new_case_id": new.id})
+    return new
 
 
 # ---------------------------------------------------------------- decisions
@@ -362,7 +479,8 @@ def update_draft(s: Session, user: User, case_id: str, draft_id: str, subject: s
     return d
 
 
-def send_draft(s: Session, user: User, case_id: str, draft_id: str, override_unverified_recipient: bool = False) -> Draft:
+def send_draft(s: Session, user: User, case_id: str, draft_id: str, override_unverified_recipient: bool = False,
+               override_reason: str | None = None) -> Draft:
     require_role(user, "approver")
     case = get_case(s, user.workspace_id, case_id, for_update=True)
     d = s.get(Draft, draft_id)
@@ -372,6 +490,9 @@ def send_draft(s: Session, user: User, case_id: str, draft_id: str, override_unv
         raise Conflict("draft already sent")
     if not d.recipient_verified and not override_unverified_recipient:
         raise BadRequest("recipient comes from the invoice, not the verified vendor master — explicit approver override required")
+    if not d.recipient_verified and not meaningful(override_reason):
+        raise BadRequest(f"Sending to an address that isn't a verified contact needs a reason (at least {REASON_MIN_ALNUM} letters or digits): "
+                         "why this address, and how you know it belongs to the vendor.")
     if case.status != "AWAITING_HUMAN":
         raise Conflict(f"case is {case.status}")
     from probity import mailer
@@ -388,19 +509,23 @@ def send_draft(s: Session, user: User, case_id: str, draft_id: str, override_unv
     d.followup_at = d.sent_at + timedelta(days=2)
     s.add(Message(workspace_id=user.workspace_id, case_id=case.id, direction="out", from_email=get_settings().email_from, to_email=d.to_email, subject=d.subject, body=d.body))
     transition(case, "AWAITING_VENDOR")
-    audit(s, user.workspace_id, user.id, "draft.sent", d.id, {"to": d.to_email, "case_id": case.id, "override": override_unverified_recipient, "provider_id": provider_id})
+    audit(s, user.workspace_id, user.id, "draft.sent", d.id, {"to": d.to_email, "case_id": case.id, "override": override_unverified_recipient,
+                                                                 "override_reason": (override_reason or "").strip()[:500] if not d.recipient_verified else None,
+                                                                 "provider_id": provider_id})
     s.flush()
     emit(user.workspace_id, case.id, "action.sent", agent="action", status="done", message=f"Verification email sent to {d.to_email}; follow-up {d.followup_at.date()}")
     return d
 
 
-def vendor_reply(s: Session, workspace_id: str, actor: str, case_id: str, from_email: str, subject: str, body: str) -> dict:
+def vendor_reply(s: Session, workspace_id: str, actor: str, case_id: str, from_email: str, subject: str, body: str,
+                 extra_indicators: list[str] | None = None) -> dict:
     case = get_case(s, workspace_id, case_id, for_update=True)
     if case.status != "AWAITING_VENDOR":
         raise Conflict(f"case is {case.status}, not AWAITING_VENDOR")
     ctx = _ctx(workspace_id, case.id)
     bundle = vendor_bundle(s, workspace_id, case.vendor_id)
     claims, indicators = action.analyze_reply(ctx, case, bundle, from_email, body)
+    indicators = [*(extra_indicators or []), *indicators]  # transport facts (DKIM) are stored with the message
     s.add(Message(workspace_id=workspace_id, case_id=case.id, direction="in", from_email=from_email, to_email=get_settings().email_from or "", subject=subject, body=body, indicators=indicators))
     rows = [record_claim(s, ctx, "action", c) for c in claims]
     from probity.evidence.verifier import verify_claims
@@ -423,6 +548,21 @@ def vendor_reply(s: Session, workspace_id: str, actor: str, case_id: str, from_e
 OOB_NOTE_MIN_CHARS = 20
 
 
+def _copies_vendor_reply(s: Session, case: Case, note: str) -> bool:
+    """A note pasted from the vendor's own reply is not an out-of-band confirmation (M8)."""
+    from rapidfuzz import fuzz
+
+    norm = lambda t: re.sub(r"\s+", " ", (t or "").lower()).strip()  # noqa: E731
+    n = norm(note)
+    for body in s.scalars(select(Message.body).where(Message.case_id == case.id, Message.direction == "in")):
+        b = norm(body)
+        if not b:
+            continue
+        if n in b or b in n or fuzz.ratio(n, b) >= 85 or (len(n) >= 40 and fuzz.partial_ratio(n, b) >= 92):
+            return True
+    return False
+
+
 def confirm_out_of_band(s: Session, user: User, case_id: str, claim_ids: list[str], method: str, note: str,
                         known_channel: bool | None = None, confirmed_account_last4: str | None = None) -> dict:
     """Approver-only. The ONLY path by which a vendor's statements can lower the score (G11).
@@ -434,10 +574,14 @@ def confirm_out_of_band(s: Session, user: User, case_id: str, claim_ids: list[st
     case = get_case(s, user.workspace_id, case_id, for_update=True)
     if case.status != "AWAITING_HUMAN":
         raise Conflict(f"case is {case.status}")
-    if known_channel is False:
-        raise BadRequest("Out-of-band confirmation must use a phone number or channel already on file, not one from the invoice or the vendor's reply.")
+    if known_channel is not True:
+        raise BadRequest("Confirm that you used a phone number or channel already on file before this invoice "
+                         "(not one from the invoice or the vendor's reply).")
     if not note or len(note.strip()) < OOB_NOTE_MIN_CHARS:
         raise BadRequest(f"Describe the out-of-band confirmation in at least {OOB_NOTE_MIN_CHARS} characters: who you contacted, through which channel on file, and what they confirmed.")
+    if _copies_vendor_reply(s, case, note):
+        raise BadRequest("The note repeats the vendor's reply. Describe the confirmation you made yourself: who you contacted, "
+                         "on which number or channel already on file, and what they confirmed.")
     claims = [c for c in s.scalars(select(ClaimRow).where(ClaimRow.id.in_(claim_ids), ClaimRow.case_id == case.id, ClaimRow.agent == "action",
                                                           ClaimRow.active.is_(True)))]
     if not claims:
@@ -521,6 +665,9 @@ def _rescore(workspace_id: str, case_id: str, reason: str, rerun_checks: bool) -
         c = get_case(s, workspace_id, case_id)
         c.recommendation = {**c.recommendation, "gate": {**(c.recommendation.get("gate") or {}), "auto_cleared": False, "reasons": ["human review in progress"]}}
         audit(s, workspace_id, "system", "risk.rescored", case_id, {"reason": reason, "score": risk["score"], "previous": (risk.get("previous") or {}).get("score")})
+        from probity import sanity
+
+        sanity.stamp(c, sanity.check_case(s, c))
     return risk
 
 
@@ -553,12 +700,14 @@ def close_case(s: Session, user: User, case_id: str, outcome: str, resolution: s
                      summary=summary[:2000], peak_score=peak_score, peak_tier=peak.tier if peak else case.risk.get("tier", "LOW"),
                      evidence_ids=[e.id for e in s.scalars(select(EvidenceRow).where(EvidenceRow.case_id == case.id))],
                      bank_hmacs=[bank] if bank else [], domains=[dom] if dom else []))
-    if paid and case.vendor_id and outcome == "CLEARED" and fv(case.extraction, "invoice_number"):
+    # Only INR invoices become baseline: history is compared in INR and Probity never converts.
+    if paid and case.vendor_id and outcome == "CLEARED" and fv(case.extraction, "invoice_number") and fv(case.extraction, "currency") == "INR":
         ex = case.extraction
         s.add(HistoricalInvoice(workspace_id=user.workspace_id, vendor_id=case.vendor_id, invoice_number=fv(ex, "invoice_number"),
                                 invoice_number_norm=normalize_invoice_number(fv(ex, "invoice_number")), invoice_date=parse_date(fv(ex, "invoice_date")) or datetime.now().date(),
                                 total_minor=case.amount_minor or 0, bank_last4=(ex.get("bank_account") or {}).get("last4"), bank_hmac=bank,
-                                po_number=fv(ex, "po_number"), line_items=fv(ex, "line_items") or [], case_id=case.id))
+                                po_number=fv(ex, "po_number"), line_items=fv(ex, "line_items") or [], case_id=case.id,
+                                source="case", entered_by=user.id, approved_by=user.id, approved_at=datetime.now(timezone.utc)))
     audit(s, user.workspace_id, user.id, "case.closed", case.id, {"outcome": outcome, "resolution": resolution})
     s.flush()
     emit(user.workspace_id, case.id, "case.closed", agent="memory", status="done", message=f"Closed as {outcome}; saved to case memory")

@@ -1,4 +1,5 @@
 # Local backing services for development:  docker compose -f infra/docker-compose.dev.yml up -d
+# Connect with 127.0.0.1, not localhost: the ports are bound to IPv4 only, and "localhost" may try IPv6 first and hang.
 # Redis is optional (only for TASK_BACKEND=celery):  docker compose -f infra/docker-compose.dev.yml --profile worker up -d
 services:
   postgres:

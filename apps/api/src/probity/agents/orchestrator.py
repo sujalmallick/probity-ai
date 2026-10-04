@@ -88,27 +88,33 @@ def run(ctx: CaseCtx, depth: int) -> dict:
         case.memory_hits = hits
 
         amount = case.amount_minor or 0
+        # The gate holds on every required check without a real answer (risk_case.REQUIRED_CHECKS), including ones
+        # whose input is missing here; missing_info records why, so the reason reaches the reviewer.
         required = ["invoice_validation", "duplicate_detection"]
         optional: list[str] = []
         missing: list[str] = []
         rationale: list[str] = []
-        if fv(ex, "gstin") or fv(ex, "vendor_name"):
-            required.append("vendor_identity")
-        else:
+        required.append("vendor_identity")
+        if not (fv(ex, "gstin") or fv(ex, "vendor_name")):
             missing.append("vendor_identity: no GSTIN or vendor name on invoice")
-        (required if fv(ex, "line_items") else missing).append("price_anomaly" if fv(ex, "line_items") else "price_anomaly: no line items")
-        (required if fv(ex, "po_number") else missing).append("quantity_po_match" if fv(ex, "po_number") else "quantity_po_match: no PO number")
+        required.append("price_anomaly")
+        if not fv(ex, "line_items"):
+            missing.append("price_anomaly: no line items on invoice")
+        if fv(ex, "po_number"):
+            required.append("quantity_po_match")
+        else:
+            missing.append("quantity_po_match: no PO number")
+        required.append("bank_account_verification")
         if bank_hmac:
-            required.append("bank_account_verification")
             if not bank_known:
                 rationale.append("bank account on invoice is not a verified account for this vendor → deeper bank check")
         else:
             missing.append("bank_account_verification: no bank details on invoice")
         if domain:
-            required.append("domain_verification")
+            optional.append("domain_verification")
         external = vendor is None or amount >= policy["external_research_amount_minor"] or not bank_known or depth > 0
         if external:
-            required.append("external_reputation")
+            optional.append("external_reputation")
             rationale.append("vendor unknown" if vendor is None else ("amount ≥ " + format_inr(policy["external_research_amount_minor"]) if amount >= policy["external_research_amount_minor"] else "bank change / investigate further"))
         else:
             optional.append("external_reputation")

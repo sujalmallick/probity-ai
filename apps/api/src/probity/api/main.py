@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -59,6 +60,8 @@ def _startup() -> None:
     pending = pending_migrations()
     if pending:
         raise ConfigError(f"The database schema is not up to date ({pending}). Run: python -m probity.bootstrap")
+    # Cases left "investigating" by a crash or restart end with a clear reason instead of staying stuck.
+    svc.recover_after_restart()
     if st.task_backend == "inline":
         svc.start_inline_scheduler()
 
@@ -97,8 +100,39 @@ async def request_context(request: Request, call_next):  # type: ignore[no-untyp
     return response
 
 
-def _err(status: int, code: str, message: str, request: Request) -> JSONResponse:
-    return JSONResponse({"error": {"code": code, "message": message, "details": {}, "request_id": getattr(request.state, "request_id", None)}}, status_code=status)
+RETRYABLE = {408, 425, 429, 500, 502, 503, 504}
+
+
+def _err(status: int, code: str, message: str, request: Request, retryable: bool | None = None) -> JSONResponse:
+    """The one error shape: {error: {code, message (safe to show), retryable, ref}}. `ref` is the request id,
+    also in the X-Request-ID header and the server logs."""
+    return JSONResponse({"error": {"code": code, "message": message,
+                                   "retryable": (status in RETRYABLE) if retryable is None else retryable,
+                                   "ref": getattr(request.state, "request_id", None)}}, status_code=status)
+
+
+class LimitReached(Exception):
+    """A usage limit stops the request; the message names the limit and its setting."""
+
+
+@app.exception_handler(LimitReached)
+async def _limit(request: Request, e: LimitReached):  # type: ignore[no-untyped-def]
+    return _err(429, "limit_reached", str(e), request, retryable=False)
+
+
+@app.exception_handler(RequestValidationError)
+async def _invalid(request: Request, e: RequestValidationError):  # type: ignore[no-untyped-def]
+    parts = []
+    for err in e.errors()[:5]:
+        loc = ".".join(str(x) for x in err.get("loc", ()) if x not in ("body", "query", "path"))
+        parts.append(f"{loc}: {err.get('msg', 'invalid')}" if loc else str(err.get("msg", "invalid")))
+    return _err(422, "validation_error", "; ".join(parts) or "invalid request", request)
+
+
+@app.exception_handler(Exception)
+async def _unexpected(request: Request, e: Exception):  # type: ignore[no-untyped-def]
+    # Never echo internals: the reference ties the user's report to the logged traceback.
+    return _err(500, "internal_error", f"Something went wrong on our side. Reference: {getattr(request.state, 'request_id', '-')}", request)
 
 
 @app.exception_handler(svc.Conflict)
@@ -141,6 +175,10 @@ app.include_router(_risk_api.router)
 app.include_router(_vendors_api.router)
 app.include_router(_workspace_api.router)
 
+from probity.api import records as _records_api  # noqa: E402
+
+app.include_router(_records_api.router)
+
 # CSP for the web app (served from this origin). Clerk's frontend API, images and bot-protection need allowances.
 _CLERK = " ".join(filter(None, [get_settings().clerk_frontend_api or "https://*.clerk.accounts.dev", "https://*.clerk.com"]))
 WEB_CSP = (
@@ -169,28 +207,16 @@ def ready() -> JSONResponse:
 
 @app.get(f"{API}/metrics")
 def metrics(authorization: str | None = Header(default=None)) -> Response:
+    import hmac as _hmac
+
     token = get_settings().metrics_token
-    if token and authorization != f"Bearer {token}":
+    if token and not _hmac.compare_digest((authorization or "").encode(), f"Bearer {token}".encode()):
         raise HTTPException(401, "metrics token required")
     body, ctype = metrics_payload()
     return Response(body, media_type=ctype)
 
 
-# ---------------------------------------------------------------- auth (Clerk only)
-
-GONE = "This endpoint was removed: Probity runs on real data only."
-
-
-@app.get(f"{API}/auth/config")
-def auth_config() -> dict:
-    return {"mode": "clerk", "demo_login": False}
-
-
-# Removed with demo data. They answer 410 until the web app has stopped calling them, then they are deleted.
-@app.get(f"{API}/auth/demo-users")
-@app.post(f"{API}/auth/demo-login")
-def removed_demo_auth() -> None:
-    raise HTTPException(410, GONE)
+# ---------------------------------------------------------------- auth (Clerk only; sign-in config is in /app/config)
 
 
 @app.get(f"{API}/me")
@@ -266,7 +292,10 @@ class InviteIn(BaseModel):
 def invitations(user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
     svc.require_role(user, "owner")
     rows = s.scalars(select(Invitation).where(Invitation.workspace_id == user.workspace_id, Invitation.accepted_at.is_(None)).order_by(Invitation.created_at.desc()))
-    return {"items": [{"id": i.id, "email": i.email, "role": i.role, "created_at": iso(i.created_at)} for i in rows]}
+    from probity.auth import INVITATION_TTL, invitation_expired
+
+    return {"items": [{"id": i.id, "email": i.email, "role": i.role, "created_at": iso(i.created_at),
+                       "expires_at": iso(i.created_at + INVITATION_TTL), "expired": invitation_expired(i)} for i in rows]}
 
 
 @app.post(f"{API}/workspace/invitations", status_code=201)
@@ -326,9 +355,15 @@ def update_member(member_id: str, body: MemberPatch, request: Request, user: Use
 
 @app.post(f"{API}/documents", status_code=201)
 async def upload(request: Request, file: UploadFile = File(...), user: User = Depends(upload_limit), s: Session = Depends(db)) -> dict:
-    data = await file.read(15 * 1024 * 1024 + 1)
-    if len(data) > 15 * 1024 * 1024:
-        raise svc.BadRequest("file exceeds 15 MB")
+    from probity.ingestion.parse import extract_text, max_upload_bytes, sniff_mime
+
+    cap = max_upload_bytes()
+    data = await file.read(cap + 1)
+    if len(data) > cap:
+        raise svc.BadRequest(f"File exceeds {cap // (1024 * 1024)} MB (MAX_UPLOAD_MB)")
+    # Reject what can't be read before anything is stored: images and scans (no text layer) raise
+    # UnsupportedDocument → 415 with a clear message. Probity has no OCR.
+    await asyncio.to_thread(extract_text, data, sniff_mime(data, file.filename or "upload"))
     doc, duplicate_of = svc.upload_document(s, user, file.filename or "upload", data)
     return {"document_id": doc.id, "sha256": doc.sha256, "filename": doc.filename, "mime": doc.mime, "duplicate_of": duplicate_of}
 
@@ -377,8 +412,27 @@ class CreateCase(BaseModel):
 
 @app.post(f"{API}/cases", status_code=201)
 def create_case(body: CreateCase, user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
+    _check_daily_cases(s, user)
     c = svc.create_case(s, user, body.document_id, body.corrections)
     return {"case_id": c.id, "number": c.number, "status": c.status}
+
+
+def _check_daily_cases(s: Session, user: User) -> None:
+    limit = get_settings().workspace_daily_case_limit
+    start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    started_today = s.scalar(select(func.count()).select_from(Case).where(Case.workspace_id == user.workspace_id, Case.created_at >= start)) or 0
+    if started_today >= limit:
+        raise LimitReached(f"Limit reached: {limit:,} investigations per workspace per day (WORKSPACE_DAILY_CASE_LIMIT). "
+                           "It resets at 00:00 UTC.")
+
+
+@app.post(f"{API}/cases/{{case_id}}/retry", status_code=201)
+def retry_case(case_id: str, user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
+    """A FAILED case is never revived: a new case runs the same document (and corrections) from the start, and the two
+    are linked both ways. Counts against the daily investigation limit."""
+    _check_daily_cases(s, user)
+    c = svc.retry_case(s, user, case_id)
+    return {"case_id": c.id, "number": c.number, "status": c.status, "retry_of": case_id}
 
 
 @app.get(f"{API}/cases")
@@ -426,6 +480,14 @@ def get_case(case_id: str, user: User = Depends(current_user), s: Session = Depe
 @app.get(f"{API}/cases/{{case_id}}/evidence")
 def get_evidence(case_id: str, user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
     return {"items": svc.case_evidence(s, svc.get_case(s, user.workspace_id, case_id))}
+
+
+@app.get(f"{API}/cases/{{case_id}}/trace")
+def case_trace(case_id: str, user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
+    """Per-agent trace: timing, checks, could-not-verify, rule-based fallbacks, AI calls and claims, plus sanity results."""
+    from probity import trace
+
+    return trace.build(s, svc.get_case(s, user.workspace_id, case_id))
 
 
 @app.get(f"{API}/cases/{{case_id}}/explain")
@@ -563,11 +625,13 @@ def patch_draft(case_id: str, draft_id: str, body: DraftPatch, user: User = Depe
 
 class SendIn(BaseModel):
     override_unverified_recipient: bool = False
+    override_reason: str | None = Field(default=None, max_length=500)  # required when the recipient isn't a verified contact
 
 
 @app.post(f"{API}/cases/{{case_id}}/drafts/{{draft_id}}/send")
 def send(case_id: str, draft_id: str, body: SendIn | None = None, user: User = Depends(require_mfa_for_approvals), s: Session = Depends(db)) -> dict:
-    d = svc.send_draft(s, user, case_id, draft_id, (body or SendIn()).override_unverified_recipient)
+    body = body or SendIn()
+    d = svc.send_draft(s, user, case_id, draft_id, body.override_unverified_recipient, body.override_reason)
     return {"status": d.status, "sent_at": d.sent_at}
 
 
@@ -587,7 +651,7 @@ class OOBIn(BaseModel):
     claim_ids: list[str]
     method: Literal["phone_known_contact", "bank_letter", "in_person"]
     note: str = Field(max_length=2000)
-    # Attestation that the channel was already on file (not taken from the invoice or the reply).
+    # Required attestation that the channel was already on file (not taken from the invoice or the reply); must be true.
     known_channel: bool | None = None
     # Required when confirming a bank statement: the last 4 digits the vendor confirmed (must be the invoice's account).
     confirmed_account_last4: str | None = Field(default=None, pattern=r"^[0-9]{4}$")
@@ -629,7 +693,8 @@ def reveal(case_id: str, user: User = Depends(require_mfa_for_approvals), s: Ses
 async def inbound_email(request: Request) -> dict:
     """Vendor replies. Your email provider (Resend inbound, SES → Lambda, Cloudflare Email Worker, Mailgun
     route) POSTs JSON {from, to, subject, text, dkim?}. Signed: X-Probity-Timestamp + X-Probity-Signature =
-    hex HMAC-SHA256(INBOUND_EMAIL_SECRET, f"{timestamp}.{raw body}"), 5-minute replay window."""
+    hex HMAC-SHA256(INBOUND_EMAIL_SECRET, f"{timestamp}.{raw body}"). Timestamps may be up to 5 minutes old and 30 s in
+    the future; an identical body is accepted once per 10 minutes (replay protection)."""
     import hashlib
     import hmac as _hmac
     import re as _re
@@ -642,9 +707,17 @@ async def inbound_email(request: Request) -> dict:
     ts = request.headers.get("X-Probity-Timestamp", "")
     sig = request.headers.get("X-Probity-Signature", "")
     expected = _hmac.new(st.inbound_email_secret.encode(), f"{ts}.".encode() + raw, hashlib.sha256).hexdigest()
-    if not ts.isdigit() or abs(_time.time() - int(ts)) > 300 or not _hmac.compare_digest(expected, sig):
+    now = _time.time()
+    if not ts.isdigit() or not (now - 300 <= int(ts) <= now + 30) or not _hmac.compare_digest(expected, sig):
         raise HTTPException(401, "invalid signature")
-    msg = json.loads(raw)
+    if not _first_delivery(hashlib.sha256(raw).hexdigest()):
+        raise HTTPException(409, "duplicate delivery")
+    try:
+        msg = json.loads(raw)
+    except ValueError as e:
+        raise HTTPException(400, "body must be JSON") from e
+    if not isinstance(msg, dict):
+        raise HTTPException(400, "body must be a JSON object")
     rcpts = msg.get("to") if isinstance(msg.get("to"), list) else [msg.get("to", "")]
     case_id = next((m.group(1) for r in rcpts if (m := _re.search(r"case\+(case_[a-z0-9]+)@", str(r), _re.I))), None)
     if not case_id:
@@ -656,6 +729,13 @@ async def inbound_email(request: Request) -> dict:
     if not sender:
         raise HTTPException(422, "no valid sender address")
 
+    dkim = str(msg.get("dkim") or "").lower()
+    transport_indicators = []
+    if not dkim:
+        transport_indicators.append("Unauthenticated sender: no DKIM result from the email provider")
+    elif dkim != "pass":
+        transport_indicators.append("Sender failed DKIM verification")
+
     def _deliver() -> dict:
         from sqlalchemy import text as _text
 
@@ -665,12 +745,34 @@ async def inbound_email(request: Request) -> dict:
             raise LookupError("case not found")
         with session_scope(ws) as s:
             body = str(msg.get("text") or "")[:20000]
-            out = svc.vendor_reply(s, ws, "inbound-email", case_id, sender, str(msg.get("subject", ""))[:300], body)
-            if msg.get("dkim") and str(msg["dkim"]).lower() != "pass":
-                out["indicators"].append("Sender failed DKIM verification")
-            return out
+            return svc.vendor_reply(s, ws, "inbound-email", case_id, sender, str(msg.get("subject", ""))[:300], body,
+                                    extra_indicators=transport_indicators)
 
     return await asyncio.to_thread(_deliver)
+
+
+_SEEN_DELIVERIES: dict[str, float] = {}
+
+
+def _first_delivery(digest: str, ttl: int = 600) -> bool:
+    """True the first time a webhook body is seen within `ttl` seconds (Redis when configured, else this process)."""
+    import time as _time
+
+    from probity.redis_client import sync_redis
+
+    r = sync_redis()
+    if r is not None:
+        try:
+            return bool(r.set(f"probity:inbound:{digest}", "1", nx=True, ex=ttl))
+        except Exception:  # noqa: BLE001 - fall back to the in-process cache
+            pass
+    now = _time.time()
+    for k in [k for k, exp in _SEEN_DELIVERIES.items() if exp < now]:
+        _SEEN_DELIVERIES.pop(k, None)
+    if digest in _SEEN_DELIVERIES:
+        return False
+    _SEEN_DELIVERIES[digest] = now + ttl
+    return True
 
 
 # ---------------------------------------------------------------- vendors, memory
@@ -704,16 +806,6 @@ def kpis(user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
     }
 
 
-# Removed with demo data and synthetic benchmark numbers. 410 until the web app stops calling them, then deleted.
-@app.get(f"{API}/benchmark/summary")
-@app.post(f"{API}/demo/seed")
-@app.get(f"{API}/demo/files/{{name}}")
-@app.post(f"{API}/demo/vendor-reply/{{case_id}}")
-@app.put(f"{API}/demo/speed")
-def removed_demo() -> None:
-    raise HTTPException(410, GONE)
-
-
 # ---------------------------------------------------------------- static web build (optional)
 
 import os as _os
@@ -730,7 +822,9 @@ if _WEB.exists():
             try:
                 resp = await super().get_response(path, scope)
             except StarletteHTTPException as e:
-                if e.status_code != 404 or path.startswith("api/"):
+                # Unknown API paths stay 404 (never the web app's index.html). Use the request path: `path` is
+                # OS-normalised and has backslashes on Windows.
+                if e.status_code != 404 or scope.get("path", "").startswith("/api/"):
                     raise
                 resp = await super().get_response("index.html", scope)
             if path.startswith("assets/"):

@@ -9,7 +9,7 @@ invited role; otherwise the user gets a new workspace as its owner.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from typing import Any
 
@@ -24,8 +24,16 @@ from probity.db.models import Invitation, User, Workspace
 from probity.db.session import set_tenant
 
 
+INVITATION_TTL = timedelta(days=7)
+
+
 class AuthError(Exception):
     pass
+
+
+def invitation_expired(inv: Invitation, now: datetime | None = None) -> bool:
+    created = inv.created_at if inv.created_at.tzinfo else inv.created_at.replace(tzinfo=timezone.utc)
+    return (now or datetime.now(timezone.utc)) - created > INVITATION_TTL
 
 
 @dataclass
@@ -95,8 +103,10 @@ def provision(s: Session, external_id: str, email: str, name: str) -> User:
     if existing:  # the same verified email signed in with a new Clerk identity
         existing.external_id = external_id
         return existing
-    inv = s.scalars(select(Invitation).where(Invitation.email == email, Invitation.accepted_at.is_(None)).order_by(Invitation.created_at.desc())).first()
-    if inv:
+    inv = s.scalars(select(Invitation).where(Invitation.email == email, Invitation.accepted_at.is_(None),
+                                             Invitation.created_at >= datetime.now(timezone.utc) - INVITATION_TTL)
+                    .order_by(Invitation.created_at.desc())).first()
+    if inv:  # an expired invitation is ignored; the owner can invite again
         user = User(workspace_id=inv.workspace_id, email=email, name=name, role=inv.role, external_id=external_id)
         inv.accepted_at = datetime.now(timezone.utc)
         s.add(user)
