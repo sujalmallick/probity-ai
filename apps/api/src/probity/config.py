@@ -3,6 +3,7 @@ and ENV=prod refuses to start with dev secrets or demo-only modes."""
 
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -16,6 +17,15 @@ REPO_ROOT = API_ROOT.parents[1]
 _DEV_JWT = "dev-only-change-me-please-32-bytes-min"
 _DEV_FIELD_KEY = "ZGV2LW9ubHktZmllbGQta2V5LTMyLWJ5dGVzLWxvbmc="
 _DEV_HMAC = "dev-only-hmac-key"
+
+# Never shown by repr()/str(): error reporters (Sentry) serialise local variables with repr, and `st = get_settings()`
+# is a local in many functions.
+_SECRET_FIELDS = frozenset({
+    "jwt_secret", "field_key_b64", "hmac_key", "anthropic_api_key", "tavily_api_key", "clerk_secret_key", "resend_api_key",
+    "smtp_password", "s3_secret_access_key", "inbound_email_secret", "metrics_token", "sentry_dsn",
+})
+_URL_FIELDS = frozenset({"database_url", "database_migrate_url", "redis_url"})  # may embed a password
+_URL_PASSWORD = re.compile(r"(://[^:/@\s]*:)[^@\s]*@")
 
 
 class Settings(BaseSettings):
@@ -98,6 +108,14 @@ class Settings(BaseSettings):
     show_landing_page: bool = True
     cors_origins: str = "http://localhost:5180,http://127.0.0.1:5180"
 
+    def __repr_args__(self):  # type: ignore[no-untyped-def]
+        for k, v in super().__repr_args__():
+            if k in _SECRET_FIELDS and v:
+                v = "**********"
+            elif k in _URL_FIELDS and isinstance(v, str):
+                v = _URL_PASSWORD.sub(r"\1***@", v)
+            yield k, v
+
     @field_validator("database_url", "database_migrate_url", mode="before")
     @classmethod
     def _sqlalchemy_scheme(cls, v: str | None) -> str | None:
@@ -130,11 +148,17 @@ class Settings(BaseSettings):
             p.append("INBOUND_EMAIL_SECRET is required when EMAIL_REPLY_DOMAIN is set")
         return p
 
+    def problems_for_demo(self) -> list[str]:
+        """A public demo is reachable by others: the committed dev JWT secret would let anyone mint tokens."""
+        p = []
+        if self.jwt_secret == _DEV_JWT or len(self.jwt_secret) < 32:
+            p.append("JWT_SECRET must be set to a random value of at least 32 characters for ENV=demo")
+        return p
+
     def validate_for_env(self) -> None:
-        if self.env == "prod":
-            problems = self.problems_for_prod()
-            if problems:
-                raise RuntimeError("Refusing to start in ENV=prod:\n  - " + "\n  - ".join(problems))
+        problems = self.problems_for_prod() if self.env == "prod" else self.problems_for_demo() if self.env == "demo" else []
+        if problems:
+            raise RuntimeError(f"Refusing to start in ENV={self.env}:\n  - " + "\n  - ".join(problems))
 
 
 @lru_cache

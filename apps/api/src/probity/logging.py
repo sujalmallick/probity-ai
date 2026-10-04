@@ -20,9 +20,17 @@ _SCRUB = [
     (re.compile(r"\b\d{9,18}\b"), "<ACCT>"),
     (re.compile(r"\b[A-Z]{5}[0-9]{4}[A-Z]\b"), "<PAN>"),
     (re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+"), "<EMAIL>"),
-    (re.compile(r"(?i)(sk-ant-|re_|sk_live_|sk_test_)[a-z0-9_\-]{8,}"), "<SECRET>"),
+    (re.compile(r"(?i)(sk-ant-|re_|sk_live_|sk_test_|tvly-)[a-z0-9_\-]{8,}"), "<SECRET>"),
+    (re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), "<SECRET>"),
+    (re.compile(r"(://[^:/@\s]*:)[^@\s]*@"), r"\1***@"),  # password inside a connection URL
 ]
-_SENSITIVE_KEYS = {"password", "token", "authorization", "secret", "api_key", "body", "excerpt", "text", "prompt"}
+_SENSITIVE_KEYS = {"body", "excerpt", "text", "prompt"}
+_SENSITIVE_KEY_PARTS = ("password", "passwd", "secret", "token", "authorization", "api_key", "apikey", "dsn", "cookie", "private_key", "field_key", "hmac_key")
+
+
+def _sensitive(key: str) -> bool:
+    k = key.lower()
+    return k in _SENSITIVE_KEYS or any(part in k for part in _SENSITIVE_KEY_PARTS)
 
 
 def scrub(value: Any) -> Any:
@@ -31,7 +39,7 @@ def scrub(value: Any) -> Any:
             value = pat.sub(repl, value)
         return value
     if isinstance(value, dict):
-        return {k: ("<redacted>" if k.lower() in _SENSITIVE_KEYS else scrub(v)) for k, v in value.items()}
+        return {k: ("<redacted>" if isinstance(k, str) and _sensitive(k) else scrub(v)) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [scrub(v) for v in value]
     return value
@@ -56,8 +64,8 @@ def configure_logging() -> None:
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True),
+            structlog.processors.format_exc_info,  # before scrubbing, so traceback text is scrubbed too
             _scrub_processor,
-            structlog.processors.format_exc_info,
             renderer,
         ],
         wrapper_class=structlog.make_filtering_bound_logger(level),
@@ -68,9 +76,17 @@ def configure_logging() -> None:
     if s.sentry_dsn:
         import sentry_sdk
 
-        sentry_sdk.init(dsn=s.sentry_dsn, environment=s.env, traces_sample_rate=0.05, send_default_pii=False,
-                        before_send=lambda event, hint: scrub(event))
+        sentry_sdk.init(dsn=s.sentry_dsn, **sentry_options(s.env))
     _configured = True
+
+
+def sentry_options(env: str) -> dict[str, Any]:
+    """No frame locals (they hold settings, tokens and invoice text), no request bodies, no PII; scrub what remains."""
+    return {
+        "environment": env, "traces_sample_rate": 0.05, "send_default_pii": False, "include_local_variables": False,
+        "max_request_body_size": "never", "before_send": lambda event, hint: scrub(event),
+        "before_breadcrumb": lambda crumb, hint: scrub(crumb),
+    }
 
 
 def get_logger(name: str) -> Any:

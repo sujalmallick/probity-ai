@@ -276,8 +276,8 @@ export default function CaseView() {
               {cfg.features.simulated_inbox ? (
                 <>
                   <div className="label mt-2">Simulated inbox</div>
-                  <button className="btn" onClick={() => post(`/demo/vendor-reply/${id}?kind=legit`).then(load)}>Deliver vendor reply</button>
-                  <button className="btn !text-xs text-muted" onClick={() => post(`/demo/vendor-reply/${id}?kind=spoof`).then(load)}>Deliver spoofed reply</button>
+                  <button className="btn" disabled={!can(role, "accountant")} title={!can(role, "accountant") ? "Requires accountant role" : ""} onClick={() => post(`/demo/vendor-reply/${id}?kind=legit`).then(load)}>Deliver vendor reply</button>
+                  <button className="btn !text-xs text-muted" disabled={!can(role, "accountant")} onClick={() => post(`/demo/vendor-reply/${id}?kind=spoof`).then(load)}>Deliver spoofed reply</button>
                 </>
               ) : (
                 <div className="text-xs text-muted">Waiting for the vendor's reply.</div>
@@ -560,7 +560,12 @@ function DocumentTab({ c }: { c: Any }) {
               {fields.map(([k, f]: [string, Any]) => (
                 <tr key={k} className="border-t border-line align-top" title={f.evidence_snippet}>
                   <td className="py-1.5 pr-2 text-muted">{k.replace(/_/g, " ")}</td>
-                  <td className="py-1.5 pr-2 font-medium break-all">{typeof f.value === "number" && /total|subtotal|tax/.test(k) ? inr(f.value, true) : String(f.value ?? "—")}</td>
+                  <td className="py-1.5 pr-2 font-medium break-all">
+                    {typeof f.value === "number" && /total|subtotal|tax/.test(k) ? inr(f.value, true) : String(f.value ?? "—")}
+                    {f.via === "human_correction" && (
+                      <div className="text-xs font-normal text-medium">Corrected by a person · document said: {f.original ? String(f.original.raw ?? f.original.value ?? "—") : "(not found)"}</div>
+                    )}
+                  </td>
                   <td className="py-1.5 text-right text-xs tabular-nums" style={{ color: f.confidence < 0.8 ? "var(--medium)" : "var(--muted)" }}>{Math.round((f.confidence ?? 0) * 100)}%{f.via === "human_correction" ? " ✎" : ""}</td>
                 </tr>
               ))}

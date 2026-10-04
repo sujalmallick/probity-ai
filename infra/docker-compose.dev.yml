@@ -3,11 +3,11 @@ services:
   postgres:
     image: postgres:16-alpine
     environment: { POSTGRES_USER: probity, POSTGRES_PASSWORD: probity, POSTGRES_DB: probity }
-    ports: ["5434:5432"]
+    ports: ["127.0.0.1:5434:5432"]
     volumes: [pgdata-dev:/var/lib/postgresql/data, ./postgres:/docker-entrypoint-initdb.d:ro]
     healthcheck: { test: ["CMD-SHELL", "pg_isready -U probity"], interval: 3s, retries: 20 }
   redis:
     image: redis:7-alpine
-    ports: ["6380:6379"]
+    ports: ["127.0.0.1:6380:6379"]
 volumes:
   pgdata-dev:

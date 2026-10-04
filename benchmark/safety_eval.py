@@ -12,6 +12,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 _tmp = Path(tempfile.mkdtemp(prefix="probity-safety-"))
+os.environ["ENV"] = "test"  # never the developer .env: in-process test client, demo sign-in
 os.environ["DATABASE_URL"] = f"sqlite:///{(_tmp / 'safety.db').as_posix()}"
 os.environ["STORAGE_DIR"] = str(_tmp / "uploads")
 os.environ["LLM_MODE"] = "mock"

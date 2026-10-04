@@ -18,7 +18,7 @@ from sqlalchemy import func, or_, select  # noqa: F401
 from sqlalchemy.orm import Session
 
 from probity import services as svc
-from probity.api.deps import current_user, db, issue_token, require_mfa_for_approvals, upload_limit
+from probity.api.deps import _rate_limit, current_user, db, demo_login_on, demo_login_users, demo_on, issue_token, require_mfa_for_approvals, upload_limit
 from probity.config import REPO_ROOT, get_settings
 from probity.db.audit import audit, verify_chain
 from probity.db.models import iso, AuditLog, Invitation, Case, CaseMemory, Document, HistoricalInvoice, User, Vendor, VendorBankAccount, VendorContact, VendorDomain, Workspace
@@ -118,9 +118,11 @@ async def _http(request: Request, e: HTTPException):  # type: ignore[no-untyped-
 
 API = "/api/v1"
 
+from probity.api import risk as _risk_api  # noqa: E402
 from probity.api import vendors as _vendors_api  # noqa: E402
 from probity.api import workspace as _workspace_api  # noqa: E402
 
+app.include_router(_risk_api.router)
 app.include_router(_vendors_api.router)
 app.include_router(_workspace_api.router)
 
@@ -161,35 +163,37 @@ def metrics(authorization: str | None = Header(default=None)) -> Response:
 
 # ---------------------------------------------------------------- auth (AUTH_MODE=local, non-prod)
 
-def _demo_on() -> bool:
-    st = get_settings()
-    return st.demo_features and st.env != "prod"
+_demo_on = demo_on
+_demo_login_on = demo_login_on
+_demo_login_users = demo_login_users
 
 
 @app.get(f"{API}/auth/config")
-def auth_config() -> dict:
+def auth_config(request: Request) -> dict:
     st = get_settings()
-    return {"mode": st.auth_mode, "demo_login": st.auth_mode == "local" and _demo_on()}
+    return {"mode": st.auth_mode, "demo_login": _demo_login_on(request)}
 
 
 @app.get(f"{API}/auth/demo-users")
-def demo_users(s: Session = Depends(db)) -> list[dict]:
-    if get_settings().auth_mode != "local" or not _demo_on():
+def demo_users(request: Request, s: Session = Depends(db)) -> list[dict]:
+    if not _demo_login_on(request):
         raise HTTPException(404, "not available")
     names = {w.id: w.name for w in s.scalars(select(Workspace))}
     return [{"id": u.id, "name": u.name, "email": u.email, "role": u.role, "workspace": {"id": u.workspace_id, "name": names.get(u.workspace_id)}}
-            for u in s.scalars(select(User).order_by(User.role))]
+            for u in _demo_login_users(s)]
 
 
 class DemoLogin(BaseModel):
-    user_id: str
+    user_id: str = Field(max_length=64)
 
 
 @app.post(f"{API}/auth/demo-login")
 def demo_login(body: DemoLogin, request: Request, s: Session = Depends(db)) -> dict:
-    if get_settings().auth_mode != "local" or not _demo_on():
+    if not _demo_login_on(request):
         raise HTTPException(404, "not available")
-    u = s.get(User, body.user_id)
+    if get_settings().env != "test":
+        _rate_limit(f"demo-login:{request.client.host if request.client else '-'}", 20, 60)
+    u = next((x for x in _demo_login_users(s) if x.id == body.user_id), None)
     if not u:
         raise HTTPException(404, "user not found")
     set_tenant(s, u.workspace_id)
@@ -565,11 +569,14 @@ class OOBIn(BaseModel):
     note: str = Field(max_length=2000)
     # Attestation that the channel was already on file (not taken from the invoice or the reply).
     known_channel: bool | None = None
+    # Required when confirming a bank statement: the last 4 digits the vendor confirmed (must be the invoice's account).
+    confirmed_account_last4: str | None = Field(default=None, pattern=r"^[0-9]{4}$")
 
 
 @app.post(f"{API}/cases/{{case_id}}/out-of-band-confirmation")
 def oob(case_id: str, body: OOBIn, user: User = Depends(require_mfa_for_approvals), s: Session = Depends(db)) -> dict:
-    return svc.confirm_out_of_band(s, user, case_id, body.claim_ids, body.method, body.note, known_channel=body.known_channel)
+    return svc.confirm_out_of_band(s, user, case_id, body.claim_ids, body.method, body.note, known_channel=body.known_channel,
+                                   confirmed_account_last4=body.confirmed_account_last4)
 
 
 @app.post(f"{API}/cases/{{case_id}}/rescore")
@@ -707,9 +714,11 @@ def demo_file(name: str, user: User = Depends(current_user)) -> FileResponse:
 
 @app.post(f"{API}/demo/vendor-reply/{{case_id}}")
 def demo_vendor_reply(case_id: str, kind: Literal["legit", "spoof"] = "legit", user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
-    """Simulated vendor inbox: deliver a scripted reply to the case's sent verification email."""
-    if not _demo_on():
+    """Simulated vendor inbox: deliver a scripted reply to the case's sent verification email. Same role as
+    recording a real reply; only exists while email is simulated (outbox)."""
+    if not _demo_on() or get_settings().email_backend != "outbox":
         raise HTTPException(404, "not available")
+    svc.require_role(user, "accountant")
     from probity.demo.seed import scripted_reply
 
     case = svc.get_case(s, user.workspace_id, case_id)
@@ -721,9 +730,12 @@ def demo_vendor_reply(case_id: str, kind: Literal["legit", "spoof"] = "legit", u
 def demo_speed(delay_ms: int = Query(..., ge=0, le=5000), user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
     if not _demo_on():
         raise HTTPException(404, "not available")
+    svc.require_role(user, "owner")  # workspace-wide setting
     ws = s.get(Workspace, user.workspace_id)
     assert ws
+    before = (ws.policy or {}).get("demo_agent_delay_ms")
     ws.policy = {**(ws.policy or {}), "demo_agent_delay_ms": delay_ms}
+    audit(s, user.workspace_id, user.id, "policy.updated", user.workspace_id, {"demo_agent_delay_ms": {"before": before, "after": delay_ms}})
     return {"delay_ms": delay_ms}
 
 

@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from probity import storage
 from probity.agents.common import load_case, record_claim, today
+from probity.db.audit import audit
 from probity.db.models import Document
 from probity.db.session import session_scope
 from probity.events import CaseCtx
@@ -21,7 +22,7 @@ from probity.evidence.models import AgentClaim, EvidenceIn
 from probity.guardrails import crypto
 from probity.guardrails.text import detect_injection, wrap_untrusted
 from probity.ingestion.parse import _OCR_MARK as OCR_MARK
-from probity.ingestion.parse import OCR_CONFIDENCE_PENALTY, email_attachment_pdf, email_meta, extract, extract_tables, low_confidence, parse_fields
+from probity.ingestion.parse import CORRECTABLE_FIELDS, OCR_CONFIDENCE_PENALTY, email_attachment_pdf, email_meta, extract, extract_tables, low_confidence, parse_fields
 from probity.ingestion.validators import normalize_domain
 from probity.ingestion.validators import parse_money_minor, validate_extraction
 from probity.llm import client as llm
@@ -88,8 +89,14 @@ def extract_document(ctx: CaseCtx, data: bytes, mime: str, corrections: dict) ->
         ctx.progress(AGENT, f"Filling {len(missing)} low-confidence fields")
         _llm_fill(ctx, text, fields, missing)
 
-    for k, v in corrections.items():  # human corrections win, and are marked as such
-        fields[k] = {**fields.get(k, {}), "value": v, "raw": str(v), "confidence": 1.0, "via": "human_correction"}
+    for k, v in corrections.items():  # human corrections win, are marked as such, and keep what the document said
+        if k not in CORRECTABLE_FIELDS:  # defence in depth: the API already refuses these
+            continue
+        before = fields.get(k)
+        if before is not None and str(before.get("value", "")).strip() == str(v).strip():
+            continue  # unchanged value: not a correction
+        original = {kk: before.get(kk) for kk in ("value", "raw", "confidence")} if before else None
+        fields[k] = {**(before or {}), "value": v, "raw": str(v), "confidence": 1.0, "via": "human_correction", "original": original}
 
     # Protect bank account: keep last4 + HMAC + ciphertext, never the raw number in case JSON.
     if "bank_account" in fields:
@@ -142,6 +149,10 @@ def run(ctx: CaseCtx) -> dict:
         case = load_case(s, ctx)
         case.extraction = fields
         case.validation = validation
+        corrected = {k: f for k, f in fields.items() if f.get("via") == "human_correction"}
+        if corrected:
+            audit(s, ctx.workspace_id, "system", "case.corrections_applied", case.id,
+                  {k: {"before": (f.get("original") or {}).get("raw"), "after": f.get("raw")} for k, f in corrected.items()})
         total = (fields.get("total") or {}).get("value")
         case.amount_minor = total if isinstance(total, int) else None
         for hit in injection[:3]:

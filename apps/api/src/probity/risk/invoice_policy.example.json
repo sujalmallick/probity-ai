@@ -1,0 +1,41 @@
+{
+  "version": "invoice-risk-v1",
+  "weights": {
+    "bank_change": 0.22,
+    "duplicate_invoice": 0.18,
+    "amount_anomaly": 0.14,
+    "math_mismatch": 0.12,
+    "new_vendor": 0.08,
+    "date_anomaly": 0.08,
+    "prompt_injection": 0.08,
+    "missing_fields": 0.06,
+    "round_amount": 0.04
+  },
+  "tiers": [
+    {"name": "LOW", "max_score": 0.2, "action": "approve"},
+    {"name": "MEDIUM", "max_score": 0.4, "action": "review"},
+    {"name": "HIGH", "max_score": 0.65, "action": "hold_and_verify"},
+    {"name": "CRITICAL", "max_score": 1.0, "action": "block_payment"}
+  ],
+  "escalation_rules": [
+    {"signal": "duplicate_invoice", "at_least": 1.0, "min_tier_index": 3},
+    {"signal": "duplicate_invoice", "at_least": 0.7, "min_tier_index": 2},
+    {"signal": "bank_change", "at_least": 1.0, "min_tier_index": 2},
+    {"signal": "prompt_injection", "at_least": 1.0, "min_tier_index": 2},
+    {"signal": "math_mismatch", "at_least": 1.0, "min_tier_index": 1},
+    {"signal": "amount_anomaly", "at_least": 0.9, "min_tier_index": 1}
+  ],
+  "required_fields": ["vendor", "invoice_no", "invoice_date", "total", "bank_account", "line_items"],
+  "params": {
+    "math_tolerance": 0.005,
+    "math_saturation": 0.05,
+    "duplicate_window_days": 30,
+    "amount_midpoint": 3.5,
+    "amount_steepness": 1.5,
+    "min_vendor_history": 4,
+    "min_global_history": 20,
+    "max_invoice_age_days": 180,
+    "round_base": 1000,
+    "min_coverage": 0.6
+  }
+}

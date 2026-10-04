@@ -65,7 +65,8 @@ def test_one_case_demo(client):
     assert case["risk"]["score"] == 70 and case["status"] == "AWAITING_HUMAN"
 
     # Out-of-band confirmation is approver-only
-    body = {"claim_ids": reply["claim_ids"], "method": "phone_known_contact", "note": "Called R. Kulkarni on +91 20 4000 1000 (number on file)"}
+    body = {"claim_ids": reply["claim_ids"], "method": "phone_known_contact", "note": "Called R. Kulkarni on +91 20 4000 1000 (number on file)",
+            "confirmed_account_last4": "9812"}
     assert client.post(f"{API}/cases/{case['id']}/out-of-band-confirmation", headers=acc, json=body).status_code == 403
     r = client.post(f"{API}/cases/{case['id']}/out-of-band-confirmation", headers=appr, json=body)
     assert r.status_code == 200, r.text

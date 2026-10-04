@@ -382,6 +382,11 @@ def extract_tables(data: bytes, mime: str) -> list:
 
 REQUIRED_FIELDS = ["vendor_name", "invoice_number", "invoice_date", "total", "line_items"]
 
+# Fields a person may correct before an investigation (fixing what the parser misread). Payment routing and money
+# — bank_account, sender_domain, amounts, line items — are never correctable: they are read from the document only.
+CORRECTABLE_FIELDS = frozenset({"vendor_name", "gstin", "invoice_number", "invoice_date", "due_date", "po_number", "ifsc", "vendor_email", "vendor_address"})
+MAX_CORRECTION_LENGTH = 300
+
 
 def low_confidence(fields: dict[str, dict], threshold: float = 0.8) -> list[str]:
     missing = [k for k in REQUIRED_FIELDS if k not in fields]

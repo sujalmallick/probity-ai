@@ -136,6 +136,7 @@ Rules: import vendors **before** invoices/POs (they reference vendors by GSTIN o
 | `GET /cases/{id}/events` | SSE via `streamEvents()` (fetch + header; Last-Event-ID resume) |
 | `GET /cases/{id}/explain`, `/evidence`, `/audit` | Why panel, evidence, audit trail |
 | `GET /cases/{id}/export?format=pdf|json` | download |
+| **new** `GET /cases/{id}/invoice-risk?narrate=false` | any role. Policy-driven second view of the invoice (does **not** change the case score): `{extracted, signals:[{signal, weight, score\|null, evidence}], final_score (0–1), coverage, tier, escalated_by, recommended_action, warnings, explanation:{contributions, top_drivers, tier_reason, escalations, unknown, text}, meta:{policy_source, history_size, vendor_matched}}`. `score: null` = could not be evaluated (show "unknown", never 0). `narrate=true` adds `narrative:{summary, key_points, source: "llm"\|"template", note}` (slower; always present, falls back to the template). 409 before the invoice has been read |
 | `POST /cases/{id}/decision {decision, reason}` | approver · MFA |
 | drafts: `GET /cases/{id}/drafts`, `PATCH …/drafts/{draft_id}`, `POST …/drafts/{draft_id}/send {override_unverified_recipient?}` | send = approver · MFA |
 | `POST /cases/{id}/out-of-band-confirmation {claim_ids, method, note, known_channel?}` | approver · MFA. `note`: required, ≥ 20 chars after trimming (`OOB_NOTE_MIN_CHARS`), ≤ 2000 — "who did you contact, on which number already on file". `known_channel`: `true` = confirmed via a channel already on file; `false` → 400 (a channel taken from the invoice/email can't confirm anything); omitted = allowed (older clients). Recorded in the audit entry. UI: ask "Did you use a phone number/email that was already on file before this invoice?" |
@@ -160,7 +161,8 @@ Rules: import vendors **before** invoices/POs (they reference vendors by GSTIN o
 
 `GET /workspace/members`, `POST /workspace/invitations {email, role}`, `GET /workspace/invitations`, `DELETE /workspace/invitations/{id}`,
 `PATCH /workspace/members/{id} {role?, active?}` (owner; 409 for last owner) · `GET|PUT /workspace/policy` (owner for PUT; response includes
-`reviewed_at` once saved) · `GET /me` · `GET /dashboard/kpis` · `GET /memory/cases?q=` · `GET /ready` (public; 503 when degraded).
+`reviewed_at` once saved) · **new** `GET|PUT|DELETE /workspace/invoice-risk-policy` (owner for PUT/DELETE; → `{policy, source: "workspace"\|"default"}`;
+PUT validates weights/tiers/escalation rules → 400 with the problems; DELETE reverts to the bundled default; both audited) · `GET /me` · `GET /dashboard/kpis` · `GET /memory/cases?q=` · `GET /ready` (public; 503 when degraded).
 
 ## Changelog
 - 2026-10-04 — v1 of this contract: app config, onboarding, vendor CRUD + verification rules, CSV import, case notes, demo gating.
@@ -170,3 +172,5 @@ Rules: import vendors **before** invoices/POs (they reference vendors by GSTIN o
   `workspace {id, name}` (FRONTEND).
 - 2026-10-04 — v1.3: `verification {by, at, method, note}` on vendor accounts/domains/contacts (+ `verified_method` on contacts);
   `author_role` on case notes. Migration 0006 (provenance columns).
+- 2026-10-04 — v1.4: `GET /cases/{id}/invoice-risk` (policy-driven, explainable invoice risk with optional LLM narrative) and
+  `GET|PUT|DELETE /workspace/invoice-risk-policy`. Additive; the case score and existing fields are unchanged.

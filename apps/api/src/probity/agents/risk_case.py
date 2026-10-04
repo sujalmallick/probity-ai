@@ -127,6 +127,13 @@ def gate(ctx: CaseCtx) -> dict:
         claims = list(s.scalars(select(ClaimRow).where(ClaimRow.case_id == ctx.case_id, ClaimRow.active.is_(True))))
         required = set(case.plan.get("required_checks", []))
         incomplete = [k for k, v in (case.checks or {}).items() if v.get("status") == "failed"]
+        # A required check that could not run (e.g. no bank history to compare against) proves nothing, so
+        # it cannot support auto-clear: "no evidence of a problem" is not evidence of no problem.
+        skipped_required = [f"{k.replace('_', ' ')} ({v.get('reason') or 'skipped'})" for k, v in (case.checks or {}).items()
+                            if k in required and v.get("status") == "skipped"]
+        no_history = (case.checks or {}).get("history", {}).get("status") == "fired"
+        # Someone changed what the document says before it was checked; an approver must see both versions.
+        corrected = sorted(k for k, f in (case.extraction or {}).items() if isinstance(f, dict) and f.get("via") == "human_correction")
         fired_signals = [c for c in claims if c.signal and c.signal not in ("no_history", "round_sum")]
         unverified_high = [c for c in claims if c.status == "unverified" and c.severity == "high"]
         flagged_before = any(h.get("peak_tier") in ("HIGH", "CRITICAL") or h.get("outcome") == "CONFIRMED_ISSUE" for h in case.memory_hits or [])
@@ -135,8 +142,16 @@ def gate(ctx: CaseCtx) -> dict:
             reasons.append("auto-clear disabled by policy")
         if risk["tier"] != "LOW":
             reasons.append(f"tier {risk['tier']}")
+        if case.vendor_id is None:
+            reasons.append("vendor not matched to the vendor master")
         if case.partial or incomplete:
             reasons.append("investigation incomplete (FAILED_PARTIAL)")
+        if skipped_required:
+            reasons.append("required check could not run: " + "; ".join(skipped_required))
+        if no_history:
+            reasons.append("no transaction history with this vendor")
+        if corrected:
+            reasons.append("extracted fields corrected by a person before investigation: " + ", ".join(corrected))
         if fired_signals:
             reasons.append(f"{len(fired_signals)} risk indicator(s) present")
         if unverified_high:

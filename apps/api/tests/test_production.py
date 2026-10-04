@@ -121,10 +121,11 @@ def test_last_owner_cannot_be_demoted(client, fresh_db):
     r = client.patch(f"/api/v1/workspace/members/{me['id']}", headers=owner, json={"role": "viewer"})
     assert r.status_code == 409
     other = next(m for m in members if m["role"] == "viewer")
+    viewer_tok = client.post("/api/v1/auth/demo-login", json={"user_id": other["id"]}).json()["token"]
     r = client.patch(f"/api/v1/workspace/members/{other['id']}", headers=owner, json={"active": False})
     assert r.json()["active"] is False
-    viewer_tok = client.post("/api/v1/auth/demo-login", json={"user_id": other["id"]}).json()["token"]
-    assert client.get("/api/v1/me", headers={"Authorization": f"Bearer {viewer_tok}"}).status_code == 401  # deactivated
+    assert client.get("/api/v1/me", headers={"Authorization": f"Bearer {viewer_tok}"}).status_code == 401  # existing session revoked
+    assert client.post("/api/v1/auth/demo-login", json={"user_id": other["id"]}).status_code == 404  # and no new one
 
 
 # ---------------------------------------------------------------- inbound email

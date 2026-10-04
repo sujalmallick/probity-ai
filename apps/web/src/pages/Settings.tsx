@@ -72,7 +72,7 @@ export default function SettingsPage() {
               <div className="label mb-2">Demo: agent animation speed</div>
               <div className="flex gap-2">
                 {SPEEDS.map(([ms, label]) => (
-                  <button key={ms} className={`btn flex-1 text-xs ${(p.demo_agent_delay_ms ?? 0) === ms ? "!border-accent text-accent" : ""}`} onClick={async () => { await api(`/demo/speed?delay_ms=${ms}`, { method: "PUT" }); load(); }}>{label}</button>
+                  <button key={ms} disabled={!owner} className={`btn flex-1 text-xs ${(p.demo_agent_delay_ms ?? 0) === ms ? "!border-accent text-accent" : ""}`} onClick={async () => { await api(`/demo/speed?delay_ms=${ms}`, { method: "PUT" }); load(); }}>{label}</button>
                 ))}
               </div>
               <div className="mt-2 text-xs text-muted">Slows the live timeline so each agent step is readable on stage.</div>

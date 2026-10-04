@@ -114,16 +114,25 @@ def run(ctx: CaseCtx) -> dict:
 
         # --- PO match / missing PO / quantity / temporal
         po_no = fv(ex, "po_number")
-        po = s.scalars(select(PurchaseOrder).where(PurchaseOrder.workspace_id == ctx.workspace_id, PurchaseOrder.po_number == po_no)).first() if po_no else None
+        # A PO only counts if it was raised for this vendor; quoting another vendor's PO number is a red flag.
+        pos = list(s.scalars(select(PurchaseOrder).where(PurchaseOrder.workspace_id == ctx.workspace_id, PurchaseOrder.po_number == po_no))) if po_no else []
+        po = next((p for p in pos if case.vendor_id and p.vendor_id == case.vendor_id), None)
+        other_vendor_po = po is None and bool(pos)
         res = d.missing_po(po_no, po is not None)
         checks["po_present"] = _status(res)
         if res.fired:
+            if not po_no:
+                stmt = "Invoice carries no purchase order number."
+            elif other_vendor_po:
+                stmt = f"PO {po_no} on the invoice was raised for a different vendor."
+            else:
+                stmt = f"PO {po_no} on the invoice was not found in purchase records."
             record_claim(s, ctx, AGENT, AgentClaim(
-                claim=("Invoice carries no purchase order number." if not po_no else f"PO {po_no} on the invoice was not found in purchase records."),
+                claim=stmt,
                 signal="missing_po",
                 evidence=[
                     EvidenceIn(source="invoice", field="po_number", value=po_no, source_ref="invoice", excerpt=fsnip(ex, "po_number") or "(no PO field on invoice)", tier=1),
-                    EvidenceIn(source="purchase_order", field="po_lookup", value="not found" if po_no else "n/a", source_ref=f"purchase_orders?po={po_no}", tier=1),
+                    EvidenceIn(source="purchase_order", field="po_lookup", value=("other vendor" if other_vendor_po else "not found") if po_no else "n/a", source_ref=f"purchase_orders?po={po_no}", tier=1),
                 ],
                 confidence=0.9, severity="warn", assertion={"op": "info"}, data={"observed": po_no or "none", "baseline": "PO on file"},
             ))

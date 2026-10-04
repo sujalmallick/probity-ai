@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from probity import __version__, importer
 from probity import services as svc
-from probity.api.deps import current_user, db
+from probity.api.deps import current_user, db, demo_login_on, demo_on
 from probity.config import get_settings
 from probity.db.audit import audit
 from probity.db.models import (
@@ -30,15 +30,15 @@ ImportKind = Literal["vendors", "invoices", "purchase_orders"]
 # ---------------------------------------------------------------- public app config
 
 @router.get("/app/config")
-def app_config() -> dict:
+def app_config(request: Request) -> dict:
     """Public, unauthenticated. Tells the web app what to show; contains no secrets."""
     st = get_settings()
-    demo = st.demo_features and st.env != "prod"
+    demo = demo_on()
     live = lambda ok: "live" if ok else "offline"  # noqa: E731
     return {
         "env": st.env,
         "version": __version__,
-        "auth": {"mode": st.auth_mode, "demo_login": demo and st.auth_mode == "local", "sign_up": st.auth_mode == "clerk"},
+        "auth": {"mode": st.auth_mode, "demo_login": demo_login_on(request), "sign_up": st.auth_mode == "clerk"},
         "features": {"landing_page": st.show_landing_page, "demo": demo, "benchmark": demo, "simulated_inbox": demo and st.email_backend == "outbox"},
         "integrations": {
             "ai": live(st.llm_mode == "live" and bool(st.anthropic_api_key)),

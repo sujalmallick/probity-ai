@@ -201,7 +201,7 @@ def test_out_of_band_confirmation_provenance_on_vendor(client):
     reply = client.post(f"{API}/demo/vendor-reply/{case['id']}?kind=legit", headers=acc).json()
     note = "Called R. Kulkarni on +91 20 4000 1000 (number on file)"
     assert client.post(f"{API}/cases/{case['id']}/out-of-band-confirmation", headers=appr,
-                       json={"claim_ids": reply["claim_ids"], "method": "phone_known_contact", "note": note}).status_code == 200
+                       json={"claim_ids": reply["claim_ids"], "method": "phone_known_contact", "note": note, "confirmed_account_last4": "9812"}).status_code == 200
     v = client.get(f"{API}/vendors/{case['vendor_id']}", headers=acc).json()
     new_acct = next(a for a in v["accounts"] if a["account"] == "XXXX9812")
     assert new_acct["verification"]["note"] == note and new_acct["verification"]["method"] == "phone_known_contact"

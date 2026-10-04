@@ -25,8 +25,8 @@ from probity.events import CaseCtx, emit
 from probity.evidence.models import AgentClaim, EvidenceIn
 from probity.evidence.store import evidence_public
 from probity.graph.build import investigate
-from probity.guardrails.crypto import decrypt
-from probity.ingestion.parse import sha256, sniff_mime
+from probity.guardrails.crypto import decrypt, mask
+from probity.ingestion.parse import CORRECTABLE_FIELDS, MAX_CORRECTION_LENGTH, sha256, sniff_mime
 from probity.ingestion.validators import normalize_invoice_number, parse_date
 from probity.policy import get_policy
 from probity.tools.base import Budget
@@ -163,16 +163,34 @@ def upload_document(s: Session, user: User, filename: str, data: bytes) -> tuple
     return doc, None
 
 
+def clean_corrections(corrections: dict | None) -> dict[str, str]:
+    """Only parser misreads of identity/reference fields may be corrected, as short plain strings. Payment routing
+    and money (bank account, sender domain, amounts, line items) always come from the document itself."""
+    out: dict[str, str] = {}
+    for k, v in (corrections or {}).items():
+        if k not in CORRECTABLE_FIELDS:
+            raise BadRequest(f"'{k}' cannot be corrected; correctable fields: {', '.join(sorted(CORRECTABLE_FIELDS))}")
+        if not isinstance(v, str):
+            raise BadRequest(f"correction for '{k}' must be text")
+        v = v.strip()
+        if len(v) > MAX_CORRECTION_LENGTH or any(ord(ch) < 32 for ch in v):
+            raise BadRequest(f"correction for '{k}' must be a single line of at most {MAX_CORRECTION_LENGTH} characters")
+        if v:
+            out[k] = v
+    return out
+
+
 def create_case(s: Session, user: User, document_id: str, corrections: dict | None = None) -> Case:
     require_role(user, "accountant")
     doc = s.get(Document, document_id)
     if doc is None or doc.workspace_id != user.workspace_id:
         raise LookupError("document not found")
+    corrections = clean_corrections(corrections)
     n = (s.scalar(select(func.max(Case.number)).where(Case.workspace_id == user.workspace_id)) or 1840) + 1
-    case = Case(workspace_id=user.workspace_id, document_id=doc.id, number=n, corrections=corrections or {})
+    case = Case(workspace_id=user.workspace_id, document_id=doc.id, number=n, corrections=corrections)
     s.add(case)
     s.flush()
-    audit(s, user.workspace_id, user.id, "case.created", case.id, {"document_id": doc.id})
+    audit(s, user.workspace_id, user.id, "case.created", case.id, {"document_id": doc.id, "corrections": corrections})
     s.commit()
     emit(user.workspace_id, case.id, "case.created", status="queued", message=f"Case #{n} created from {doc.filename}")
     _submit(_run, user.workspace_id, case.id, 0)
@@ -315,8 +333,12 @@ OOB_NOTE_MIN_CHARS = 20
 
 
 def confirm_out_of_band(s: Session, user: User, case_id: str, claim_ids: list[str], method: str, note: str,
-                        known_channel: bool | None = None) -> dict:
-    """Approver-only. The ONLY path by which a vendor's statements can lower the score (G11)."""
+                        known_channel: bool | None = None, confirmed_account_last4: str | None = None) -> dict:
+    """Approver-only. The ONLY path by which a vendor's statements can lower the score (G11).
+
+    What gets verified is bound to the invoice, never to the reply: a bank confirmation verifies only the account the
+    invoice pays (and the approver re-types its last 4 digits), a domain confirmation only the domain the invoice
+    came from. A reply that names a different account or domain cannot be confirmed into the vendor master."""
     require_role(user, "approver")
     case = get_case(s, user.workspace_id, case_id)
     if case.status != "AWAITING_HUMAN":
@@ -325,11 +347,33 @@ def confirm_out_of_band(s: Session, user: User, case_id: str, claim_ids: list[st
         raise BadRequest("Out-of-band confirmation must use a phone number or channel already on file, not one from the invoice or the vendor's reply.")
     if not note or len(note.strip()) < OOB_NOTE_MIN_CHARS:
         raise BadRequest(f"Describe the out-of-band confirmation in at least {OOB_NOTE_MIN_CHARS} characters: who you contacted, through which channel on file, and what they confirmed.")
-    claims = [c for c in s.scalars(select(ClaimRow).where(ClaimRow.id.in_(claim_ids), ClaimRow.case_id == case.id, ClaimRow.agent == "action"))]
+    claims = [c for c in s.scalars(select(ClaimRow).where(ClaimRow.id.in_(claim_ids), ClaimRow.case_id == case.id, ClaimRow.agent == "action",
+                                                          ClaimRow.active.is_(True)))]
     if not claims:
         raise BadRequest("no vendor-reply claims selected")
+    if any(c.status != "unverified" for c in claims):
+        raise Conflict("one or more selected statements were already confirmed")
     ex = case.extraction
     bank = ex.get("bank_account") or {}
+    inv_dom = (fv(ex, "sender_domain") or "").lower() or None
+    for c in claims:  # validate everything before writing anything
+        kind, named = (c.data or {}).get("kind"), ((c.data or {}).get("value") or "").lower() or None
+        if kind == "bank":
+            if not bank.get("hmac"):
+                raise BadRequest("this invoice carries no bank account to confirm")
+            if named and named[-4:] != bank.get("last4"):
+                raise BadRequest(f"The reply names account {mask(named[-4:])}, but this invoice pays {mask(bank.get('last4'))}. "
+                                 "Out-of-band confirmation can only verify the account the invoice pays.")
+            if (confirmed_account_last4 or "").strip() != bank.get("last4"):
+                raise BadRequest(f"Enter the last 4 digits of the account the vendor confirmed; it must be the invoice's account {mask(bank.get('last4'))}.")
+        elif kind == "domain":
+            if not inv_dom:
+                raise BadRequest("this invoice has no sender domain to confirm")
+            if named and named != inv_dom:
+                raise BadRequest(f"The reply names {named}, but this invoice came from {inv_dom}. "
+                                 "Out-of-band confirmation can only verify the domain the invoice came from.")
+        else:
+            raise BadRequest("statement cannot be confirmed out-of-band")
     today = datetime.now(timezone.utc).date()
     ctx = _ctx(user.workspace_id, case.id)
     for c in claims:
@@ -343,7 +387,7 @@ def confirm_out_of_band(s: Session, user: User, case_id: str, claim_ids: list[st
                                         acct_enc=base64.b64decode(bank["enc"]) if bank.get("enc") else None, ifsc=fv(ex, "ifsc"),
                                         verified=True, verified_method=method, verified_by=user.id, first_seen=today, last_seen=today))
         elif kind == "domain" and case.vendor_id:
-            dom = (c.data or {}).get("value") or fv(ex, "sender_domain")
+            dom = inv_dom
             if dom and not s.scalars(select(VendorDomain).where(VendorDomain.vendor_id == case.vendor_id, VendorDomain.domain == dom)).first():
                 s.add(VendorDomain(workspace_id=user.workspace_id, vendor_id=case.vendor_id, domain=dom, verified=True, verified_method=method))
         ev = record_claim(s, ctx, "approver", AgentClaim(
@@ -354,7 +398,9 @@ def confirm_out_of_band(s: Session, user: User, case_id: str, claim_ids: list[st
         ev.status = "verified"
         c.status, c.verifier_notes = "verified", f"confirmed out-of-band by {user.name} via {method}"
         c.confidence = 0.95
-    audit(s, user.workspace_id, user.id, "verification.out_of_band", case.id, {"claims": claim_ids, "method": method, "note": note, "known_channel": known_channel})
+    audit(s, user.workspace_id, user.id, "verification.out_of_band", case.id, {"claims": claim_ids, "method": method, "note": note, "known_channel": known_channel,
+                                                                               "account": mask(bank.get("last4")) if any((c.data or {}).get("kind") == "bank" for c in claims) else None,
+                                                                               "domain": inv_dom if any((c.data or {}).get("kind") == "domain" for c in claims) else None})
     s.commit()
     emit(user.workspace_id, case.id, "verification.confirmed_out_of_band", agent="human_gate", status="done", message=f"{user.name} confirmed {len(claims)} statement(s) via {method.replace('_', ' ')}")
     risk = rescore(user.workspace_id, case.id, reason="out_of_band_confirmation", rerun_checks=True)

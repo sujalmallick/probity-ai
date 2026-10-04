@@ -38,6 +38,8 @@ VENDORS = [
 ABC_PRICES = [57500, 58000, 58500, 59000, 59500, 60000, 60500, 59000, 58500, 59500, 58000, 60000]
 VARIATION = [0, 1, -1, 2, -2, 1, 0, -1, 2, -2, 1, -1]  # ±% for other vendors
 
+DEMO_WORKSPACE_NAME = "Probity Demo Traders"
+
 USERS = [
     ("Asha Rao", "asha@probity-demo.in", "owner"),
     ("Vikram Mehta", "vikram@probity-demo.in", "approver"),
@@ -55,14 +57,14 @@ def reset_db() -> None:
     shutil.rmtree(get_settings().storage_dir, ignore_errors=True)
 
 
-def seed_workspace(s: Session, today: date | None = None, name: str = "Probity Demo Traders") -> Workspace:
+def seed_workspace(s: Session, today: date | None = None, name: str = DEMO_WORKSPACE_NAME) -> Workspace:
     today = today or date.today()
     ws = Workspace(name=name, policy={})
     s.add(ws)
     s.flush()
     set_tenant(s, ws.id)
     for n, e, r in USERS:
-        s.add(User(workspace_id=ws.id, name=n, email=e if name == "Probity Demo Traders" else f"{ws.id}.{e}", role=r))
+        s.add(User(workspace_id=ws.id, name=n, email=e if name == DEMO_WORKSPACE_NAME else f"{ws.id}.{e}", role=r))
     for idx, (vname, gstin, addr, site, cemail, cname, acct, ifsc, item, price, qty) in enumerate(VENDORS):
         v = Vendor(workspace_id=ws.id, name=vname, gstin=gstin, pan=gstin[2:12], address=addr, website=site)
         s.add(v)

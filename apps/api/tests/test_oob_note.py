@@ -47,7 +47,7 @@ def test_channel_not_on_file_is_rejected(client):
 def test_valid_note_rescores_and_audits_attestation(client):
     case_id, claim_ids, acc, appr = _case_with_reply(client)
     r = client.post(f"{API}/cases/{case_id}/out-of-band-confirmation", headers=appr,
-                    json={"claim_ids": claim_ids, "method": "phone_known_contact", "known_channel": True,
+                    json={"claim_ids": claim_ids, "method": "phone_known_contact", "known_channel": True, "confirmed_account_last4": "9812",
                           "note": "Called the accounts contact on the number in our vendor master; confirmed the new account."})
     assert r.status_code == 200, r.text
     assert _score(client, acc, case_id) == 20

@@ -7,6 +7,7 @@ and stay UNVERIFIED (0 points) until an approver records an out-of-band confirma
 from __future__ import annotations
 
 import re
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -69,8 +70,16 @@ _NEW_INSTR = re.compile(r"(?i)\b(pay(?:ment)? to (?:the )?new|use (?:the )?new a
 _SENTENCES = re.compile(r".+?(?:[.!?](?=\s|$)|\n|$)")  # sentence ends at punctuation followed by space, so domains stay whole
 
 
+class ReplyStatement(BaseModel):
+    """One thing the vendor asserted in their reply. `quote` must be copied verbatim from the reply and `value`
+    (account last 4 / domain) must appear inside that quote, so the model cannot invent what the vendor said."""
+    kind: Literal["bank", "domain"]
+    quote: str = Field(min_length=12, max_length=2000)
+    value: str | None = Field(default=None, max_length=253)
+
+
 class ReplyAnalysis(BaseModel):
-    statements: list[dict] = Field(default_factory=list)
+    statements: list[ReplyStatement] = Field(default_factory=list)
     indicators: list[str] = Field(default_factory=list)
 
 
@@ -79,21 +88,20 @@ def analyze_reply(ctx: CaseCtx, case, bundle: dict, from_email: str, body: str) 
     contact_doms = {normalize_domain(c.email) for c in bundle["contacts"] if c.verified}
     verified_doms = {d.domain for d in bundle["domains"] if d.verified} | contact_doms
     ex = case.extraction
-    inv_last4 = (ex.get("bank_account") or {}).get("last4")
     inv_dom = fv(ex, "sender_domain")
 
     def mock() -> ReplyAnalysis:
-        stmts: list[dict] = []
+        stmts: list[ReplyStatement] = []
         for sent in (m.group(0).strip() for m in _SENTENCES.finditer(body)):
-            if not sent:
+            if len(sent) < 12:
                 continue
             low = sent.lower()
             if re.search(r"(?i)\b(bank|account|a/c|ifsc)\b", sent) and re.search(r"(?i)\b(new|changed|change|moved|switched|updated|confirm)\b", sent):
                 m = re.search(r"(\d{4})\b(?!.*\d{4}\b)", sent)
-                stmts.append({"kind": "bank", "quote": sent, "value": m.group(1) if m else inv_last4})
+                stmts.append(ReplyStatement(kind="bank", quote=sent, value=m.group(1) if m else None))
             elif re.search(r"(?i)\b(domain|email address|e-mail|website)\b", low) or (inv_dom and inv_dom in low):
                 dm = re.search(r"\b([a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:in|com|co|net|org))\b", low)
-                stmts.append({"kind": "domain", "quote": sent, "value": dm.group(1) if dm else inv_dom})
+                stmts.append(ReplyStatement(kind="domain", quote=sent, value=dm.group(1) if dm else None))
         ind = []
         if sender_dom and verified_doms and sender_dom not in verified_doms:
             ind.append(f"Reply sent from {sender_dom}, which is not a verified domain for this vendor ({', '.join(sorted(verified_doms))})")
@@ -108,14 +116,19 @@ def analyze_reply(ctx: CaseCtx, case, bundle: dict, from_email: str, body: str) 
                        tier="fast", tags={**ctx.tags, "agent": AGENT, "prompt_version": pv}, mock=mock, budget=ctx.budget)
     claims = []
     for st in out.statements:
-        if st.get("quote", "") not in body:  # quotes must be verbatim from the reply
+        if st.quote not in body:  # quotes must be verbatim from the reply
             continue
-        kind = st.get("kind")
+        value = (st.value or "").strip().lower() or None
+        if value and value not in st.quote.lower():  # a value the vendor did not actually write is dropped
+            value = None
+        if st.kind == "bank" and value and not re.fullmatch(r"\d{4}", value[-4:]):
+            value = None
+        kind = st.kind
         label = "bank account" if kind == "bank" else "domain"
-        val = f"XXXX{st['value']}" if kind == "bank" and st.get("value") else st.get("value")
+        val = f"XXXX{value[-4:]}" if kind == "bank" and value else value
         claims.append(AgentClaim(
             claim=f"Vendor reply states the {label} {val or ''} is theirs (unverified until confirmed out-of-band).".replace("  ", " "),
-            evidence=[EvidenceIn(source="vendor_reply", field=kind, value=val, source_ref=f"email:{from_email}", excerpt=st["quote"][:1000], tier=2 if not out.indicators else 3)],
+            evidence=[EvidenceIn(source="vendor_reply", field=kind, value=val, source_ref=f"email:{from_email}", excerpt=st.quote[:1000], tier=2 if not out.indicators else 3)],
             confidence=0.5, severity="info", assertion={"op": "requires_out_of_band"},
             data={"kind": kind, "value": val, "reply_from": from_email},
         ))
