@@ -58,6 +58,33 @@ def test_narrative_is_optional_and_never_fails(client):
     assert n["source"] in ("llm", "template") and "HIGH" in n["summary"]
 
 
+def test_narrative_is_written_once_per_score(client, monkeypatch):
+    """Opening the Invoice risk tab again reuses the saved AI explanation; only a changed score asks the AI again,
+    and a rule-based fallback is never kept."""
+    from probity.risk import case_scoring, narrate
+
+    calls = []
+
+    def fake(result, **kw):  # type: ignore[no-untyped-def]
+        calls.append(result["final_score"])
+        return {"summary": f"Scored {result['tier']}", "key_points": [], "source": "llm" if len(calls) != 2 else "template", "note": None}
+
+    monkeypatch.setattr(narrate, "narrate", fake)
+    acc = login(client, "accountant")
+    case = upload_and_run(client, acc, "bank_change")
+    url = f"{API}/cases/{case['id']}/invoice-risk?narrate=true"
+    first = client.get(url, headers=acc).json()["narrative"]
+    again = client.get(url, headers=acc).json()["narrative"]
+    assert len(calls) == 1 and again["cached"] is True and again["summary"] == first["summary"]
+    assert "cached" not in client.get(f"{API}/cases/{case['id']}/invoice-risk", headers=acc).json()  # no narrate: no AI at all
+    assert len(calls) == 1
+
+    monkeypatch.setattr(case_scoring, "narrative_fingerprint", lambda result: "score changed")
+    client.get(url, headers=acc)  # new facts: asked again; this time the AI fails (template) and nothing is kept
+    client.get(url, headers=acc)  # so the next view tries the AI again
+    assert len(calls) == 3
+
+
 def test_other_workspace_cannot_score_case(client):
     acc = login(client, "accountant")
     case = upload_and_run(client, acc, "bank_change")

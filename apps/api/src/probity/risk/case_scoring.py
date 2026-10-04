@@ -11,6 +11,7 @@ The case's evidence-gated score (risk/engine.py) is not touched; this is a secon
 
 from __future__ import annotations
 
+import hashlib
 import json
 from decimal import Decimal
 from pathlib import Path
@@ -73,7 +74,32 @@ def score_case(s: Session, case: Case, *, narrate: bool = False, budget=None) ->
     out["meta"] = {"case_id": case.id, "policy_source": source, "policy_version": policy.get("version"), "history_size": len(history),
                    "vendor_matched": case.vendor_id is not None}
     if narrate:
-        from probity.risk.narrate import narrate as _narrate
-
-        out["narrative"] = _narrate(out, tags={"workspace_id": case.workspace_id, "case_id": case.id}, budget=budget)
+        out["narrative"] = cached_narrative(case, out, budget=budget)
     return out
+
+
+NARRATIVE_KEY = "invoice_risk_narrative"
+
+
+def narrative_fingerprint(result: dict) -> str:
+    """Hash of exactly what the explainer is shown (score, tier, drivers, evidence): equal fingerprints get an
+    equivalent explanation, so the AI is only asked again when one of those changes."""
+    from probity.risk.narrate import facts
+
+    return hashlib.sha256(json.dumps(facts(result), sort_keys=True, default=str).encode()).hexdigest()
+
+
+def cached_narrative(case: Case, result: dict, budget=None) -> dict:  # type: ignore[no-untyped-def]
+    """The AI explanation is written once per distinct score and kept on the case: opening the Invoice risk tab
+    again reuses it instead of making another AI call. Only AI-written text is kept; a rule-based fallback is
+    retried on the next view."""
+    from probity.risk.narrate import narrate
+
+    key = narrative_fingerprint(result)
+    saved = (case.recommendation or {}).get(NARRATIVE_KEY) or {}
+    if saved.get("fingerprint") == key:
+        return {**saved["narrative"], "cached": True}
+    n = narrate(result, tags={"workspace_id": case.workspace_id, "case_id": case.id}, budget=budget)
+    if n.get("source") == "llm":
+        case.recommendation = {**(case.recommendation or {}), NARRATIVE_KEY: {"fingerprint": key, "narrative": n}}
+    return n
