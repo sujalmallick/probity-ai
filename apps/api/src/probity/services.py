@@ -20,7 +20,7 @@ from probity.db.models import (
     AgentEvent, Case, CaseMemory, ClaimRow, Decision, Document, Draft, EvidenceRow, HistoricalInvoice, Message,
     RiskScoreRow, User, VendorBankAccount, VendorDomain, Workspace,
 )
-from probity.db.session import session_scope
+from probity.db.session import session_scope, tenant
 from probity.events import CaseCtx, emit
 from probity.evidence.models import AgentClaim, EvidenceIn
 from probity.evidence.store import evidence_public
@@ -106,6 +106,11 @@ def _submit(fn, *args) -> None:  # type: ignore[no-untyped-def]
 
 
 def _run(workspace_id: str, case_id: str, depth: int) -> None:
+    with tenant(workspace_id):
+        _run_inner(workspace_id, case_id, depth)
+
+
+def _run_inner(workspace_id: str, case_id: str, depth: int) -> None:
     ctx = _ctx(workspace_id, case_id)
     started = time.monotonic()
     try:
@@ -209,7 +214,7 @@ def decide(s: Session, user: User, case_id: str, decision: str, reason: str) -> 
 
 
 def _rerun_deeper(workspace_id: str, case_id: str, depth: int) -> None:
-    with session_scope() as s:
+    with session_scope(workspace_id) as s:
         ctx = CaseCtx(workspace_id, case_id, Budget.from_settings())
         deactivate_agent_claims(s, ctx, ["orchestrator", "vendor_investigator", "transaction_analyst", "web_research"], f"investigate_further depth {depth}")
     _run(workspace_id, case_id, depth)
@@ -326,6 +331,11 @@ def confirm_out_of_band(s: Session, user: User, case_id: str, claim_ids: list[st
 def rescore(workspace_id: str, case_id: str, reason: str = "manual_rescore", rerun_checks: bool = False) -> dict:
     """Recompute the score. With rerun_checks the deterministic agents re-evaluate signals against current
     master data (e.g. newly verified bank account); without it, the score is recomputed from stored claims."""
+    with tenant(workspace_id):
+        return _rescore(workspace_id, case_id, reason, rerun_checks)
+
+
+def _rescore(workspace_id: str, case_id: str, reason: str, rerun_checks: bool) -> dict:
     ctx = _ctx(workspace_id, case_id)
     ctx.delay_ms = min(ctx.delay_ms, 300)
     if rerun_checks:
@@ -463,5 +473,5 @@ def reveal_account(s: Session, user: User, case: Case) -> str | None:
 def events_after(workspace_id: str, case_id: str, after: int) -> list[AgentEvent]:
     from probity.db.session import telemetry_scope
 
-    with telemetry_scope() as s:
+    with telemetry_scope(workspace_id) as s:
         return list(s.scalars(select(AgentEvent).where(AgentEvent.workspace_id == workspace_id, AgentEvent.case_id == case_id, AgentEvent.id > after).order_by(AgentEvent.id)))

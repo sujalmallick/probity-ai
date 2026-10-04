@@ -3,6 +3,11 @@ import tempfile
 from pathlib import Path
 
 _tmp = Path(tempfile.mkdtemp(prefix="probity-test-"))
+# TEST_DATABASE_URL=postgresql+psycopg://probity_app:...  (+ TEST_DATABASE_MIGRATE_URL for the owner) runs
+# the whole suite against Postgres with row-level security enforced; default is a throwaway SQLite file.
+if os.environ.get("TEST_DATABASE_URL"):
+    os.environ["DATABASE_URL"] = os.environ["TEST_DATABASE_URL"]
+    os.environ["DATABASE_MIGRATE_URL"] = os.environ.get("TEST_DATABASE_MIGRATE_URL", os.environ["TEST_DATABASE_URL"])
 os.environ.setdefault("DATABASE_URL", f"sqlite:///{(_tmp / 'test.db').as_posix()}")
 os.environ.setdefault("STORAGE_DIR", str(_tmp / "uploads"))
 os.environ.setdefault("ENV", "test")

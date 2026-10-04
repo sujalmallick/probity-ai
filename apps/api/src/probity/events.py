@@ -19,7 +19,7 @@ EVENT_TYPES = {
 
 def emit(workspace_id: str, case_id: str, type_: str, *, agent: str | None = None, status: str | None = None, message: str = "", data: dict[str, Any] | None = None) -> None:
     assert type_ in EVENT_TYPES, type_
-    with telemetry_scope() as s:
+    with telemetry_scope(workspace_id) as s:
         s.add(AgentEvent(workspace_id=workspace_id, case_id=case_id, type=type_, agent=agent, status=status, message=message, data=data or {}))
 
 

@@ -7,26 +7,50 @@ from sqlalchemy import select, update
 from probity import services as svc
 from probity.db.audit import audit, verify_chain
 from probity.db.models import AuditLog, Case, Workspace
-from probity.db.session import session_scope
+from probity.db.session import is_postgres, session_scope
 from probity.tools.base import Budget, BudgetExceeded
 
 
 def test_audit_chain_detects_tampering(fresh_db):
-    with session_scope() as s:
+    with session_scope(fresh_db) as s:
         for i in range(3):
             audit(s, fresh_db, "u", "test", f"e{i}", {"i": i})
-    with session_scope() as s:
+    with session_scope(fresh_db) as s:
         assert verify_chain(s, fresh_db) == (True, None)
         row = s.scalars(select(AuditLog).where(AuditLog.workspace_id == fresh_db).order_by(AuditLog.id.desc())).first()
         with pytest.raises(PermissionError):  # ORM refuses UPDATE
             row.action = "tampered"
             s.flush()
         s.rollback()
-    with session_scope() as s:  # raw SQL bypasses the ORM guard — the hash chain still catches it
+    if is_postgres():
+        # The database itself refuses UPDATE on audit_log (trigger + revoked grant).
+        with pytest.raises(Exception, match="(?i)immutable|permission denied"):
+            with session_scope(fresh_db) as s:
+                s.execute(update(AuditLog).where(AuditLog.entity == "e1").values(data={"i": 99}))
+        return
+    with session_scope(fresh_db) as s:  # SQLite: raw SQL bypasses the ORM guard — the hash chain still catches it
         s.execute(update(AuditLog).where(AuditLog.entity == "e1").values(data={"i": 99}))
-    with session_scope() as s:
+    with session_scope(fresh_db) as s:
         ok, bad = verify_chain(s, fresh_db)
         assert not ok and bad is not None
+
+
+def test_rls_blocks_cross_tenant_reads(fresh_db):
+    """Postgres only: with no tenant (or another tenant) bound, tenant tables return nothing."""
+    if not is_postgres():
+        pytest.skip("row-level security is a PostgreSQL feature")
+    from probity.db.models import Vendor
+
+    with session_scope(fresh_db) as s:
+        assert len(list(s.scalars(select(Vendor)))) == 6
+    with session_scope("ws_someone_else") as s:
+        assert list(s.scalars(select(Vendor))) == []
+    with session_scope() as s:
+        assert list(s.scalars(select(Vendor))) == []
+    with pytest.raises(Exception, match="(?i)row-level security"):
+        with session_scope("ws_someone_else") as s:
+            s.add(Vendor(workspace_id=fresh_db, name="smuggled"))  # write into another tenant
+            s.flush()
 
 
 def test_status_machine():
@@ -80,7 +104,7 @@ def test_critical_never_auto_clears_and_needs_two_approvers(client, fresh_db):
     """Auto-clear abuse: even with auto-clear on and a huge auto-clear limit, CRITICAL routes to humans."""
     from test_demo_flow import upload_and_run
 
-    with session_scope() as s:
+    with session_scope(fresh_db) as s:
         ws = s.get(Workspace, fresh_db)
         ws.policy = {"auto_clear_enabled": True, "auto_clear_max_amount_minor": 10**12, "weight_overrides": {"bank_account_changed": 50}}
     case = upload_and_run(client, login(client, "accountant"), "invoice_4821.pdf")

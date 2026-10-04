@@ -11,10 +11,10 @@ install:            ## create venv + install API and web deps
 seed:               ## reset the local DB with demo workspace, vendors, history and demo PDFs
 	cd apps/api && ../../$(PY) -m probity.demo.seed --reset
 
-api:                ## FastAPI on :8000
-	cd apps/api && ../../$(PY) -m uvicorn probity.api.main:app --host 127.0.0.1 --port 8000 --reload
+api:                ## FastAPI on :8010
+	cd apps/api && ../../$(PY) -m uvicorn probity.api.main:app --host 127.0.0.1 --port 8010 --reload
 
-web:                ## Vite dev server on :5173 (proxies /api to :8000)
+web:                ## Vite dev server on :5180 (proxies /api to :8010)
 	cd apps/web && npm run dev
 
 dev:                ## run API + web together

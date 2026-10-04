@@ -68,7 +68,7 @@ def _cache_write(key: str, value: dict) -> None:
 
 def _record(tags: dict, model: str, mode: str, ok: bool, started: float, tin: int = 0, tout: int = 0) -> None:
     try:
-        with telemetry_scope() as s:
+        with telemetry_scope(tags.get("workspace_id")) as s:
             s.add(
                 LLMCall(
                     workspace_id=tags.get("workspace_id", "-"),

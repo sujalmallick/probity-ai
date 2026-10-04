@@ -24,7 +24,7 @@ from langgraph.graph import END, START, StateGraph
 from probity.agents import document, orchestrator, risk_case, transaction, vendor, verification, web
 from probity.config import get_settings
 from probity.db.models import Case
-from probity.db.session import session_scope
+from probity.db.session import session_scope, tenant
 from probity.events import CaseCtx
 from probity.ingestion.parse import UnsupportedDocument
 from probity.tools.base import BudgetExceeded
@@ -43,7 +43,7 @@ class State(TypedDict, total=False):
 
 
 def _set_status(ctx: CaseCtx, status: str) -> None:
-    with session_scope() as s:
+    with session_scope(ctx.workspace_id) as s:
         c = s.get(Case, ctx.case_id)
         assert c is not None
         c.status = status
@@ -56,7 +56,8 @@ def _guard(name: str, fn: Callable[[CaseCtx, State], dict], checks_on_fail: list
         last: Exception | None = None
         for attempt in range(retries + 1):
             try:
-                return fn(ctx, state) or {}
+                with tenant(ctx.workspace_id):
+                    return fn(ctx, state) or {}
             except (BudgetExceeded, UnsupportedDocument) as e:
                 last = e
                 break
@@ -67,7 +68,7 @@ def _guard(name: str, fn: Callable[[CaseCtx, State], dict], checks_on_fail: list
         ctx.emit("agent.failed", agent=name, status="failed", message=f"{name} failed: {last}" + ("" if fatal else " — continuing with reduced confidence"))
         if fatal:
             raise RuntimeError(f"{name}: {last}") from last
-        with session_scope() as s:
+        with session_scope(ctx.workspace_id) as s:
             c = s.get(Case, ctx.case_id)
             assert c is not None
             c.partial = True

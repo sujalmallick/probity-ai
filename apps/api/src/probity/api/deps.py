@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from probity.config import get_settings
 from probity.db.models import User
-from probity.db.session import get_sessionmaker
+from probity.db.session import get_sessionmaker, set_tenant
 
 
 def db() -> Iterator[Session]:
@@ -59,8 +59,9 @@ def current_user(
         raise HTTPException(401, "missing bearer token")
     claims = _decode(raw)
     user = s.get(User, claims["sub"])
-    if user is None or user.workspace_id != claims["ws"]:
+    if user is None or user.workspace_id != claims["ws"] or not user.active:
         raise HTTPException(401, "unknown user")
+    set_tenant(s, user.workspace_id)
     _rate_limit(f"u:{user.id}", 120, 60)
     return user
 

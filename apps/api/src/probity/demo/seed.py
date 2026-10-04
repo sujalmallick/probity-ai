@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from probity.config import API_ROOT, get_settings
 from probity.db.audit import audit
 from probity.db.models import Base, Case, HistoricalInvoice, PurchaseOrder, User, Vendor, VendorBankAccount, VendorContact, VendorDomain, Workspace
-from probity.db.session import drop_all, get_engine, init_db, session_scope
+from probity.db.session import drop_all, init_db, session_scope, set_tenant
 from probity.demo.invoice_pdf import InvoiceSpec, render
 from probity.guardrails import crypto
 from probity.ingestion.validators import normalize_invoice_number
@@ -60,6 +60,7 @@ def seed_workspace(s: Session, today: date | None = None, name: str = "Probity D
     ws = Workspace(name=name, policy={})
     s.add(ws)
     s.flush()
+    set_tenant(s, ws.id)
     for n, e, r in USERS:
         s.add(User(workspace_id=ws.id, name=n, email=e if name == "Probity Demo Traders" else f"{ws.id}.{e}", role=r))
     for idx, (vname, gstin, addr, site, cemail, cname, acct, ifsc, item, price, qty) in enumerate(VENDORS):

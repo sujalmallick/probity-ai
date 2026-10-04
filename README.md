@@ -29,16 +29,16 @@ Claim ──► Evidence ──► Verification ──► Risk engine (pure code
 ```bash
 make install     # venv + pip install -e apps/api[dev] + npm install
 make seed        # demo workspace, 5 users, 6 vendors with 12-invoice histories, demo PDFs
-make dev         # API on :8000, web on :5173
+make dev         # API on :8010, web on :5180
 ```
 
-Open http://localhost:5173 and sign in as **Vikram Mehta (approver)**. Then click **ABC Supplies · INV-4821** on the dashboard. To slow the timeline down for a stage demo, use *Policy → Demo: agent animation speed*.
+Open http://localhost:5180 and sign in as **Vikram Mehta (approver)**. Then click **ABC Supplies · INV-4821** on the dashboard. To slow the timeline down for a stage demo, use *Policy → Demo: agent animation speed*.
 
 Without `make` (Windows PowerShell):
 
 ```bash
 python -m venv .venv; .venv\Scripts\pip install -e "apps/api[dev]"; cd apps/web; npm install; cd ../..
-cd apps/api; ..\..\.venv\Scripts\python -m probity.demo.seed --reset; ..\..\.venv\Scripts\python -m uvicorn probity.api.main:app --port 8000
+cd apps/api; ..\..\.venv\Scripts\python -m probity.demo.seed --reset; ..\..\.venv\Scripts\python -m uvicorn probity.api.main:app --port 8010
 ```
 
 In a second terminal, run `cd apps/web; npm run dev`.

@@ -22,12 +22,12 @@ services:
       AUTH_MODE: local
       ENV: demo
       AGENT_DELAY_MS: "400"
-      CORS_ORIGINS: http://localhost:5173
-    ports: ["8000:8000"]
+      CORS_ORIGINS: http://localhost:5180
+    ports: ["8010:8000"]
     depends_on: { postgres: { condition: service_healthy } }
   web:
     build: { context: .., dockerfile: infra/web.Dockerfile }
-    ports: ["5173:80"]
+    ports: ["5180:80"]
     depends_on: [api]
 volumes:
   pgdata:

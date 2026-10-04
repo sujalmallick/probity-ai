@@ -20,7 +20,7 @@ from probity.api.deps import current_user, db, issue_token, upload_limit
 from probity.config import REPO_ROOT, get_settings
 from probity.db.audit import audit, verify_chain
 from probity.db.models import iso, AuditLog, Case, CaseMemory, Document, HistoricalInvoice, User, Vendor, VendorBankAccount, VendorContact, VendorDomain, Workspace
-from probity.db.session import get_sessionmaker, init_db
+from probity.db.session import init_db, session_scope, set_tenant
 from probity.guardrails import crypto
 from probity.ingestion.parse import UnsupportedDocument
 from probity.policy import get_policy
@@ -128,6 +128,7 @@ def demo_login(body: DemoLogin, request: Request, s: Session = Depends(db)) -> d
     u = s.get(User, body.user_id)
     if not u:
         raise HTTPException(404, "user not found")
+    set_tenant(s, u.workspace_id)
     audit(s, u.workspace_id, u.id, "auth.login", u.id, {"mode": "local"}, request.state.request_id)
     return {"token": issue_token(u), "user": {"id": u.id, "name": u.name, "role": u.role, "workspace_id": u.workspace_id}}
 
@@ -260,7 +261,7 @@ def export_case(case_id: str, request: Request, format: Literal["json"] = "json"
 @app.get(f"{API}/cases/{{case_id}}/events")
 async def case_events(case_id: str, request: Request, user: User = Depends(current_user)) -> StreamingResponse:
     ws = user.workspace_id
-    with get_sessionmaker()() as s:
+    with session_scope(ws) as s:
         svc.get_case(s, ws, case_id)
     last = int(request.headers.get("Last-Event-ID") or request.query_params.get("last_event_id") or 0)
 

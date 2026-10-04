@@ -20,7 +20,10 @@ from sqlalchemy import (
     UniqueConstraint,
     event,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+JSONType = JSON().with_variant(JSONB(), "postgresql")
 
 
 def utcnow() -> datetime:
@@ -41,20 +44,20 @@ def new_id(prefix: str) -> str:
 
 
 class Base(DeclarativeBase):
-    type_annotation_map = {dict[str, Any]: JSON, list[Any]: JSON}
+    type_annotation_map = {dict[str, Any]: JSONType, list[Any]: JSONType}
 
 
 class TelemetryBase(DeclarativeBase):
     """Agent events + LLM call logs. Separate engine on SQLite so live progress never waits on a case write lock."""
 
-    type_annotation_map = {dict[str, Any]: JSON, list[Any]: JSON}
+    type_annotation_map = {dict[str, Any]: JSONType, list[Any]: JSONType}
 
 
 class Workspace(Base):
     __tablename__ = "workspaces"
     id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("ws"))
     name: Mapped[str] = mapped_column(String(200))
-    policy: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    policy: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -65,6 +68,22 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(200), unique=True)
     name: Mapped[str] = mapped_column(String(200))
     role: Mapped[str] = mapped_column(String(20))  # viewer | accountant | approver | owner
+    external_id: Mapped[str | None] = mapped_column(String(80), unique=True)  # Clerk user id
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Invitation(Base):
+    """Owner invites a teammate by email with a role; consumed on their first sign-in."""
+
+    __tablename__ = "invitations"
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("inv"))
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    email: Mapped[str] = mapped_column(String(200), index=True)
+    role: Mapped[str] = mapped_column(String(20))
+    invited_by: Mapped[str] = mapped_column(String(40))
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class Vendor(Base):
@@ -131,7 +150,7 @@ class HistoricalInvoice(Base):
     bank_last4: Mapped[str | None] = mapped_column(String(4))
     bank_hmac: Mapped[str | None] = mapped_column(String(64))
     po_number: Mapped[str | None] = mapped_column(String(80))
-    line_items: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    line_items: Mapped[list[Any]] = mapped_column(JSONType, default=list)
     case_id: Mapped[str | None] = mapped_column(String(40))
 
 
@@ -142,7 +161,7 @@ class PurchaseOrder(Base):
     vendor_id: Mapped[str] = mapped_column(ForeignKey("vendors.id"), index=True)
     po_number: Mapped[str] = mapped_column(String(80), index=True)
     po_date: Mapped[date] = mapped_column(Date)
-    lines: Mapped[list[Any]] = mapped_column(JSON, default=list)  # [{description, qty, unit_price_minor}]
+    lines: Mapped[list[Any]] = mapped_column(JSONType, default=list)  # [{description, qty, unit_price_minor}]
 
 
 class Document(Base):
@@ -167,18 +186,18 @@ class Case(Base):
     document_id: Mapped[str] = mapped_column(ForeignKey("documents.id"))
     vendor_id: Mapped[str | None] = mapped_column(String(40), index=True)
     status: Mapped[str] = mapped_column(String(30), default="QUEUED", index=True)
-    extraction: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    corrections: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    validation: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    plan: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    checks: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # check -> {status, reason}
-    risk: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    recommendation: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    extraction: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    corrections: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    validation: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    plan: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    checks: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)  # check -> {status, reason}
+    risk: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    recommendation: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
     summary: Mapped[str | None] = mapped_column(Text)
-    memory_hits: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    memory_hits: Mapped[list[Any]] = mapped_column(JSONType, default=list)
     depth: Mapped[int] = mapped_column(Integer, default=0)
     partial: Mapped[bool] = mapped_column(Boolean, default=False)
-    budget: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    budget: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
     amount_minor: Mapped[int | None] = mapped_column(Integer)
     outcome: Mapped[str | None] = mapped_column(String(30))
     resolution: Mapped[str | None] = mapped_column(Text)
@@ -197,7 +216,7 @@ class EvidenceRow(Base):
     case_id: Mapped[str] = mapped_column(ForeignKey("cases.id"), index=True)
     source: Mapped[str] = mapped_column(String(30))
     field: Mapped[str | None] = mapped_column(String(80))
-    value: Mapped[Any] = mapped_column(JSON, nullable=True)
+    value: Mapped[Any] = mapped_column(JSONType, nullable=True)
     source_ref: Mapped[str] = mapped_column(Text)
     excerpt: Mapped[str | None] = mapped_column(Text)
     tier: Mapped[int] = mapped_column(Integer, default=1)
@@ -214,14 +233,14 @@ class ClaimRow(Base):
     agent: Mapped[str] = mapped_column(String(40))
     statement: Mapped[str] = mapped_column(Text)
     signal: Mapped[str | None] = mapped_column(String(60))
-    assertion: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    evidence_ids: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    assertion: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    evidence_ids: Mapped[list[Any]] = mapped_column(JSONType, default=list)
     status: Mapped[str] = mapped_column(String(20), default="unverified")
     confidence: Mapped[float] = mapped_column(Float, default=0.0)
     severity: Mapped[str] = mapped_column(String(10), default="info")
     verifier_notes: Mapped[str | None] = mapped_column(Text)
     supporting_quote: Mapped[str | None] = mapped_column(Text)
-    data: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    data: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -234,8 +253,8 @@ class RiskScoreRow(Base):
     score: Mapped[int] = mapped_column(Integer)
     tier: Mapped[str] = mapped_column(String(10))
     weights_version: Mapped[str] = mapped_column(String(10))
-    signals: Mapped[list[Any]] = mapped_column(JSON, default=list)
-    contributions: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    signals: Mapped[list[Any]] = mapped_column(JSONType, default=list)
+    contributions: Mapped[list[Any]] = mapped_column(JSONType, default=list)
     reason: Mapped[str] = mapped_column(String(80))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -260,7 +279,7 @@ class Draft(Base):
     recipient_verified: Mapped[bool] = mapped_column(Boolean, default=True)
     subject: Mapped[str] = mapped_column(String(300))
     body: Mapped[str] = mapped_column(Text)
-    requested_items: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    requested_items: Mapped[list[Any]] = mapped_column(JSONType, default=list)
     status: Mapped[str] = mapped_column(String(20), default="draft")  # draft | sent
     approved_by: Mapped[str | None] = mapped_column(String(40))
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -279,7 +298,7 @@ class Message(Base):
     to_email: Mapped[str] = mapped_column(String(200))
     subject: Mapped[str] = mapped_column(String(300))
     body: Mapped[str] = mapped_column(Text)
-    indicators: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    indicators: Mapped[list[Any]] = mapped_column(JSONType, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -289,15 +308,32 @@ class CaseMemory(Base):
     workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
     vendor_id: Mapped[str | None] = mapped_column(String(40), index=True)
     case_id: Mapped[str] = mapped_column(String(40))
-    issues: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    issues: Mapped[list[Any]] = mapped_column(JSONType, default=list)
     outcome: Mapped[str] = mapped_column(String(30))
     resolution: Mapped[str | None] = mapped_column(Text)
     summary: Mapped[str] = mapped_column(Text)
     peak_score: Mapped[int] = mapped_column(Integer, default=0)
     peak_tier: Mapped[str] = mapped_column(String(10), default="LOW")
-    evidence_ids: Mapped[list[Any]] = mapped_column(JSON, default=list)
-    bank_hmacs: Mapped[list[Any]] = mapped_column(JSON, default=list)
-    domains: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    evidence_ids: Mapped[list[Any]] = mapped_column(JSONType, default=list)
+    bank_hmacs: Mapped[list[Any]] = mapped_column(JSONType, default=list)
+    domains: Mapped[list[Any]] = mapped_column(JSONType, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class GraphEdge(Base):
+    """Relationship graph (Feature F12): entity → attribute edges, e.g. vendor —has_bank→ hmac."""
+
+    __tablename__ = "graph_edges"
+    __table_args__ = (UniqueConstraint("workspace_id", "src_type", "src_id", "rel", "dst_type", "dst_id"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workspace_id: Mapped[str] = mapped_column(String(40), index=True)
+    src_type: Mapped[str] = mapped_column(String(20))
+    src_id: Mapped[str] = mapped_column(String(80), index=True)
+    rel: Mapped[str] = mapped_column(String(30))
+    dst_type: Mapped[str] = mapped_column(String(20))
+    dst_id: Mapped[str] = mapped_column(String(128), index=True)
+    label: Mapped[str | None] = mapped_column(String(200))
+    case_id: Mapped[str | None] = mapped_column(String(40))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -312,7 +348,7 @@ class AgentEvent(TelemetryBase):
     agent: Mapped[str | None] = mapped_column(String(40))
     status: Mapped[str | None] = mapped_column(String(20))
     message: Mapped[str] = mapped_column(Text, default="")
-    data: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    data: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -325,7 +361,7 @@ class AuditLog(Base):
     actor: Mapped[str] = mapped_column(String(60))
     action: Mapped[str] = mapped_column(String(60))
     entity: Mapped[str] = mapped_column(String(80))
-    data: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    data: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
     request_id: Mapped[str | None] = mapped_column(String(60))
     prev_hash: Mapped[str] = mapped_column(String(64))
     hash: Mapped[str] = mapped_column(String(64))
