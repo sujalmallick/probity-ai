@@ -9,12 +9,23 @@ const HERO_VIDEO =
 const REPO_URL = "https://github.com/sujalmallick/probity-ai";
 const DOCS = (f: string) => `${REPO_URL}/blob/real-data/docs/${f}`;
 
-const NAV = [
+const NAV: { label: string; href?: string; to?: string; external?: boolean }[] = [
   { label: "How it works", href: "#how" },
   { label: "Product", href: "#product" },
   { label: "Principle", href: "#principle" },
+  { label: "How to use", to: "/guide" },
   { label: "Docs", href: DOCS("Architecture.md"), external: true },
 ];
+
+/** Jump to a section on this page. Done in code (not a bare #hash link) so the mobile menu can close first and the
+ *  section lands just under the fixed header every time, even when tapped twice. */
+function jumpTo(hash: string) {
+  const el = document.getElementById(hash.slice(1));
+  if (!el) return;
+  const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  el.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
+  history.replaceState(null, "", hash);
+}
 
 // The rule every Probity case follows (README, "The LLM can investigate…").
 const PRINCIPLE =
@@ -68,20 +79,25 @@ function Navbar({ signInTo, signedIn }: { signInTo: string; signedIn: boolean })
           glass ? "bg-black/55 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.09)] backdrop-blur-xl" : ""
         }`}
       >
-        <a href="#top" className="rounded-md" aria-label="Probity home"><Brand /></a>
+        <a href="#top" className="rounded-md" aria-label="Probity home" onClick={(e) => { e.preventDefault(); setOpen(false); window.scrollTo({ top: 0, behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" }); history.replaceState(null, "", "#top"); }}><Brand /></a>
         <ul className="hidden items-center gap-1 md:flex">
-          {NAV.map((n) => (
-            <li key={n.label}>
-              <a
-                href={n.href}
-                {...(n.external ? { target: "_blank", rel: "noreferrer" } : {})}
-                className="flex items-center gap-1 rounded-full px-3.5 py-2 text-sm text-muted-foreground transition-colors duration-200 hover:bg-white/[0.06] hover:text-foreground"
-              >
-                {n.label}
-                {n.external && <ArrowUpRight size={13} aria-hidden />}
-              </a>
-            </li>
-          ))}
+          {NAV.map((n) => {
+            const cls = "flex items-center gap-1 rounded-full px-3.5 py-2 text-sm text-muted-foreground transition-colors duration-200 hover:bg-white/[0.06] hover:text-foreground";
+            return (
+              <li key={n.label}>
+                {n.to ? <Link to={n.to} className={cls}>{n.label}</Link> : (
+                  <a
+                    href={n.href}
+                    {...(n.external ? { target: "_blank", rel: "noreferrer" } : { onClick: (e: React.MouseEvent) => { e.preventDefault(); jumpTo(n.href!); } })}
+                    className={cls}
+                  >
+                    {n.label}
+                    {n.external && <ArrowUpRight size={13} aria-hidden />}
+                  </a>
+                )}
+              </li>
+            );
+          })}
         </ul>
         <div className="flex items-center gap-1.5">
           <a href={REPO_URL} target="_blank" rel="noreferrer" aria-label="Probity on GitHub" className="hidden rounded-full p-2 text-muted-foreground transition-colors duration-200 hover:text-foreground md:block">
@@ -109,19 +125,30 @@ function Navbar({ signInTo, signedIn }: { signInTo: string; signedIn: boolean })
       {open && (
         <div id="mobile-menu" className="mx-auto mt-2 max-w-6xl rounded-2xl bg-black/80 p-2 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.09)] backdrop-blur-xl md:hidden">
           <ul className="flex flex-col">
-            {NAV.map((n) => (
-              <li key={n.label}>
-                <a
-                  href={n.href}
-                  {...(n.external ? { target: "_blank", rel: "noreferrer" } : {})}
-                  onClick={() => setOpen(false)}
-                  className="flex items-center justify-between rounded-xl px-4 py-3 text-base text-foreground hover:bg-white/[0.06]"
-                >
-                  {n.label}
-                  {n.external ? <ArrowUpRight size={16} aria-hidden /> : <ArrowRight size={16} className="text-muted-foreground" aria-hidden />}
-                </a>
-              </li>
-            ))}
+            {NAV.map((n) => {
+              const cls = "flex items-center justify-between rounded-xl px-4 py-3 text-base text-foreground hover:bg-white/[0.06]";
+              const icon = n.external ? <ArrowUpRight size={16} aria-hidden /> : <ArrowRight size={16} className="text-muted-foreground" aria-hidden />;
+              return (
+                <li key={n.label}>
+                  {n.to ? <Link to={n.to} className={cls} onClick={() => setOpen(false)}>{n.label}{icon}</Link> : (
+                    <a
+                      href={n.href}
+                      {...(n.external ? { target: "_blank", rel: "noreferrer" } : {})}
+                      onClick={(e) => {
+                        setOpen(false);
+                        if (n.external) return;
+                        e.preventDefault();
+                        // Wait for the menu to close before scrolling, so the jump is measured against the final layout.
+                        requestAnimationFrame(() => requestAnimationFrame(() => jumpTo(n.href!)));
+                      }}
+                      className={cls}
+                    >
+                      {n.label}{icon}
+                    </a>
+                  )}
+                </li>
+              );
+            })}
             <li>
               <a href={REPO_URL} target="_blank" rel="noreferrer" className="flex items-center justify-between rounded-xl px-4 py-3 text-base hover:bg-white/[0.06]">
                 GitHub <GitHubIcon size={16} />
@@ -137,9 +164,14 @@ function Navbar({ signInTo, signedIn }: { signInTo: string; signedIn: boolean })
   );
 }
 
+/** Phones get no parallax: content moving at a different speed from the page made menu jumps land in the wrong place. */
+function isSmallScreen() {
+  return typeof window !== "undefined" && window.matchMedia("(max-width: 767px)").matches;
+}
+
 function Hero({ signInTo }: { signInTo: string }) {
   const sectionRef = useRef<HTMLElement>(null);
-  const reduce = useReducedMotion();
+  const reduce = useReducedMotion() || isSmallScreen();
   const { scrollYProgress } = useScroll({ target: sectionRef, offset: ["start start", "end start"] });
   const textY = useTransform(scrollYProgress, [0, 1], [0, reduce ? 0 : -200]);
   const textOpacity = useTransform(scrollYProgress, [0, 0.5], [1, reduce ? 1 : 0]);
@@ -232,7 +264,7 @@ function Hero({ signInTo }: { signInTo: string }) {
 
 function HowItWorks() {
   return (
-    <section id="how" className="scroll-mt-24 px-6 py-24 md:px-28 md:py-32">
+    <section id="how" className="scroll-mt-0 px-6 py-24 md:px-28 md:py-32">
       <div className="mx-auto max-w-6xl">
         <div className="mb-12 flex flex-col items-start gap-3 md:mb-16">
           <span className="liquid-glass rounded-lg px-3 py-1.5 text-sm font-medium text-muted-foreground">How it works</span>
@@ -278,7 +310,7 @@ function Principle() {
   const { scrollYProgress } = useScroll({ target: containerRef, offset: ["start end", "end center"] });
   const words = PRINCIPLE.split(" ");
   return (
-    <section id="principle" className="flex scroll-mt-24 items-center justify-center px-8 py-24 md:min-h-[85vh] md:px-28 md:py-28">
+    <section id="principle" className="flex scroll-mt-0 items-center justify-center px-8 py-24 md:min-h-[85vh] md:px-28 md:py-28">
       <figure className="mx-auto flex max-w-3xl flex-col items-start gap-10">
         <img src="/landing/quote-symbol.svg" alt="" className="h-10 w-14 object-contain" />
         <blockquote ref={containerRef} className="flex flex-wrap text-4xl leading-[1.2] font-medium md:text-5xl">
@@ -306,6 +338,7 @@ const FOOTER_COLUMNS = [
       { label: "How it works", href: "#how" },
       { label: "Product tour", href: "#product" },
       { label: "The Probity rule", href: "#principle" },
+      { label: "How to use", to: "/guide" },
       { label: "Sign in", to: "/login" },
     ],
   },
