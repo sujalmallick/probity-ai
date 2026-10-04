@@ -68,6 +68,10 @@ async def request_context(request: Request, call_next):  # type: ignore[no-untyp
         log.info("http.request", method=request.method, route=route, status=response.status_code, ms=round(elapsed * 1000, 1),
                  request_id=rid, user_id=getattr(request.state, "user_id", None), workspace_id=getattr(request.state, "workspace_id", None))
     response.headers["X-Request-ID"] = rid
+    # Declare UTF-8 explicitly: some clients (e.g. Windows PowerShell 5) fall back to Latin-1 for bare
+    # application/json and turn "—" into "â€”".
+    if response.headers.get("content-type") == "application/json":
+        response.headers["content-type"] = "application/json; charset=utf-8"
     if get_settings().env == "prod":
         response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
     response.headers["X-Content-Type-Options"] = "nosniff"

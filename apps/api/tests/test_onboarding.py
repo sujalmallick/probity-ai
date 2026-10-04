@@ -146,3 +146,12 @@ def test_case_notes(client, empty_ws):
     assert notes[0]["text"] == "Called Kaveri, all fine." and notes[0]["author"] == "Anita Accounts"
     with session_scope() as s:
         assert s.scalars(select(User).where(User.email == "anita@acme.test")).first() is not None
+
+
+def test_json_declares_utf8_and_text_survives(client, empty_ws):
+    r = client.get(f"{API}/workspace/onboarding", headers=hdr(client, "owner"))
+    assert r.headers["content-type"] == "application/json; charset=utf-8"
+    why = next(st["why"] for st in r.json()["steps"] if st["key"] == "verified_contacts")
+    assert "\u2014" in why and "\u00e2\u20ac" not in why  # em dash intact, no mojibake
+    err = client.get(f"{API}/vendors/nope", headers=hdr(client, "owner"))
+    assert err.status_code == 404 and err.headers["content-type"] == "application/json; charset=utf-8"
