@@ -1,0 +1,33 @@
+# Dev/demo stack. Redis and Qdrant are provisioned for the scale-out path (worker queue, vector memory);
+# the MVP runs investigations in-process and keeps memory in Postgres (see docs/DECISIONS.md).
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment: { POSTGRES_USER: probity, POSTGRES_PASSWORD: probity, POSTGRES_DB: probity }
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U probity"], interval: 5s, retries: 10 }
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports: ["6333:6333"]
+  api:
+    build: { context: .., dockerfile: infra/api.Dockerfile }
+    environment:
+      DATABASE_URL: postgresql+psycopg://probity:probity@postgres:5432/probity
+      TOOLS_MODE: cached
+      LLM_MODE: mock
+      AUTH_MODE: local
+      ENV: demo
+      AGENT_DELAY_MS: "400"
+      CORS_ORIGINS: http://localhost:5173
+    ports: ["8000:8000"]
+    depends_on: { postgres: { condition: service_healthy } }
+  web:
+    build: { context: .., dockerfile: infra/web.Dockerfile }
+    ports: ["5173:80"]
+    depends_on: [api]
+volumes:
+  pgdata:

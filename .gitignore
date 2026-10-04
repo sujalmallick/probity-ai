@@ -1,0 +1,25 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.hypothesis/
+# Runtime data (databases, uploads, generated demo PDFs, LLM replay cache)
+apps/api/data/
+*.db
+*.db-wal
+*.db-shm
+# Node
+node_modules/
+apps/web/dist/
+# Env & secrets
+.env
+.env.*
+!.env.example
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+_refs/

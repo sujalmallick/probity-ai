@@ -1,0 +1,121 @@
+import React, { useEffect, useState } from "react";
+import ReactDOM from "react-dom/client";
+import { BrowserRouter, Navigate, NavLink, Route, Routes, useNavigate } from "react-router-dom";
+import { BarChart3, Brain, Building2, FilePlus2, Gauge as GaugeIcon, LogOut, Moon, Settings, Sun } from "lucide-react";
+import "./index.css";
+import { AuthCtx, useAuth } from "./lib/auth";
+import { api, getSession, setSession, type Me } from "./lib/api";
+import Login from "./pages/Login";
+import Dashboard from "./pages/Dashboard";
+import NewCase from "./pages/NewCase";
+import CaseView from "./pages/CaseView";
+import { VendorDetail, Vendors } from "./pages/Vendors";
+import Memory from "./pages/Memory";
+import Benchmark from "./pages/Benchmark";
+import SettingsPage from "./pages/Settings";
+
+
+const ROLE_HINT: Record<string, string> = {
+  viewer: "Read only",
+  accountant: "Upload · annotate",
+  approver: "Approve · reject · verify",
+  owner: "Policy · users",
+};
+
+function Shell({ children }: { children: React.ReactNode }) {
+  const { user, setUser } = useAuth();
+  const nav = useNavigate();
+  const [ready, setReady] = useState<{ tools_mode: string; llm_mode: string } | null>(null);
+  const [theme, setTheme] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem("probity.theme");
+    } catch {
+      return null;
+    }
+  });
+  useEffect(() => {
+    api("/ready").then(setReady).catch(() => setReady(null));
+  }, []);
+  useEffect(() => {
+    if (theme) document.documentElement.dataset.theme = theme;
+    else delete document.documentElement.dataset.theme;
+    try {
+      if (theme) localStorage.setItem("probity.theme", theme);
+      else localStorage.removeItem("probity.theme");
+    } catch {
+      /* ignore */
+    }
+  }, [theme]);
+  const dark = theme === "dark" || (!theme && window.matchMedia?.("(prefers-color-scheme: dark)").matches);
+  const link = ({ isActive }: { isActive: boolean }) =>
+    `flex shrink-0 items-center gap-2.5 whitespace-nowrap rounded-lg px-3 py-2 text-sm ${isActive ? "bg-accent-soft font-semibold text-accent" : "text-muted hover:bg-surface-2 hover:text-ink"}`;
+  return (
+    <div className="flex min-h-screen flex-col md:flex-row">
+      <aside className="flex shrink-0 flex-col gap-1 border-b border-line bg-surface p-3 md:sticky md:top-0 md:h-screen md:w-56 md:border-r md:border-b-0">
+        <div className="mb-3 flex items-center gap-2 px-2 pt-1">
+          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-accent text-sm font-bold text-white">P</div>
+          <div>
+            <div className="text-[15px] font-bold leading-tight">Probity</div>
+            <div className="text-[11px] leading-tight text-muted">Evidence before payment.</div>
+          </div>
+        </div>
+        <nav className="flex gap-1 overflow-x-auto md:flex-col">
+          <NavLink to="/dashboard" className={link}><GaugeIcon size={16} />Dashboard</NavLink>
+          <NavLink to="/cases/new" className={link}><FilePlus2 size={16} />New case</NavLink>
+          <NavLink to="/vendors" className={link}><Building2 size={16} />Vendors</NavLink>
+          <NavLink to="/memory" className={link}><Brain size={16} />Case memory</NavLink>
+          <NavLink to="/benchmark" className={link}><BarChart3 size={16} />Benchmark</NavLink>
+          <NavLink to="/settings/policy" className={link}><Settings size={16} />Policy</NavLink>
+        </nav>
+        <div className="mt-auto hidden flex-col gap-2 md:flex">
+          {ready && (ready.tools_mode !== "live" || ready.llm_mode !== "live") && (
+            <div className="rounded-lg bg-medium-soft px-3 py-2 text-[11px] text-medium" title="Offline demo mode: recorded tool responses and deterministic agents">
+              <b>Demo mode</b> · tools {ready.tools_mode} · LLM {ready.llm_mode}
+            </div>
+          )}
+          {user && (
+            <div className="rounded-lg border border-line px-3 py-2">
+              <div className="text-sm font-semibold">{user.name}</div>
+              <div className="text-[11px] text-muted">{user.role} · {ROLE_HINT[user.role]}</div>
+              <div className="mt-2 flex gap-1">
+                <button className="btn flex-1 !px-2 !py-1 text-xs" onClick={() => { setSession(null); setUser(null); nav("/login"); }}><LogOut size={13} />Switch user</button>
+                <button className="btn !px-2 !py-1" aria-label="Toggle theme" onClick={() => setTheme(dark ? "light" : "dark")}>{dark ? <Sun size={13} /> : <Moon size={13} />}</button>
+              </div>
+            </div>
+          )}
+        </div>
+      </aside>
+      <main className="min-w-0 flex-1 px-4 py-5 md:px-8">{children}</main>
+    </div>
+  );
+}
+
+function App() {
+  const [user, setUser] = useState<Me | null>(() => getSession()?.user ?? null);
+  return (
+    <AuthCtx.Provider value={{ user, setUser }}>
+      <BrowserRouter>
+        <Routes>
+          <Route path="/login" element={<Login />} />
+          <Route path="*" element={user ? (
+            <Shell>
+              <Routes>
+                <Route path="/dashboard" element={<Dashboard />} />
+                <Route path="/cases/new" element={<NewCase />} />
+                <Route path="/cases/:id" element={<CaseView />} />
+                <Route path="/vendors" element={<Vendors />} />
+                <Route path="/vendors/:id" element={<VendorDetail />} />
+                <Route path="/memory" element={<Memory />} />
+                <Route path="/benchmark" element={<Benchmark />} />
+                <Route path="/settings/policy" element={<SettingsPage />} />
+                <Route path="*" element={<Navigate to="/dashboard" replace />} />
+              </Routes>
+            </Shell>
+          ) : <Navigate to="/login" replace />} />
+        </Routes>
+      </BrowserRouter>
+    </AuthCtx.Provider>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")!).render(<React.StrictMode><App /></React.StrictMode>);
