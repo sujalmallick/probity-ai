@@ -4,7 +4,7 @@ import {
   ArrowLeft, ArrowRight, Brain, Building2, CheckCircle2, ChevronDown, ChevronRight, ClipboardList, Download, FileText, Globe, HelpCircle,
   History, Landmark, Mail, MailCheck, PhoneCall, Search, ShieldAlert, ShieldCheck, ThumbsDown, ThumbsUp, UserCheck, XCircle,
 } from "lucide-react";
-import { api, can, fetchBlob, post, token, type Role } from "../lib/api";
+import { api, can, fetchBlob, post, streamEvents, type Role } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { evValue, inr, isoDate, relTime, RUNNING, tierColor } from "../lib/format";
 import { Gauge } from "../components/Gauge";
@@ -50,16 +50,14 @@ export default function CaseView() {
     setEvents([]);
     setWhy(null);
     load();
-    const es = new EventSource(`/api/v1/cases/${id}/events?token=${encodeURIComponent(token() ?? "")}`);
-    es.onmessage = (m) => {
-      const e: AgentEvent = JSON.parse(m.data);
+    const stop = streamEvents(`/cases/${id}/events`, (e: AgentEvent) => {
       setEvents((prev) => (prev.some((p) => p.seq === e.seq) ? prev : [...prev, e]));
       if (["agent.completed", "risk.updated", "gate.waiting", "decision.recorded", "action.sent", "vendor.reply_received", "case.closed", "agent.failed", "verification.confirmed_out_of_band"].includes(e.type)) {
         window.clearTimeout(refetchTimer.current);
         refetchTimer.current = window.setTimeout(load, 250);
       }
-    };
-    return () => es.close();
+    });
+    return stop;
   }, [id, load]);
 
   const running = !!c && RUNNING.has(c.status);

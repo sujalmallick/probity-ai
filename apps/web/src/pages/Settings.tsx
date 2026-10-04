@@ -53,6 +53,10 @@ export default function SettingsPage() {
               <input type="checkbox" disabled={!owner} checked={p.auto_clear_enabled} onChange={(e) => save({ auto_clear_enabled: e.target.checked })} />
               Auto-clear LOW-risk invoices when every check completed and no indicator fired
             </label>
+            <label className="mt-2 flex items-center gap-2 text-sm">
+              <input type="checkbox" disabled={!owner} checked={!!p.require_mfa_for_approvals} onChange={(e) => save({ require_mfa_for_approvals: e.target.checked })} />
+              Require multi-factor sign-in for approvals, sends and out-of-band confirmations
+            </label>
             <ul className="mt-3 flex flex-col gap-1 text-sm text-muted">
               <li>Auto-clear limit: <b className="text-ink">{inr(p.auto_clear_max_amount_minor)}</b></li>
               <li>Web research above: <b className="text-ink">{inr(p.external_research_amount_minor)}</b></li>

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ShieldCheck } from "lucide-react";
-import { api, post, setSession, type Me } from "../lib/api";
+import { api, post, setLocalSession, type Me } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { Spinner } from "../components/ui";
 
@@ -22,7 +22,7 @@ export default function Login() {
   }, []);
   const login = async (id: string) => {
     const r = await post<{ token: string; user: Me }>("/auth/demo-login", { user_id: id });
-    setSession(r);
+    setLocalSession(r);
     setUser(r.user);
     nav("/dashboard");
   };
