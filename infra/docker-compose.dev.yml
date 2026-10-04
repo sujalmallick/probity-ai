@@ -1,4 +1,5 @@
 # Local backing services for development:  docker compose -f infra/docker-compose.dev.yml up -d
+# Redis is optional (only for TASK_BACKEND=celery):  docker compose -f infra/docker-compose.dev.yml --profile worker up -d
 services:
   postgres:
     image: postgres:16-alpine
@@ -8,6 +9,7 @@ services:
     healthcheck: { test: ["CMD-SHELL", "pg_isready -U probity"], interval: 3s, retries: 20 }
   redis:
     image: redis:7-alpine
+    profiles: [worker]
     ports: ["127.0.0.1:6380:6379"]
 volumes:
   pgdata-dev:

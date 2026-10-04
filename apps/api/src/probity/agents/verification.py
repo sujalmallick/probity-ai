@@ -20,15 +20,24 @@ class Entailment(BaseModel):
 
 
 def _entail_fn(ctx: CaseCtx):  # type: ignore[no-untyped-def]
+    """AI entailment for claims with no deterministic check. If the AI fails, the claim stays unconfirmed
+    (0 points) and the timeline says so once; nothing is guessed."""
     pv, system = llm.load_prompt("verification", "entail")
+    reported: list[str] = []
 
     def entail(claim: str, excerpts: list[str]) -> tuple[str, str | None]:
-        out = llm.generate(
-            schema=Entailment, system=system,
-            user=f"CLAIM: {claim}\n\nEVIDENCE EXCERPTS:\n" + "\n---\n".join(excerpts),
-            tier="reasoning", tags={**ctx.tags, "agent": AGENT, "prompt_version": pv},
-            mock=lambda: Entailment(status="unverified"), budget=ctx.budget, redact_input=False,
-        )
+        try:
+            out = llm.generate(
+                schema=Entailment, system=system,
+                user=f"CLAIM: {claim}\n\nEVIDENCE EXCERPTS:\n" + "\n---\n".join(excerpts),
+                tier="reasoning", tags={**ctx.tags, "agent": AGENT, "prompt_version": pv},
+                budget=ctx.budget, redact_input=False,
+            )
+        except llm.LLMFailed as e:
+            if not reported:
+                reported.append(e.reason)
+                ctx.unverifiable(AGENT, "ai_entailment", f"{e.reason}; claims without a rule-based check stay unconfirmed (0 points)")
+            return "unverified", None, f"not checked — AI unavailable ({e.reason}); 0 points"
         st = out.status if out.status in ("verified", "refuted", "unverified") else "unverified"
         return st, out.supporting_quote
 

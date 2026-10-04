@@ -2,6 +2,9 @@
 
 Reply assertions about bank details or identity are recorded as claims with the reply text as evidence,
 and stay UNVERIFIED (0 points) until an approver records an out-of-band confirmation.
+
+If the AI is unavailable, the draft uses a fixed neutral template signed with the workspace name, and the reply is
+read with simple rules; both are announced in the case timeline. Nothing the vendor did not write is ever recorded.
 """
 
 from __future__ import annotations
@@ -12,7 +15,8 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from probity.agents.common import fv, vendor_bundle
-from probity.events import CaseCtx
+from probity.db.models import Workspace
+from probity.events import CaseCtx, rule_based_fallback
 from probity.evidence.models import AgentClaim, EvidenceIn
 from probity.guardrails.text import language_violations, neutralize_language, wrap_untrusted
 from probity.ingestion.validators import format_inr, normalize_domain
@@ -44,25 +48,35 @@ def draft_email(s, ctx: CaseCtx, case) -> dict:  # type: ignore[no-untyped-def]
         f"The purchase order reference for invoice {inv_no}" + (f" (we have {po})" if po else ""),
     ]
 
-    def mock() -> DraftOut:
+    signature = (s.get(Workspace, ctx.workspace_id).name if s.get(Workspace, ctx.workspace_id) else None) or "Accounts Payable"
+
+    def template() -> DraftOut:
         body = (
             f"Dear {contact_name},\n\n"
             f"We are processing invoice {inv_no} dated {fv(ex, 'invoice_date')} for {format_inr(total)}. "
             "As part of our routine verification of payment details, we would be grateful if you could confirm the following:\n\n"
             + "\n".join(f"  {i + 1}. {it}" for i, it in enumerate(items))
             + "\n\nPlease reply from your registered email address. We will also call your accounts team on the number we have on file.\n\n"
-            "Thank you for your help.\n\nAccounts Payable\nProbity Demo Traders"
+            f"Thank you for your help.\n\nAccounts Payable\n{signature}"
         )
         return DraftOut(subject=f"Routine verification of payment details — Invoice {inv_no}", body=body, requested_items=items)
 
     pv, system = llm.load_prompt("action", "draft")
-    out = llm.generate(schema=DraftOut, system=system, user=f"Vendor: {vendor_name}\nInvoice: {inv_no}\nAmount: {format_inr(total)}\nPO: {po}",
-                       tier="fast", tags={**ctx.tags, "agent": AGENT, "prompt_version": pv}, mock=mock, budget=ctx.budget)
+    fallback = None
+    try:
+        out = llm.generate(schema=DraftOut, system=system,
+                           user=f"Vendor: {vendor_name}\nInvoice: {inv_no}\nAmount: {format_inr(total)}\nPO: {po}\nSign as: Accounts Payable, {signature}",
+                           tier="fast", tags={**ctx.tags, "agent": AGENT, "prompt_version": pv}, budget=ctx.budget)
+    except llm.LLMFailed as e:
+        out = template()
+        fallback = rule_based_fallback(f"standard neutral template used: {e.reason}")
+        ctx.progress(AGENT, f"AI could not draft the email ({e.reason}); used the standard neutral template — review before sending", fallback="template")
     # G2/G11: drafts must pass the language filter; violations are rewritten, never sent as-is.
     body, subject = out.body, out.subject
     if language_violations(body + " " + subject):
         body, subject = neutralize_language(body), neutralize_language(subject)
-    return {"to_email": to, "recipient_verified": recipient_verified, "subject": subject, "body": body, "requested_items": out.requested_items}
+    return {"to_email": to, "recipient_verified": recipient_verified, "subject": subject, "body": body, "requested_items": out.requested_items,
+            "fallback": fallback}
 
 
 _URGENCY = re.compile(r"(?i)\b(urgent(?:ly)?|immediately|asap|today itself|within (?:the )?hour|right away)\b")
@@ -90,7 +104,7 @@ def analyze_reply(ctx: CaseCtx, case, bundle: dict, from_email: str, body: str) 
     ex = case.extraction
     inv_dom = fv(ex, "sender_domain")
 
-    def mock() -> ReplyAnalysis:
+    def rule_based() -> ReplyAnalysis:
         stmts: list[ReplyStatement] = []
         for sent in (m.group(0).strip() for m in _SENTENCES.finditer(body)):
             if len(sent) < 12:
@@ -112,8 +126,16 @@ def analyze_reply(ctx: CaseCtx, case, bundle: dict, from_email: str, body: str) 
         return ReplyAnalysis(statements=stmts, indicators=ind)
 
     pv, system = llm.load_prompt("action", "reply")
-    out = llm.generate(schema=ReplyAnalysis, system=system, user=wrap_untrusted("vendor_reply", f"From: {from_email}\n\n{body}"),
-                       tier="fast", tags={**ctx.tags, "agent": AGENT, "prompt_version": pv}, mock=mock, budget=ctx.budget)
+    fallback = None
+    try:
+        out = llm.generate(schema=ReplyAnalysis, system=system, user=wrap_untrusted("vendor_reply", f"From: {from_email}\n\n{body}"),
+                           tier="fast", tags={**ctx.tags, "agent": AGENT, "prompt_version": pv}, budget=ctx.budget)
+        rules = rule_based()  # deterministic indicators (sender domain, urgency, new instructions) always apply
+        out.indicators = list(dict.fromkeys([*rules.indicators, *out.indicators]))
+    except llm.LLMFailed as e:
+        out = rule_based()
+        fallback = rule_based_fallback(f"reply read with simple rules: {e.reason}")
+        ctx.progress(AGENT, f"AI could not read the reply ({e.reason}); statements were extracted with simple rules", fallback="rule_based")
     claims = []
     for st in out.statements:
         if st.quote not in body:  # quotes must be verbatim from the reply
@@ -130,6 +152,6 @@ def analyze_reply(ctx: CaseCtx, case, bundle: dict, from_email: str, body: str) 
             claim=f"Vendor reply states the {label} {val or ''} is theirs (unverified until confirmed out-of-band).".replace("  ", " "),
             evidence=[EvidenceIn(source="vendor_reply", field=kind, value=val, source_ref=f"email:{from_email}", excerpt=st.quote[:1000], tier=2 if not out.indicators else 3)],
             confidence=0.5, severity="info", assertion={"op": "requires_out_of_band"},
-            data={"kind": kind, "value": val, "reply_from": from_email},
+            data={"kind": kind, "value": val, "reply_from": from_email, **({"fallback": fallback} if fallback else {})},
         ))
     return claims, out.indicators

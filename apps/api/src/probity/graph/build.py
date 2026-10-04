@@ -7,7 +7,7 @@ START → document → orchestrator ─┬─ vendor_investigator ─┐
 
 Routing and termination are deterministic code. Each node is wrapped with bounded retries; a failed
 node degrades the case to FAILED_PARTIAL (reduced confidence, auto-clear disabled) — never silent success.
-The human gate is a durable status (AWAITING_HUMAN) persisted in Postgres/SQLite; decisions resume the
+The human gate is a durable status (AWAITING_HUMAN) persisted in Postgres; decisions resume the
 case through the services layer.
 """
 
@@ -16,7 +16,7 @@ from __future__ import annotations
 import operator
 import time
 from collections.abc import Callable
-from typing import Annotated, Any, TypedDict
+from typing import Annotated, TypedDict
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
@@ -101,13 +101,15 @@ def n_transaction(ctx: CaseCtx, st: State) -> dict:
 
 def n_join(ctx: CaseCtx, st: State) -> dict:
     if not st.get("external"):
-        ctx.emit("agent.skipped", agent="web_research", status="skipped", message="Skipped by policy: known vendor, verified bank, amount below research threshold")
+        reason = "skipped by policy: known vendor, verified bank, amount below research threshold"
+        ctx.emit("agent.skipped", agent="web_research", status="skipped", message=reason[0].upper() + reason[1:])
+        return {"checks": {"external_reputation": {"status": "skipped", "reason": reason}}}
     return {}
 
 
 def n_web(ctx: CaseCtx, st: State) -> dict:
     out = web.run(ctx, st.get("depth", 0))
-    return {"sources": out["sources"], "checks": {"external_reputation": {"status": "passed", "reason": f"{out['sources']} sources"}}}
+    return {"sources": out["sources"], "checks": {"external_reputation": out["check"]}}
 
 
 def n_verification(ctx: CaseCtx, st: State) -> dict:

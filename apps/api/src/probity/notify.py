@@ -1,4 +1,4 @@
-"""Notifications: in-app for every eligible user, plus email when an email backend is configured."""
+"""Notifications: in-app for every eligible user, plus email when Resend is configured (allowlist applies)."""
 
 from __future__ import annotations
 
@@ -21,13 +21,15 @@ def notify(s: Session, workspace_id: str, min_role: str, kind: str, title: str, 
         s.add(Notification(workspace_id=workspace_id, user_id=u.id, kind=kind, title=title[:300], body=body[:4000], case_id=case_id))
     s.flush()
     st = get_settings()
-    if st.email_backend != "outbox" and users:
-        from probity import mailer
+    from probity import mailer
 
+    if mailer.configured() and users:
         link = f"{st.public_app_url.rstrip('/')}/cases/{case_id}" if case_id else st.public_app_url
         for u in users:
             try:
                 mailer._send(u.email, f"Probity: {title}", f"{body}\n\nOpen: {link}\n\n— Probity · Evidence before payment.")
+            except mailer.MailBlocked:  # not on the allowlist: already logged by the mailer
+                continue
             except mailer.MailError as e:  # in-app notification still stands
                 log.warning("notify.email_failed", kind=kind, error=str(e))
     return len(users)

@@ -1,69 +1,87 @@
 """Auto-clear gate (Guardrails G5/G6): auto-clear needs positive evidence that the invoice matches a known vendor's
-normal pattern. Missing evidence (unknown vendor, a required check that could not run, another vendor's PO) holds the case."""
+normal pattern. Missing evidence (unknown vendor, a required check that could not be verified, another vendor's PO, an
+unreliable total) holds the case, and the gate says which check and why."""
 
 from dataclasses import replace
-from datetime import date, timedelta
+from types import SimpleNamespace
 
-from conftest import login
+import pytest
+from conftest import login, owner_session
+from factories import VENDOR_B, clean_spec
+from helpers import contributions, gate, run_case
 from sqlalchemy import delete, select
 
-from probity.db.models import Vendor, VendorBankAccount
-from probity.db.session import session_scope
-from probity.demo.invoice_pdf import InvoiceSpec, render
-from probity.demo.seed import VENDORS
-
-API = "/api/v1"
+from probity.agents.risk_case import requires_dual_approval, total_problem
+from probity.db.models import AgentEvent, HistoricalInvoice, VendorBankAccount, VendorDomain
 
 
-def _kaveri_clean(today: date) -> InvoiceSpec:
-    v = VENDORS[1]
-    return InvoiceSpec(vendor_name=v[0], vendor_address=v[2], gstin=v[1], email=v[4], phone="+91 80 4000 2000", invoice_number="KP-2026-311",
-                       invoice_date=(today - timedelta(days=2)).isoformat(), due_date=(today + timedelta(days=28)).isoformat(), po_number="PO-7711",
-                       items=[(v[8], 2000, 4250)], account_number=v[6], ifsc=v[7], bank_name="ICICI Bank")
-
-
-def _run(client, h, spec: InvoiceSpec, tmp_path) -> dict:
-    path = tmp_path / f"{spec.invoice_number}.pdf"
-    render(spec, path)
-    r = client.post(f"{API}/documents", headers=h, files={"file": (path.name, path.read_bytes(), "application/pdf")})
-    assert r.status_code == 201, r.text
-    r = client.post(f"{API}/cases", headers=h, json={"document_id": r.json()["document_id"]})
-    assert r.status_code == 201, r.text
-    return client.get(f"{API}/cases/{r.json()['case_id']}", headers=h).json()
-
-
-def _gate(case: dict) -> dict:
-    return case["recommendation"].get("gate") or {}
-
-
-def test_unknown_vendor_never_auto_clears(client, tmp_path):
+def test_unknown_vendor_never_auto_clears(client, world):
     """An outsider's invoice quoting a real PO number and paying a never-seen account must reach a human."""
-    t = date.today()
-    spec = InvoiceSpec(vendor_name="Totally Unknown Traders", vendor_address="1 Some Road", gstin="", email="billing@unknown-traders.example",
-                       phone="1", invoice_number="UK-1", invoice_date=t.isoformat(), due_date=t.isoformat(), po_number="PO-7711",
-                       items=[("Corrugated Boxes", 100, 4200)], account_number="99887766554433", ifsc="HDFC0000001", bank_name="HDFC")
-    case = _run(client, login(client, "accountant"), spec, tmp_path)
-    assert case["status"] == "AWAITING_HUMAN", _gate(case)
-    assert "vendor not matched to the vendor master" in _gate(case)["reasons"]
+    spec = replace(clean_spec(), vendor_name="Totally Unknown Traders", gstin="", email="billing@unknown-traders.test",
+                   account_number="99887766554433")
+    case = run_case(client, login(client, "accountant"), spec)
+    assert case["status"] == "AWAITING_HUMAN", gate(case)
+    assert "vendor not matched to the vendor master" in gate(case)["reasons"]
+    assert case["checks"]["vendor_identity"]["status"] == "could_not_verify"
 
 
-def test_po_from_another_vendor_is_flagged(client, tmp_path):
-    """Kaveri's otherwise clean invoice quoting ABC Supplies' PO-7710 is not a PO match."""
-    case = _run(client, login(client, "accountant"), replace(_kaveri_clean(date.today()), po_number="PO-7710"), tmp_path)
-    assert case["status"] == "AWAITING_HUMAN", _gate(case)
+def test_po_from_another_vendor_is_flagged(client, world):
+    """Vendor B's otherwise clean invoice quoting vendor A's PO is not a PO match."""
+    case = run_case(client, login(client, "accountant"), replace(clean_spec(), po_number="PO-7710"))
+    assert case["status"] == "AWAITING_HUMAN", gate(case)
     assert any("raised for a different vendor" in c["statement"] for c in case["claims"]), [c["statement"] for c in case["claims"]]
 
 
-def test_vendor_without_bank_history_never_auto_clears(client, fresh_db, tmp_path):
-    """With nothing to compare the invoice's bank account against, the bank check is skipped, so it cannot clear."""
-    with session_scope(fresh_db) as s:
-        kaveri = s.scalars(select(Vendor).where(Vendor.workspace_id == fresh_db, Vendor.name == VENDORS[1][0])).one()
-        s.execute(delete(VendorBankAccount).where(VendorBankAccount.vendor_id == kaveri.id))
-    case = _run(client, login(client, "accountant"), _kaveri_clean(date.today()), tmp_path)
-    assert case["status"] == "AWAITING_HUMAN", _gate(case)
-    assert any(r.startswith("required check could not run: bank account verification") for r in _gate(case)["reasons"]), _gate(case)
+def test_vendor_without_bank_history_never_auto_clears(client, world):
+    """With nothing to compare the invoice's bank account against, the bank check could not be verified, so it cannot clear."""
+    with owner_session() as s:
+        s.execute(delete(VendorBankAccount).where(VendorBankAccount.vendor_id == world.vendors["B"].id))
+    case = run_case(client, login(client, "accountant"), clean_spec())
+    assert case["status"] == "AWAITING_HUMAN", gate(case)
+    assert case["checks"]["bank_account_verification"]["status"] == "could_not_verify"
+    assert "Could not verify: bank account verification — no bank history for vendor" in gate(case)["reasons"], gate(case)
+    assert {"check": "bank_account_verification", "status": "could_not_verify", "reason": "no bank history for vendor"} in gate(case)["could_not_verify"]
 
 
-def test_clean_known_vendor_still_auto_clears(client, tmp_path):
-    case = _run(client, login(client, "accountant"), _kaveri_clean(date.today()), tmp_path)
-    assert case["status"] == "AUTO_CLEARED", _gate(case)
+def test_unverifiable_domain_holds_and_is_shown_in_timeline(client, world, fake_lookups):
+    """The vendor's domain is no longer verified and RDAP is unreachable: hold, with the reason in the timeline."""
+    with owner_session() as s:
+        for d in s.scalars(select(VendorDomain).where(VendorDomain.vendor_id == world.vendors["B"].id)):
+            d.verified = False
+    case = run_case(client, login(client, "accountant"), clean_spec())
+    assert case["status"] == "AWAITING_HUMAN"
+    assert case["checks"]["domain_verification"]["status"] == "could_not_verify"
+    assert any(r.startswith("Could not verify: domain verification — RDAP unreachable") for r in gate(case)["reasons"]), gate(case)
+    assert fake_lookups.rdap_calls == [VENDOR_B.domain]
+    with owner_session() as s:
+        events = list(s.scalars(select(AgentEvent).where(AgentEvent.case_id == case["id"], AgentEvent.type == "check.could_not_verify")))
+    assert any(e.data["check"] == "domain_verification" and "RDAP unreachable" in e.message for e in events)
+
+
+def test_insufficient_price_history_holds_without_adding_points(client, world):
+    with owner_session() as s:
+        s.execute(delete(HistoricalInvoice).where(HistoricalInvoice.vendor_id == world.vendors["B"].id))
+    case = run_case(client, login(client, "accountant"), clean_spec())
+    assert case["status"] == "AWAITING_HUMAN"
+    assert case["checks"]["price_anomaly"]["status"] == "could_not_verify"
+    # The price check adds nothing; the only points are the engine's own "no prior history" signal (a fact from our records).
+    assert set(contributions(case)) <= {"no_history"}
+
+
+def test_clean_known_vendor_still_auto_clears(client, world):
+    case = run_case(client, login(client, "accountant"), clean_spec())
+    assert case["status"] == "AUTO_CLEARED", gate(case)
+
+
+@pytest.mark.parametrize("field,expect", [
+    (None, "could not be read"),
+    ({"value": 0, "confidence": 0.99}, "zero or negative"),
+    ({"value": 100, "confidence": 0.4}, "low confidence"),
+    ({"value": 100, "confidence": 0.4, "via": "human_correction"}, None),
+    ({"value": 100, "confidence": 0.95}, None),
+])
+def test_total_problems_block_auto_clear_and_need_dual_approval(field, expect):
+    case = SimpleNamespace(extraction={"total": field} if field else {}, risk={"tier": "LOW"}, amount_minor=100)
+    problem = total_problem(case)
+    assert (problem is None) if expect is None else (expect in problem)
+    assert requires_dual_approval(case, {"dual_approval_amount_minor": 10**12}) is (expect is not None)

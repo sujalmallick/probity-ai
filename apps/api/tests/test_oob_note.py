@@ -4,19 +4,24 @@ A vendor reply alone never lowers the score; the approver's confirmation is the 
 server rejects empty or token notes and an explicit "not a channel on file" attestation.
 """
 
+import pytest
 from conftest import login
-from test_demo_flow import API, upload_and_run
+from factories import NEW_DOMAIN, VENDOR_A, bank_change_spec
+from helpers import API, legit_reply_body, record_reply, run_case, send_verification
 
 from probity.services import OOB_NOTE_MIN_CHARS
 
 
+@pytest.fixture(autouse=True)
+def _world(world, fake_lookups):
+    fake_lookups.domains[NEW_DOMAIN] = 21
+
+
 def _case_with_reply(client):
     acc, appr = login(client, "accountant"), login(client, "approver")
-    case = upload_and_run(client, acc, "invoice_4821.pdf")
-    assert client.post(f"{API}/cases/{case['id']}/decision", headers=appr, json={"decision": "REQUEST_VERIFICATION", "reason": "verify bank change"}).status_code == 200
-    draft = client.get(f"{API}/cases/{case['id']}/drafts", headers=appr).json()["items"][0]
-    assert client.post(f"{API}/cases/{case['id']}/drafts/{draft['id']}/send", headers=appr, json={}).status_code == 200
-    reply = client.post(f"{API}/demo/vendor-reply/{case['id']}?kind=legit", headers=acc).json()
+    case = run_case(client, acc, bank_change_spec())
+    send_verification(client, case, appr)
+    reply = record_reply(client, case, acc, VENDOR_A.contact_email, legit_reply_body(case))
     return case["id"], reply["claim_ids"], acc, appr
 
 
@@ -54,8 +59,3 @@ def test_valid_note_rescores_and_audits_attestation(client):
     audit = client.get(f"{API}/cases/{case_id}/audit", headers=acc).json()
     oob = [a for a in audit["items"] if a["action"] == "verification.out_of_band"]
     assert oob and oob[-1]["data"]["known_channel"] is True
-
-
-def test_demo_users_carry_workspace_name(client):
-    users = client.get(f"{API}/auth/demo-users").json()
-    assert users and all(u["workspace"]["id"] and u["workspace"]["name"] for u in users)

@@ -31,7 +31,7 @@ def utcnow() -> datetime:
 
 
 def iso(dt: datetime | None) -> str | None:
-    """ISO-8601 UTC. SQLite drops tzinfo, so naive values are treated as UTC."""
+    """ISO-8601 UTC. Naive values are treated as UTC."""
     if dt is None:
         return None
     if dt.tzinfo is None:
@@ -48,7 +48,7 @@ class Base(DeclarativeBase):
 
 
 class TelemetryBase(DeclarativeBase):
-    """Agent events + LLM call logs. Separate engine on SQLite so live progress never waits on a case write lock."""
+    """Agent events + LLM call logs, written in their own short transactions so live progress never waits on a case write."""
 
     type_annotation_map = {dict[str, Any]: JSONType, list[Any]: JSONType}
 
@@ -97,6 +97,9 @@ class Vendor(Base):
     website: Mapped[str | None] = mapped_column(String(300))
     archived: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     notes: Mapped[str | None] = mapped_column(Text)
+    # GST status typed in by a user from the GST portal: {gstin, legal_name, status, note, entered_by, entered_by_name,
+    # entered_at}. Always shown as "entered manually by <name>", never as registry-verified.
+    gst_manual: Mapped[dict[str, Any] | None] = mapped_column(JSONType)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -291,6 +294,7 @@ class Draft(Base):
     subject: Mapped[str] = mapped_column(String(300))
     body: Mapped[str] = mapped_column(Text)
     requested_items: Mapped[list[Any]] = mapped_column(JSONType, default=list)
+    fallback: Mapped[dict[str, Any] | None] = mapped_column(JSONType)  # set when the AI was unavailable and a template was used
     status: Mapped[str] = mapped_column(String(20), default="draft")  # draft | sent
     approved_by: Mapped[str | None] = mapped_column(String(40))
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -298,7 +302,7 @@ class Draft(Base):
 
 
 class Message(Base):
-    """Mock mailbox (outbound sent mail + inbound vendor replies)."""
+    """Mailbox (outbound sent mail + inbound vendor replies)."""
 
     __tablename__ = "messages"
     id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("msg"))

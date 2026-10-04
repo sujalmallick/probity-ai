@@ -7,20 +7,30 @@ dependencies = [
   "fastapi>=0.115",
   "uvicorn[standard]>=0.30",
   "sqlalchemy>=2.0",
+  "alembic>=1.13",
+  "psycopg[binary]>=3.2",
   "pydantic>=2.7",
   "pydantic-settings>=2.3",
+  "anthropic>=0.60",
   "pdfplumber>=0.11",
+  "pypdfium2>=4.30",
   "reportlab>=4.0",
   "rapidfuzz>=3.9",
   "langgraph>=0.2",
-  "pyjwt>=2.8",
+  "pyjwt[crypto]>=2.8",
   "httpx>=0.27",
   "python-multipart>=0.0.9",
   "cryptography>=42",
+  "structlog>=24.1",
+  "prometheus-client>=0.20",
+  "sentry-sdk>=2.0",
 ]
 
 [project.optional-dependencies]
-live = ["anthropic>=0.60", "psycopg[binary]>=3.2"]
+# Optional: TASK_BACKEND=celery (separate worker) and live progress fan-out across processes.
+worker = ["celery>=5.4", "redis>=5.0"]
+# Optional: STORAGE_BACKEND=s3.
+s3 = ["boto3>=1.34"]
 dev = ["pytest>=8", "hypothesis>=6.100"]
 
 [build-system]
@@ -31,7 +41,7 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-probity = ["fixtures/*.json", "llm/prompts/*/*.md", "risk/*.json"]
+probity = ["llm/prompts/*/*.md", "risk/*.json", "db/migrations/script.py.mako"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

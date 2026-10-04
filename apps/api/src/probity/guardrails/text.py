@@ -5,13 +5,26 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from probity.ingestion.validators import EMAIL_RE
+
 # ---------------------------------------------------------------- redaction (G8)
 
 _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    ("EMAIL", re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")),
+    ("EMAIL", EMAIL_RE),
     ("PAN", re.compile(r"\b[A-Z]{5}[0-9]{4}[A-Z]\b")),
     ("ACCT", re.compile(r"\b\d{9,18}\b")),
 ]
+
+
+_ACCOUNT_RUN = re.compile(r"(?<![\w+])\d(?:[ -]?\d){8,17}(?![\w])")
+
+
+def mask_account_numbers(text: str | None) -> str | None:
+    """Show 9–18-digit runs (bank accounts, also when spaced or dashed) as XXXX + last 4 in free text that is
+    displayed or exported (G8). The full number is available only through the audited reveal endpoint."""
+    if not text:
+        return text
+    return _ACCOUNT_RUN.sub(lambda m: "XXXX" + re.sub(r"\D", "", m.group(0))[-4:], text)
 
 
 @dataclass

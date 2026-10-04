@@ -87,6 +87,7 @@ def _template(result: dict) -> ScoreNarrative:
 
 def narrate(result: dict, *, tags: dict | None = None, budget=None) -> dict:  # type: ignore[no-untyped-def]
     """Return {summary, key_points, source: "llm" | "template", note}. Never raises for LLM problems."""
+    from probity.events import rule_based_fallback
     from probity.llm import client as llm
 
     template = _template(result)
@@ -96,11 +97,12 @@ def narrate(result: dict, *, tags: dict | None = None, budget=None) -> dict:  # 
     try:
         pv, system = llm.load_prompt(AGENT, "summary")
         out = llm.generate(schema=ScoreNarrative, system=system, user=user, tier="fast",
-                           tags={**(tags or {}), "agent": AGENT, "prompt_version": pv}, mock=lambda: template, budget=budget)
+                           tags={**(tags or {}), "agent": AGENT, "prompt_version": pv}, budget=budget)
+    except llm.LLMFailed as e:
+        return {**template.model_dump(), "source": "template", "note": f"AI unavailable ({e.reason})", "fallback": rule_based_fallback(e.reason)}
     except Exception as e:  # noqa: BLE001 - the deterministic sentence is always a valid explanation
-        return {**template.model_dump(), "source": "template", "note": f"LLM unavailable ({type(e).__name__})"}
-    if out == template:  # mock mode, or a cached miss that fell back to the template
-        return {**template.model_dump(), "source": "template", "note": None}
+        return {**template.model_dump(), "source": "template", "note": f"AI unavailable ({type(e).__name__})",
+                "fallback": rule_based_fallback(type(e).__name__)}
     problems = check(out, result)
     if problems:
         return {**template.model_dump(), "source": "template", "note": "LLM text rejected: " + "; ".join(problems)}

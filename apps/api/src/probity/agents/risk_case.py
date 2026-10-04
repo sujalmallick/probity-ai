@@ -8,7 +8,7 @@ from sqlalchemy import select
 from probity.agents.common import load_case
 from probity.db.models import ClaimRow, RiskScoreRow, Workspace
 from probity.db.session import session_scope
-from probity.events import CaseCtx
+from probity.events import CaseCtx, rule_based_fallback
 from probity.guardrails.text import neutralize_language
 from probity.llm import client as llm
 from probity.policy import get_policy
@@ -86,7 +86,7 @@ def analyst(ctx: CaseCtx) -> dict:
         else:
             rec_next = ["Review findings"] if counted else []
 
-        def mock() -> CaseSummary:
+        def engine_summary() -> CaseSummary:
             n = len(counted)
             if n:
                 lst = "; ".join(f"{c['label'].lower()} ({c['observed']} vs {c['baseline']})" if c.get("observed") else c["label"].lower() for c in counted)
@@ -99,8 +99,16 @@ def analyst(ctx: CaseCtx) -> dict:
                                suggested_next_checks=rec_next, unconfirmed=[c["statement"] or c["label"] for c in unconf])
 
         pv, system = llm.load_prompt("case_analyst", "summary")
-        out = llm.generate(schema=CaseSummary, system=system, user=f"Engine output: {risk}", tier="reasoning",
-                           tags={**ctx.tags, "agent": "case_analyst", "prompt_version": pv}, mock=mock, budget=ctx.budget)
+        summary_source = "ai"
+        summary_fallback = None
+        try:
+            out = llm.generate(schema=CaseSummary, system=system, user=f"Engine output: {risk}\nChecks: {case.checks}", tier="reasoning",
+                               tags={**ctx.tags, "agent": "case_analyst", "prompt_version": pv}, budget=ctx.budget)
+        except llm.LLMFailed as e:
+            out = engine_summary()
+            summary_source = "engine"
+            summary_fallback = rule_based_fallback(f"summary written by the risk engine: {e.reason}")
+            ctx.progress("case_analyst", f"AI summary unavailable ({e.reason}); showing the risk engine's own summary", fallback="engine_summary")
         out.recommendation = rec  # consistency with tier is enforced in code
         case.summary = neutralize_language(out.summary)
         case.recommendation = {
@@ -109,13 +117,44 @@ def analyst(ctx: CaseCtx) -> dict:
             "top_findings": [neutralize_language(f) for f in out.top_findings],
             "unconfirmed": out.unconfirmed,
             "suggested_next_checks": out.suggested_next_checks,
+            "summary_source": summary_source,
+            "summary_fallback": summary_fallback,
         }
     ctx.emit("agent.completed", agent="case_analyst", status="done", message=rec.replace("_", " ").title())
     return {"recommendation": rec}
 
 
-def requires_dual_approval(case, policy: dict) -> bool:  # type: ignore[no-untyped-def]
-    return (case.risk or {}).get("tier") == "CRITICAL" or (case.amount_minor or 0) >= policy["dual_approval_amount_minor"]
+TOTAL_MIN_CONFIDENCE = 0.8
+
+
+def total_problem(case) -> str | None:  # type: ignore[no-untyped-def]
+    """Why the invoice total can't be trusted, or None. Amount-based limits (auto-clear cap, dual approval) are
+    meaningless without a reliable total, so an unreliable one is treated as above every limit."""
+    f = (case.extraction or {}).get("total") or {}
+    value = f.get("value")
+    if not isinstance(value, int):
+        return "invoice total could not be read"
+    if value <= 0:
+        return "invoice total is zero or negative"
+    if f.get("via") != "human_correction" and float(f.get("confidence") or 0) < TOTAL_MIN_CONFIDENCE:
+        return f"invoice total was read with low confidence ({float(f.get('confidence') or 0):.2f})"
+    return None
+
+
+def requires_dual_approval(case, policy: dict, tier: str | None = None) -> bool:  # type: ignore[no-untyped-def]
+    """tier: the case's peak tier when deciding (services.peak_tier); defaults to the current tier."""
+    tier = tier or (case.risk or {}).get("tier")
+    return (tier == "CRITICAL" or (case.amount_minor or 0) >= policy["dual_approval_amount_minor"]
+            or total_problem(case) is not None)
+
+
+def unverified_required(case) -> list[dict]:  # type: ignore[no-untyped-def]
+    """Required checks that did not produce an answer: a tool failed, data was missing, or the check could not run.
+    "No evidence of a problem" is not evidence of no problem, so each of these holds the invoice."""
+    required = set((case.plan or {}).get("required_checks", []))
+    return [{"check": k, "status": v.get("status"), "reason": v.get("reason") or v.get("status")}
+            for k, v in (case.checks or {}).items()
+            if k in required and v.get("status") in ("skipped", "could_not_verify", "failed")]
 
 
 def gate(ctx: CaseCtx) -> dict:
@@ -127,10 +166,9 @@ def gate(ctx: CaseCtx) -> dict:
         claims = list(s.scalars(select(ClaimRow).where(ClaimRow.case_id == ctx.case_id, ClaimRow.active.is_(True))))
         required = set(case.plan.get("required_checks", []))
         incomplete = [k for k, v in (case.checks or {}).items() if v.get("status") == "failed"]
-        # A required check that could not run (e.g. no bank history to compare against) proves nothing, so
-        # it cannot support auto-clear: "no evidence of a problem" is not evidence of no problem.
-        skipped_required = [f"{k.replace('_', ' ')} ({v.get('reason') or 'skipped'})" for k, v in (case.checks or {}).items()
-                            if k in required and v.get("status") == "skipped"]
+        not_verified = unverified_required(case)
+        total_issue = total_problem(case)
+        gst_manual_flag = ((case.checks or {}).get("gst_manual") or {}).get("status") == "fired"
         no_history = (case.checks or {}).get("history", {}).get("status") == "fired"
         # Someone changed what the document says before it was checked; an approver must see both versions.
         corrected = sorted(k for k, f in (case.extraction or {}).items() if isinstance(f, dict) and f.get("via") == "human_correction")
@@ -146,8 +184,12 @@ def gate(ctx: CaseCtx) -> dict:
             reasons.append("vendor not matched to the vendor master")
         if case.partial or incomplete:
             reasons.append("investigation incomplete (FAILED_PARTIAL)")
-        if skipped_required:
-            reasons.append("required check could not run: " + "; ".join(skipped_required))
+        for u in not_verified:
+            reasons.append(f"Could not verify: {u['check'].replace('_', ' ')} — {u['reason']}")
+        if total_issue:
+            reasons.append(total_issue + " (dual approval required)")
+        if gst_manual_flag:
+            reasons.append("GST status entered manually as " + str((case.checks or {}).get("gst_manual", {}).get("reason", "not Active")))
         if no_history:
             reasons.append("no transaction history with this vendor")
         if corrected:
@@ -165,7 +207,7 @@ def gate(ctx: CaseCtx) -> dict:
         auto = not reasons
         case.status = "AUTO_CLEARED" if auto else "AWAITING_HUMAN"
         case.recommendation = {**case.recommendation, "gate": {"auto_cleared": auto, "reasons": reasons, "dual_approval": requires_dual_approval(case, policy),
-                                                               "requires_role": "approver"}}
+                                                               "requires_role": "approver", "could_not_verify": not_verified}}
         if not auto:
             from probity.agents.common import fv
             from probity.ingestion.validators import format_inr

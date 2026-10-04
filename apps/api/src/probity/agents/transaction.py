@@ -22,7 +22,14 @@ from probity.signals import detectors as d
 AGENT = "transaction_analyst"
 
 
-def _status(res: d.SignalResult) -> dict:
+NOT_APPLICABLE = {"no bank account on invoice", "no sender domain on invoice"}
+
+
+def _status(ctx: CaseCtx, check: str, res: d.SignalResult) -> dict:
+    """A check that had nothing to compare against (no history, no bank records) is "could not verify" and is
+    announced in the timeline; one that simply doesn't apply to this invoice is "skipped"."""
+    if res.skipped and res.skipped not in NOT_APPLICABLE:
+        return {**ctx.unverifiable(AGENT, check, res.skipped), "signal": res.signal}
     return {"status": "fired" if res.fired else ("skipped" if res.skipped else "passed"), "reason": res.skipped or "", "signal": res.signal}
 
 
@@ -52,7 +59,7 @@ def run(ctx: CaseCtx) -> dict:
         ctx.progress(AGENT, "Comparing bank account with vendor history")
         known = [d.KnownAccount(a.last4, a.acct_hmac, a.verified) for a in b["accounts"]]
         res = d.bank_account_changed(bank.get("hmac"), bank.get("last4"), known)
-        checks["bank_account_verification"] = _status(res)
+        checks["bank_account_verification"] = _status(ctx, "bank_account_verification", res)
         if res.fired:
             base_accts = [a for a in b["accounts"] if a.verified] or b["accounts"]
             ev = [EvidenceIn(source="invoice", field="bank_account", value=mask(bank["last4"]), source_ref="invoice", excerpt=fsnip(ex, "bank_account"), tier=1, match_key=bank["hmac"])]
@@ -71,7 +78,7 @@ def run(ctx: CaseCtx) -> dict:
         # --- duplicate
         ctx.progress(AGENT, "Checking for duplicate invoices")
         res = d.duplicate_invoice(normalize_invoice_number(inv_no), total, inv_date, history)
-        checks["duplicate_detection"] = _status(res)
+        checks["duplicate_detection"] = _status(ctx, "duplicate_detection", res)
         if res.fired:
             match = next(h for h in hist_rows if (res.detail["match"] == "invoice_number" and h.invoice_number_norm == res.value) or (res.detail["match"] != "invoice_number" and h.total_minor == res.value))
             if res.detail["match"] == "invoice_number":
@@ -95,7 +102,7 @@ def run(ctx: CaseCtx) -> dict:
         # --- price
         ctx.progress(AGENT, "Comparing unit prices with vendor history")
         res = d.price_anomaly(items, history)
-        checks["price_anomaly"] = _status(res)
+        checks["price_anomaly"] = _status(ctx, "price_anomaly", res)
         if res.fired:
             item = res.detail["item"]
             past = [p for h in history for (dd, _q, p) in h.line_items if dd.lower() == item.lower()] or [res.baseline]
@@ -119,7 +126,7 @@ def run(ctx: CaseCtx) -> dict:
         po = next((p for p in pos if case.vendor_id and p.vendor_id == case.vendor_id), None)
         other_vendor_po = po is None and bool(pos)
         res = d.missing_po(po_no, po is not None)
-        checks["po_present"] = _status(res)
+        checks["po_present"] = _status(ctx, "po_present", res)
         if res.fired:
             if not po_no:
                 stmt = "Invoice carries no purchase order number."
@@ -140,7 +147,7 @@ def run(ctx: CaseCtx) -> dict:
             ctx.progress(AGENT, f"Matching quantities against {po.po_number}")
             po_lines = [(pl["description"], pl["qty"], pl["unit_price_minor"]) for pl in po.lines]
             res = d.quantity_po_mismatch(items, po_lines)
-            checks["quantity_po_match"] = _status(res)
+            checks["quantity_po_match"] = _status(ctx, "quantity_po_match", res)
             if res.fired:
                 record_claim(s, ctx, AGENT, AgentClaim(
                     claim=f"Invoiced quantity {res.value} exceeds PO quantity {res.baseline} for '{res.detail['item']}'.",
@@ -154,9 +161,10 @@ def run(ctx: CaseCtx) -> dict:
                 ))
             res = d.temporal_anomaly(inv_date, po.po_date, today())
         else:
-            checks["quantity_po_match"] = {"status": "skipped", "reason": "no matching PO", "signal": "quantity_po_mismatch"}
+            reason = "no PO number on the invoice" if not po_no else ("PO was raised for a different vendor" if other_vendor_po else "PO not found in your purchase orders")
+            checks["quantity_po_match"] = {**ctx.unverifiable(AGENT, "quantity_po_match", reason), "signal": "quantity_po_mismatch"}
             res = d.temporal_anomaly(inv_date, None, today())
-        checks["dates"] = _status(res)
+        checks["dates"] = _status(ctx, "dates", res)
         if res.fired:
             record_claim(s, ctx, AGENT, AgentClaim(
                 claim=f"Date anomaly: {res.detail['reason']} ({res.value} vs {res.baseline}).",

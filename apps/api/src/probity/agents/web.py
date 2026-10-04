@@ -1,8 +1,9 @@
 """Agent 4 — Web Research: "What external evidence exists?"
 
 Structured findings only (URL + verbatim excerpt + tier). Third-party allegations are reported as
-"a third-party source reports…", never as fact. Absence of results is "no adverse public findings
-located in N sources", never "clean".
+"a third-party source reports…", never as fact. "No adverse public findings" is only said when at least one
+search actually ran; if search is not configured or every search failed, the check is "could not verify".
+Search, page-fetch and AI failures are reported in the timeline.
 """
 
 from __future__ import annotations
@@ -13,12 +14,11 @@ from pydantic import BaseModel, Field
 
 from probity.agents.common import fv, load_case, record_claim, vendor_bundle
 from probity.db.session import session_scope
-from probity.events import CaseCtx
+from probity.events import CaseCtx, rule_based_fallback
 from probity.evidence.models import AgentClaim, EvidenceIn
 from probity.llm import client as llm
 from probity.tools import lookups
 from probity.tools.base import BudgetExceeded
-from probity.tools.fetch import FetchBlocked
 
 AGENT = "web_research"
 ADVERSE = re.compile(r"(?i)\b(complain\w*|cheat\w*|unpaid|non-?delivery|consumer court|police|blacklist\w*|warning)\b")
@@ -36,6 +36,17 @@ def _excerpt(text: str, needle: str, width: int = 300) -> str:
     return text[start : start + width]
 
 
+def standard_queries(name: str, sender: str | None, official: list[str], depth: int) -> list[str]:
+    """Rule-based queries, used when the AI can't write them."""
+    q = [f'"{name}" complaints', f'"{name}" address']
+    if sender:
+        q.append(f'"{sender}"')
+    if depth > 0:
+        q.append(f'"{name}" directors')
+        q += [f'"{dmn}"' for dmn in official[:1]]
+    return q[:6]
+
+
 def run(ctx: CaseCtx, depth: int) -> dict:
     ctx.emit("agent.started", agent=AGENT, status="running", message="Searching external sources")
     with session_scope() as s:
@@ -46,57 +57,71 @@ def run(ctx: CaseCtx, depth: int) -> dict:
         sender = fv(ex, "sender_domain")
         official = [x.domain for x in b["domains"] if x.verified]
 
-    def mock_queries() -> Queries:
-        q = [f'"{name}" complaints', f'"{name}" address']
-        if sender:
-            q.append(f'"{sender}"')
-        if depth > 0:
-            q.append(f'"{name}" directors')
-            q += [f'"{dmn}"' for dmn in official[:1]]
-        return Queries(queries=q[:6])
+    if not name:
+        check = ctx.unverifiable(AGENT, "external_reputation", "no vendor name to search for")
+        ctx.emit("agent.completed", agent=AGENT, status="done", message="Could not verify external reputation")
+        return {"sources": 0, "check": check}
 
-    pv, system = llm.load_prompt("web_research", "queries")
-    queries = llm.generate(
-        schema=Queries, system=system, user=f"Vendor name: {name}\nSender domain: {sender}\nKnown domains: {official}\nDepth: {depth}",
-        tier="fast", tags={**ctx.tags, "agent": AGENT, "prompt_version": pv}, mock=mock_queries, budget=ctx.budget,
-    ).queries[:6]
+    fallback = None
+    try:
+        pv, system = llm.load_prompt("web_research", "queries")
+        queries = llm.generate(
+            schema=Queries, system=system, user=f"Vendor name: {name}\nSender domain: {sender}\nKnown domains: {official}\nDepth: {depth}",
+            tier="fast", tags={**ctx.tags, "agent": AGENT, "prompt_version": pv}, budget=ctx.budget,
+        ).queries[:6]
+    except llm.LLMFailed as e:
+        queries = standard_queries(name, sender, official, depth)
+        fallback = rule_based_fallback(f"search queries written by rules: {e.reason}")
+        ctx.progress(AGENT, f"AI could not write search queries ({e.reason}); using standard rule-based queries", fallback="rule_based_queries")
 
     sources = 0
     findings = 0
     searched: list[str] = []
+    failures: list[str] = []
     domain_mentions: dict[str, tuple[str, str, int]] = {}
     with session_scope() as s:
         for q in queries:
             ctx.progress(AGENT, f"Searching {q}")
             try:
-                hits = lookups.web_search(q, ctx.budget)
+                res = lookups.web_search(q, ctx.budget)
             except BudgetExceeded:
-                ctx.emit("agent.progress", agent=AGENT, status="running", message="Web budget exhausted — stopping research")
+                ctx.progress(AGENT, "Web budget exhausted — stopping research")
+                failures.append("web budget exhausted")
                 break
+            if res.status == "not_configured":
+                failures.append(res.reason)
+                break  # every query would get the same answer
+            if res.status != "ok":
+                failures.append(res.reason)
+                ctx.emit("check.could_not_verify", agent=AGENT, status="warning", message=f"Search failed for {q}: {res.reason}",
+                         data={"check": "external_reputation", "query": q, "reason": res.reason})
+                continue
             sources += 1
             searched.append(q)
-            for h in hits[:2]:
+            for h in res.hits[:2]:
                 try:
-                    page = lookups.fetch_page(h.url, ctx.budget) or h.snippet
-                except FetchBlocked as e:
-                    ctx.emit("agent.progress", agent=AGENT, status="running", message=f"Fetch blocked by SSRF guard: {e}")
-                    continue
+                    page = lookups.fetch_page(h.url, ctx.budget)
                 except BudgetExceeded:
                     break
-                sources += 1
-                if name and name.split()[0].lower() not in page.lower():
+                if page.status == "ok":
+                    text = page.text
+                    sources += 1
+                else:
+                    ctx.progress(AGENT, f"Could not read {h.url}: {page.reason}; using the search snippet only", url=h.url, reason=page.reason)
+                    text = h.snippet
+                if name.split()[0].lower() not in text.lower():
                     continue  # page doesn't mention the entity → not reported
-                if "complaints" in q and ADVERSE.search(page):
-                    m = ADVERSE.search(page)
-                    quote = _excerpt(page, m.group(0), 160)  # type: ignore[union-attr]
+                if "complaints" in q and ADVERSE.search(text):
+                    m = ADVERSE.search(text)
+                    quote = _excerpt(text, m.group(0), 160)  # type: ignore[union-attr]
                     record_claim(s, ctx, AGENT, AgentClaim(
                         claim=f"A third-party source reports complaints mentioning {name} ({h.url}).",
-                        evidence=[EvidenceIn(source="web", field="complaint", value=h.title, source_ref=h.url, excerpt=_excerpt(page, m.group(0)), tier=h.tier)],  # type: ignore[union-attr]
+                        evidence=[EvidenceIn(source="web", field="complaint", value=h.title, source_ref=h.url, excerpt=_excerpt(text, m.group(0)), tier=h.tier)],  # type: ignore[union-attr]
                         confidence=0.6, severity="warn", assertion={"op": "quote", "evidence": "$0", "quote": quote},
                     ))
                     findings += 1
-                for dom in re.findall(r"(?i)website:\s*([a-z0-9.-]+\.[a-z]{2,})", page):
-                    domain_mentions.setdefault(dom.lower(), (h.url, _excerpt(page, dom), h.tier))
+                for dom in re.findall(r"(?i)website:\s*([a-z0-9.-]+\.[a-z]{2,})", text):
+                    domain_mentions.setdefault(dom.lower(), (h.url, _excerpt(text, dom), h.tier))
 
         for dom, (url, excerpt, tier) in domain_mentions.items():
             quote = f"Website: {dom}"
@@ -105,12 +130,21 @@ def run(ctx: CaseCtx, depth: int) -> dict:
                 evidence=[EvidenceIn(source="web", field="listed_website", value=dom, source_ref=url, excerpt=excerpt, tier=tier)],
                 confidence=0.8, severity="info", assertion={"op": "quote", "evidence": "$0", "quote": quote},
             ))
-        if findings == 0:
-            record_claim(s, ctx, AGENT, AgentClaim(
-                claim=f"No adverse public findings located in {sources} sources.",
-                evidence=[EvidenceIn(source="web", field="search_log", value=sources, source_ref="search:" + " | ".join(searched), excerpt="Queries: " + "; ".join(searched), tier=2)],
-                confidence=0.7, severity="info", assertion={"op": "info"},
-            ))
+        if not searched:
+            check = ctx.unverifiable(AGENT, "external_reputation", failures[0] if failures else "no search could be run")
+        else:
+            if findings == 0:
+                record_claim(s, ctx, AGENT, AgentClaim(
+                    claim=f"No adverse public findings located in {sources} sources ({len(searched)} of {len(queries)} searches completed).",
+                    evidence=[EvidenceIn(source="web", field="search_log", value=sources, source_ref="search:" + " | ".join(searched), excerpt="Queries: " + "; ".join(searched), tier=2)],
+                    confidence=0.7, severity="info", assertion={"op": "info"},
+                ))
+            check = {"status": "passed" if findings == 0 else "fired", "reason": f"{len(searched)} of {len(queries)} searches completed, {sources} sources"}
+            if failures:
+                check["warnings"] = failures[:5]
+        if fallback:
+            check["fallback"] = fallback
 
-    ctx.emit("agent.completed", agent=AGENT, status="done", message=f"{sources} external sources checked, {findings} adverse finding(s)")
-    return {"sources": sources}
+    ctx.emit("agent.completed", agent=AGENT, status="done",
+             message=f"{sources} external sources checked, {findings} adverse finding(s)" if searched else "Could not verify external reputation")
+    return {"sources": sources, "check": check}

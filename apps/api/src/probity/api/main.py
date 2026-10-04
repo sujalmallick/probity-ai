@@ -13,17 +13,16 @@ from typing import Any, Literal
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import func, or_, select  # noqa: F401
 from sqlalchemy.orm import Session
 
 from probity import services as svc
-from probity.api.deps import _rate_limit, current_user, db, demo_login_on, demo_login_users, demo_on, issue_token, require_mfa_for_approvals, upload_limit
-from probity.config import REPO_ROOT, get_settings
+from probity.api.deps import current_user, db, require_mfa_for_approvals, upload_limit
+from probity.config import REPO_ROOT, ConfigError, get_settings
 from probity.db.audit import audit, verify_chain
-from probity.db.models import iso, AuditLog, Invitation, Case, CaseMemory, Document, HistoricalInvoice, User, Vendor, VendorBankAccount, VendorContact, VendorDomain, Workspace
-from probity.db.session import init_db, session_scope, set_tenant
-from probity.guardrails import crypto
+from probity.db.models import iso, AuditLog, Invitation, Case, CaseMemory, Document, User, Vendor, Workspace
+from probity.db.session import session_scope
 from probity.ingestion.parse import UnsupportedDocument
 from probity.events import event_payload
 from probity.logging import configure_logging, get_logger
@@ -44,17 +43,33 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["X-Request-ID"],
 )
+from probity.api.limits import BodySizeLimit  # noqa: E402
+
+app.add_middleware(BodySizeLimit)  # refuses oversized bodies before form parsing or authentication
 
 
 @app.on_event("startup")
 def _startup() -> None:
-    init_db()
+    """Print what is live and what is missing, then refuse to start if anything required is missing."""
+    st = get_settings()
+    print(st.checklist_text(), flush=True)
+    st.validate_required()  # raises ConfigError → uvicorn reports "Application startup failed" and exits
+    from probity.db.migrate import pending_migrations
+
+    pending = pending_migrations()
+    if pending:
+        raise ConfigError(f"The database schema is not up to date ({pending}). Run: python -m probity.bootstrap")
+    if st.task_backend == "inline":
+        svc.start_inline_scheduler()
 
 
 @app.middleware("http")
 async def request_context(request: Request, call_next):  # type: ignore[no-untyped-def]
-    rid = (request.headers.get("X-Request-ID") or uuid.uuid4().hex)[:64]
+    rid = "".join(ch for ch in (request.headers.get("X-Request-ID") or "")[:64] if ch.isalnum() or ch in "-_") or uuid.uuid4().hex
     request.state.request_id = rid
+    from probity.request_context import request_id as _request_id_var
+
+    _request_id_var.set(rid)  # audit rows and logs can read it without threading it through every call
     t0 = time.perf_counter()
     try:
         response = await call_next(request)
@@ -161,44 +176,21 @@ def metrics(authorization: str | None = Header(default=None)) -> Response:
     return Response(body, media_type=ctype)
 
 
-# ---------------------------------------------------------------- auth (AUTH_MODE=local, non-prod)
+# ---------------------------------------------------------------- auth (Clerk only)
 
-_demo_on = demo_on
-_demo_login_on = demo_login_on
-_demo_login_users = demo_login_users
+GONE = "This endpoint was removed: Probity runs on real data only."
 
 
 @app.get(f"{API}/auth/config")
-def auth_config(request: Request) -> dict:
-    st = get_settings()
-    return {"mode": st.auth_mode, "demo_login": _demo_login_on(request)}
+def auth_config() -> dict:
+    return {"mode": "clerk", "demo_login": False}
 
 
+# Removed with demo data. They answer 410 until the web app has stopped calling them, then they are deleted.
 @app.get(f"{API}/auth/demo-users")
-def demo_users(request: Request, s: Session = Depends(db)) -> list[dict]:
-    if not _demo_login_on(request):
-        raise HTTPException(404, "not available")
-    names = {w.id: w.name for w in s.scalars(select(Workspace))}
-    return [{"id": u.id, "name": u.name, "email": u.email, "role": u.role, "workspace": {"id": u.workspace_id, "name": names.get(u.workspace_id)}}
-            for u in _demo_login_users(s)]
-
-
-class DemoLogin(BaseModel):
-    user_id: str = Field(max_length=64)
-
-
 @app.post(f"{API}/auth/demo-login")
-def demo_login(body: DemoLogin, request: Request, s: Session = Depends(db)) -> dict:
-    if not _demo_login_on(request):
-        raise HTTPException(404, "not available")
-    if get_settings().env != "test":
-        _rate_limit(f"demo-login:{request.client.host if request.client else '-'}", 20, 60)
-    u = next((x for x in _demo_login_users(s) if x.id == body.user_id), None)
-    if not u:
-        raise HTTPException(404, "user not found")
-    set_tenant(s, u.workspace_id)
-    audit(s, u.workspace_id, u.id, "auth.login", u.id, {"mode": "local"}, request.state.request_id)
-    return {"token": issue_token(u), "user": {"id": u.id, "name": u.name, "role": u.role, "workspace_id": u.workspace_id}}
+def removed_demo_auth() -> None:
+    raise HTTPException(410, GONE)
 
 
 @app.get(f"{API}/me")
@@ -213,18 +205,43 @@ def get_ws_policy(user: User = Depends(current_user), s: Session = Depends(db)) 
     return {**p, "weights": {**WEIGHTS[p["weights_version"]], **p["weight_overrides"]}, "tiers": {"LOW": "0–29", "MEDIUM": "30–59", "HIGH": "60–79", "CRITICAL": "80–100"}}
 
 
+MAX_AMOUNT_MINOR = 10**14  # ₹1,000 crore: far above any invoice; bounds typos and overflow
+
+
+class PolicyIn(BaseModel):
+    """Owner-editable policy. Strict types and bounds: a string where a number belongs used to be stored as-is and
+    made every later investigation fail; negative weights silently lowered scores."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    auto_clear_enabled: bool | None = None
+    auto_clear_max_amount_minor: int | None = Field(default=None, ge=0, le=MAX_AMOUNT_MINOR)
+    external_research_amount_minor: int | None = Field(default=None, ge=0, le=MAX_AMOUNT_MINOR)
+    dual_approval_amount_minor: int | None = Field(default=None, ge=0, le=MAX_AMOUNT_MINOR)
+    weight_overrides: dict[str, int] | None = None
+    require_mfa_for_approvals: bool | None = None
+
+    @field_validator("weight_overrides")
+    @classmethod
+    def _known_signals(cls, v: dict[str, int] | None) -> dict[str, int] | None:
+        if v is None:
+            return v
+        known = set().union(*WEIGHTS.values())
+        unknown = sorted(set(v) - known)
+        if unknown:
+            raise ValueError(f"unknown signals: {unknown}")
+        if any(not 0 <= w <= 100 for w in v.values()):
+            raise ValueError("signal weights must be between 0 and 100")
+        return v
+
+
 @app.put(f"{API}/workspace/policy")
-def put_ws_policy(body: dict[str, Any], request: Request, user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
+def put_ws_policy(body: PolicyIn, request: Request, user: User = Depends(require_mfa_for_approvals), s: Session = Depends(db)) -> dict:
     svc.require_role(user, "owner")
     ws = s.get(Workspace, user.workspace_id)
     assert ws
-    allowed = {"auto_clear_enabled", "auto_clear_max_amount_minor", "external_research_amount_minor", "dual_approval_amount_minor", "weight_overrides",
-               "demo_agent_delay_ms", "require_mfa_for_approvals"}
-    bad = set(body) - allowed
-    if bad:
-        raise svc.BadRequest(f"unknown policy keys: {sorted(bad)}")
+    changes = body.model_dump(exclude_unset=True)
     before = dict(ws.policy or {})
-    ws.policy = {**before, **body, "reviewed_at": datetime.now(timezone.utc).isoformat()}
+    ws.policy = {**before, **changes, "reviewed_at": datetime.now(timezone.utc).isoformat()}
     audit(s, ws.id, user.id, "policy.updated", ws.id, {"before": before, "after": ws.policy}, request.state.request_id)
     return get_policy(ws)
 
@@ -253,7 +270,7 @@ def invitations(user: User = Depends(current_user), s: Session = Depends(db)) ->
 
 
 @app.post(f"{API}/workspace/invitations", status_code=201)
-def invite(body: InviteIn, request: Request, user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
+def invite(body: InviteIn, request: Request, user: User = Depends(require_mfa_for_approvals), s: Session = Depends(db)) -> dict:
     svc.require_role(user, "owner")
     email = body.email.strip().lower()
     if s.scalars(select(User).where(User.email == email)).first():
@@ -264,12 +281,15 @@ def invite(body: InviteIn, request: Request, user: User = Depends(current_user),
     audit(s, user.workspace_id, user.id, "invitation.created", inv.id, {"email": email, "role": body.role}, request.state.request_id)
     from probity import mailer
 
-    mailer.send_invitation(email, user.name, body.role)
-    return {"id": inv.id, "email": email, "role": body.role, "sign_in_url": get_settings().public_app_url}
+    not_sent = mailer.send_invitation(email, user.name, body.role)
+    if not_sent:
+        audit(s, user.workspace_id, user.id, "email.not_sent", inv.id, {"to": mailer.masked(email), "reason": not_sent[:200]}, request.state.request_id)
+    return {"id": inv.id, "email": email, "role": body.role, "sign_in_url": get_settings().public_app_url,
+            "email_sent": not_sent is None, "email_note": not_sent}
 
 
 @app.delete(f"{API}/workspace/invitations/{{inv_id}}", status_code=204)
-def revoke_invite(inv_id: str, request: Request, user: User = Depends(current_user), s: Session = Depends(db)) -> None:
+def revoke_invite(inv_id: str, request: Request, user: User = Depends(require_mfa_for_approvals), s: Session = Depends(db)) -> None:
     svc.require_role(user, "owner")
     inv = s.get(Invitation, inv_id)
     if not inv or inv.workspace_id != user.workspace_id or inv.accepted_at:
@@ -516,7 +536,7 @@ async def case_events(case_id: str, request: Request, user: User = Depends(curre
 
 class DecisionIn(BaseModel):
     decision: Literal["APPROVE", "REJECT", "REQUEST_VERIFICATION", "INVESTIGATE_FURTHER"]
-    reason: str = ""
+    reason: str = Field(default="", max_length=4000)
 
 
 @app.post(f"{API}/cases/{{case_id}}/decision")
@@ -589,11 +609,11 @@ def rescore(case_id: str, user: User = Depends(current_user), s: Session = Depen
 
 class CloseIn(BaseModel):
     outcome: Literal["CONFIRMED_ISSUE", "CLEARED", "INCONCLUSIVE"]
-    resolution: str = ""
+    resolution: str = Field(default="", max_length=4000)
 
 
 @app.post(f"{API}/cases/{{case_id}}/close")
-def close(case_id: str, body: CloseIn, user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
+def close(case_id: str, body: CloseIn, user: User = Depends(require_mfa_for_approvals), s: Session = Depends(db)) -> dict:
     c = svc.close_case(s, user, case_id, body.outcome, body.resolution)
     return {"status": c.status, "outcome": c.outcome}
 
@@ -630,20 +650,22 @@ async def inbound_email(request: Request) -> dict:
     if not case_id:
         raise HTTPException(422, "no case address in recipients")
 
-    def _deliver() -> dict:
-        with session_scope() as s:
-            if s.get_bind().dialect.name == "postgresql":
-                from sqlalchemy import text as _text
+    from probity.ingestion.parse import address_from_header
 
-                ws = s.execute(_text("SELECT probity_case_workspace(:c)"), {"c": case_id}).scalar()
-            else:
-                c = s.get(Case, case_id)
-                ws = c.workspace_id if c else None
+    sender = address_from_header(str(msg.get("from", "")))  # the real addr-spec, never a display name
+    if not sender:
+        raise HTTPException(422, "no valid sender address")
+
+    def _deliver() -> dict:
+        from sqlalchemy import text as _text
+
+        with session_scope() as s:
+            ws = s.execute(_text("SELECT probity_case_workspace(:c)"), {"c": case_id}).scalar()
         if not ws:
             raise LookupError("case not found")
         with session_scope(ws) as s:
             body = str(msg.get("text") or "")[:20000]
-            out = svc.vendor_reply(s, ws, "inbound-email", case_id, str(msg.get("from", "")), str(msg.get("subject", ""))[:300], body)
+            out = svc.vendor_reply(s, ws, "inbound-email", case_id, sender, str(msg.get("subject", ""))[:300], body)
             if msg.get("dkim") and str(msg["dkim"]).lower() != "pass":
                 out["indicators"].append("Sender failed DKIM verification")
             return out
@@ -664,7 +686,7 @@ def memory(q: str = "", user: User = Depends(current_user), s: Session = Depends
     return {"items": [{"case_id": r.case_id, "vendor": names.get(r.vendor_id or ""), "outcome": r.outcome, "issues": r.issues, "resolution": r.resolution, "summary": r.summary, "peak_score": r.peak_score, "peak_tier": r.peak_tier, "at": iso(r.created_at)} for r in rows]}
 
 
-# ---------------------------------------------------------------- dashboard, benchmark, demo
+# ---------------------------------------------------------------- dashboard
 
 @app.get(f"{API}/dashboard/kpis")
 def kpis(user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
@@ -682,61 +704,14 @@ def kpis(user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
     }
 
 
+# Removed with demo data and synthetic benchmark numbers. 410 until the web app stops calling them, then deleted.
 @app.get(f"{API}/benchmark/summary")
-def benchmark_summary(user: User = Depends(current_user)) -> dict:
-    p = REPO_ROOT / "benchmark" / "results.json"
-    if not p.exists():
-        return {"available": False, "hint": "run `make benchmark`"}
-    return {"available": True, **json.loads(p.read_text(encoding="utf-8"))}
-
-
 @app.post(f"{API}/demo/seed")
-def demo_seed(user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
-    if not _demo_on():
-        raise HTTPException(404, "not available")
-    svc.require_role(user, "accountant")
-    from probity.demo import seed
-
-    return seed.demo_files_info()
-
-
 @app.get(f"{API}/demo/files/{{name}}")
-def demo_file(name: str, user: User = Depends(current_user)) -> FileResponse:
-    if not _demo_on():
-        raise HTTPException(404, "not available")
-    from probity.demo.seed import DEMO_DIR
-
-    p = (DEMO_DIR / name).resolve()
-    if p.parent != DEMO_DIR.resolve() or not p.exists():
-        raise LookupError("demo file not found")
-    return FileResponse(p, media_type="application/pdf", filename=p.name)
-
-
 @app.post(f"{API}/demo/vendor-reply/{{case_id}}")
-def demo_vendor_reply(case_id: str, kind: Literal["legit", "spoof"] = "legit", user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
-    """Simulated vendor inbox: deliver a scripted reply to the case's sent verification email. Same role as
-    recording a real reply; only exists while email is simulated (outbox)."""
-    if not _demo_on() or get_settings().email_backend != "outbox":
-        raise HTTPException(404, "not available")
-    svc.require_role(user, "accountant")
-    from probity.demo.seed import scripted_reply
-
-    case = svc.get_case(s, user.workspace_id, case_id)
-    frm, subj, body = scripted_reply(s, case, kind)
-    return svc.vendor_reply(s, user.workspace_id, user.id, case_id, frm, subj, body)
-
-
 @app.put(f"{API}/demo/speed")
-def demo_speed(delay_ms: int = Query(..., ge=0, le=5000), user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
-    if not _demo_on():
-        raise HTTPException(404, "not available")
-    svc.require_role(user, "owner")  # workspace-wide setting
-    ws = s.get(Workspace, user.workspace_id)
-    assert ws
-    before = (ws.policy or {}).get("demo_agent_delay_ms")
-    ws.policy = {**(ws.policy or {}), "demo_agent_delay_ms": delay_ms}
-    audit(s, user.workspace_id, user.id, "policy.updated", user.workspace_id, {"demo_agent_delay_ms": {"before": before, "after": delay_ms}})
-    return {"delay_ms": delay_ms}
+def removed_demo() -> None:
+    raise HTTPException(410, GONE)
 
 
 # ---------------------------------------------------------------- static web build (optional)

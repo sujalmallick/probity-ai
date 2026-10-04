@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
+from typing import Literal
+
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, or_, select
@@ -23,6 +25,7 @@ from probity.db.models import (
 )
 from probity.guardrails import crypto
 from probity.ingestion.validators import normalize_domain, valid_gstin, valid_ifsc
+from probity.tools.lookups import GST_REGISTRY_REASON
 
 router = APIRouter(prefix="/api/v1", tags=["vendors"])
 EMAIL_RE = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
@@ -78,8 +81,10 @@ def _verification(s: Session, v: Vendor, item, kind: str, key: str, names: dict,
         field = {"bank": "account", "domain": "domain", "contact": "email"}[kind]
         hit = next((a for a in audit_rows if a.entity == v.id and a.action in actions and a.data.get(field) == key
                     and (a.action.endswith("_verified") or a.data.get("verified"))), None)
-        if hit is None and method in OOB_METHODS:
-            hit = next((a for a in audit_rows if a.action == "verification.out_of_band" and (by is None or a.actor == by)), None)
+        if hit is None and method in OOB_METHODS and kind in ("bank", "domain"):
+            # Only the confirmation that named this exact account/domain; never borrow someone else's provenance.
+            hit = next((a for a in audit_rows if a.action == "verification.out_of_band" and (by is None or a.actor == by)
+                        and a.data.get("account" if kind == "bank" else "domain") == key), None)
         if hit is not None:
             by, at, note = by or hit.actor, hit.ts, note or hit.data.get("note")
             method = method or hit.data.get("method") or "manual"
@@ -162,7 +167,53 @@ def get_vendor(vendor_id: str, user: User = Depends(current_user), s: Session = 
         "purchase_orders": [{"po_number": p.po_number, "po_date": p.po_date.isoformat(), "lines": p.lines} for p in q(PurchaseOrder)],
         "prior_cases": [{"case_id": m.case_id, "outcome": m.outcome, "summary": m.summary, "peak_score": m.peak_score, "peak_tier": m.peak_tier, "at": iso(m.created_at)}
                         for m in s.scalars(select(CaseMemory).where(CaseMemory.vendor_id == v.id))],
+        "gst": {
+            "gstin_format": None if not v.gstin else ("valid" if valid_gstin(v.gstin) else "invalid"),
+            "registry_status": "could_not_verify",
+            "registry_reason": GST_REGISTRY_REASON,
+        },
+        "gst_manual": gst_manual_public(v),
     }
+
+
+def gst_manual_public(v: Vendor) -> dict | None:
+    m = v.gst_manual
+    if not m:
+        return None
+    return {"gstin": m.get("gstin"), "legal_name": m.get("legal_name"), "status": m.get("status"), "note": m.get("note"),
+            "entered_by": {"id": m.get("entered_by"), "name": m.get("entered_by_name")}, "entered_at": m.get("entered_at"),
+            "stale": (m.get("gstin") or "") != (v.gstin or ""), "source": "manual",
+            "label": f"Entered manually by {m.get('entered_by_name') or 'a user'} · {str(m.get('entered_at', ''))[:10]}"}
+
+
+class GstManualIn(BaseModel):
+    """What a user read on the GST portal themselves. Stored and shown as a manual entry, never as a registry check."""
+    legal_name: str | None = Field(default=None, max_length=300)
+    status: Literal["Active", "Cancelled", "Suspended"]
+    note: str | None = Field(default=None, max_length=1000)
+
+
+@router.put("/vendors/{vendor_id}/gst-manual")
+def put_gst_manual(vendor_id: str, body: GstManualIn, request: Request, user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
+    svc.require_role(user, "accountant")
+    v = _vendor(s, user, vendor_id)
+    if not v.gstin:
+        raise svc.BadRequest("add the vendor's GSTIN first")
+    before = v.gst_manual
+    v.gst_manual = {"gstin": v.gstin, "legal_name": (body.legal_name or "").strip() or None, "status": body.status,
+                    "note": (body.note or "").strip() or None, "entered_by": user.id, "entered_by_name": user.name,
+                    "entered_at": datetime.now(timezone.utc).isoformat()}
+    audit(s, user.workspace_id, user.id, "vendor.gst_manual_set", v.id, {"before": before, "after": v.gst_manual}, request.state.request_id)
+    return gst_manual_public(v)  # type: ignore[return-value]
+
+
+@router.delete("/vendors/{vendor_id}/gst-manual", status_code=204)
+def delete_gst_manual(vendor_id: str, request: Request, user: User = Depends(current_user), s: Session = Depends(db)) -> None:
+    svc.require_role(user, "accountant")
+    v = _vendor(s, user, vendor_id)
+    before = v.gst_manual
+    v.gst_manual = None
+    audit(s, user.workspace_id, user.id, "vendor.gst_manual_cleared", v.id, {"before": before}, request.state.request_id)
 
 
 class VendorPatch(BaseModel):
@@ -175,7 +226,7 @@ class VendorPatch(BaseModel):
 
 
 @router.patch("/vendors/{vendor_id}")
-def update_vendor(vendor_id: str, body: VendorPatch, request: Request, user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
+def update_vendor(vendor_id: str, body: VendorPatch, request: Request, user: User = Depends(require_mfa_for_approvals), s: Session = Depends(db)) -> dict:
     svc.require_role(user, "accountant")
     v = _vendor(s, user, vendor_id)
     before = {"name": v.name, "gstin": v.gstin, "address": v.address, "website": v.website, "archived": v.archived}
@@ -303,7 +354,7 @@ def verify_domain(vendor_id: str, domain_id: str, body: VerifyPatch, request: Re
 
 
 @router.delete("/vendors/{vendor_id}/domains/{domain_id}", status_code=204)
-def remove_domain(vendor_id: str, domain_id: str, request: Request, user: User = Depends(current_user), s: Session = Depends(db)) -> None:
+def remove_domain(vendor_id: str, domain_id: str, request: Request, user: User = Depends(require_mfa_for_approvals), s: Session = Depends(db)) -> None:
     svc.require_role(user, "approver")
     v = _vendor(s, user, vendor_id)
     d = s.get(VendorDomain, domain_id)
@@ -350,9 +401,19 @@ def update_contact(vendor_id: str, contact_id: str, body: ContactPatch, request:
     c = s.get(VendorContact, contact_id)
     if c is None or c.vendor_id != v.id:
         raise LookupError("contact not found")
-    if body.verified is not None:
-        if body.verified != c.verified:
-            svc.require_role(user, "approver")
+    changes = {k: {"before": getattr(c, k), "after": new} for k, new in (("name", body.name), ("phone", body.phone))
+               if new is not None and new != getattr(c, k)}
+    if body.verified is not None and body.verified != c.verified:
+        svc.require_role(user, "approver")
+    if changes and c.verified:
+        # The phone on a verified contact is the out-of-band channel ("call the number on file"): changing it must not
+        # leave the contact verified. An approver may re-verify in the same request (with a note); otherwise it drops.
+        if body.verified is not False and svc.ROLES.index(user.role) >= svc.ROLES.index("approver"):
+            _verify_gate(user, True, body.verification_note)
+            _stamp(c, user, True, "manual", body.verification_note)
+        else:
+            _stamp(c, user, False, None, None)
+    elif body.verified is not None:
         _verify_gate(user, bool(body.verified), body.verification_note)
         if body.verified != c.verified:
             _stamp(c, user, bool(body.verified), "manual", body.verification_note)
@@ -360,12 +421,13 @@ def update_contact(vendor_id: str, contact_id: str, body: ContactPatch, request:
         c.name = body.name
     if body.phone is not None:
         c.phone = body.phone
-    audit(s, user.workspace_id, user.id, "vendor.contact_updated", v.id, {"email": c.email, "verified": c.verified, "note": body.verification_note}, request.state.request_id)
+    audit(s, user.workspace_id, user.id, "vendor.contact_updated", v.id, {"email": c.email, "verified": c.verified, "changes": changes,
+                                                                          "note": body.verification_note}, request.state.request_id)
     return {"id": c.id, "name": c.name, "email": c.email, "phone": c.phone, "verified": c.verified}
 
 
 @router.delete("/vendors/{vendor_id}/contacts/{contact_id}", status_code=204)
-def remove_contact(vendor_id: str, contact_id: str, request: Request, user: User = Depends(current_user), s: Session = Depends(db)) -> None:
+def remove_contact(vendor_id: str, contact_id: str, request: Request, user: User = Depends(require_mfa_for_approvals), s: Session = Depends(db)) -> None:
     svc.require_role(user, "approver")
     v = _vendor(s, user, vendor_id)
     c = s.get(VendorContact, contact_id)

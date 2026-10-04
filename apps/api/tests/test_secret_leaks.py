@@ -8,14 +8,12 @@ from probity.config import Settings
 from probity.logging import scrub, sentry_options
 
 MARKERS = {
-    "JWT_SECRET": "jwt-marker-0123456789abcdef0123456789",
     "FIELD_KEY_B64": "fieldkey-marker-0123456789abcdef",
     "HMAC_KEY": "hmac-marker-0123456789",
     "ANTHROPIC_API_KEY": "sk-ant-marker0123456789",
     "TAVILY_API_KEY": "tvly-marker0123456789",
     "CLERK_SECRET_KEY": "sk_test_marker0123456789abcdef",
     "RESEND_API_KEY": "re_marker01_0123456789abcdef",
-    "SMTP_PASSWORD": "smtp-marker-password",
     "S3_SECRET_ACCESS_KEY": "s3-marker-secret-0123456789",
     "INBOUND_EMAIL_SECRET": "inbound-marker-secret",
     "METRICS_TOKEN": "metrics-marker-token",
@@ -33,7 +31,7 @@ def test_settings_repr_hides_every_secret(monkeypatch):
     for v in [*MARKERS.values(), "db-marker-password", "redis-marker-password"]:
         assert v not in text, v
     assert "@db:5432/probity" in text  # the non-secret parts stay readable
-    assert st.jwt_secret == MARKERS["JWT_SECRET"]  # values themselves are unchanged
+    assert st.hmac_key == MARKERS["HMAC_KEY"]  # values themselves are unchanged
 
 
 def test_sentry_never_sends_frame_locals_or_bodies():

@@ -29,7 +29,7 @@ def layout_a() -> bytes:
         Spacer(1, 6),
         p("Bill No. KP/24-25/0311"), p("Dated 3rd Oct 2026"), p("Buyer's Order No. PO-7711"),
         Spacer(1, 6),
-        p("Bill To: Probity Demo Traders Pvt Ltd"),
+        p("Bill To: Test Buyer Pvt Ltd"),
         p(f"GSTIN: {BUYER_GSTIN}"),
         p("Address: 5th Floor, Baner Road, Pune 411045"),
         Spacer(1, 8),
@@ -75,7 +75,7 @@ def test_layout_a_tally_style():
 def test_emailed_invoice_uses_attachment_and_envelope_sender():
     msg = EmailMessage()
     msg["From"] = "Kaveri Billing <billing@kaveri-pack.co>"  # lookalike domain; the PDF says kaveripack.in
-    msg["To"] = "ap@probity-demo.in"
+    msg["To"] = "ap@buyer.test"
     msg["Subject"] = "Invoice KP/24-25/0311"
     msg["Authentication-Results"] = "mx.probity.test; dkim=fail header.d=kaveri-pack.co"
     msg.set_content("Please find the invoice attached.")
@@ -89,13 +89,15 @@ def test_emailed_invoice_uses_attachment_and_envelope_sender():
     assert meta["from"] == "billing@kaveri-pack.co" and meta["dkim"] == "fail"
 
 
-def test_emailed_invoice_end_to_end_flags_spoofed_sender(client):
+def test_emailed_invoice_end_to_end_flags_spoofed_sender(client, world, fake_lookups):
     """Through the full pipeline: the envelope sender (9-day-old lookalike domain) drives the domain signal."""
     from conftest import login
 
+    fake_lookups.domains["kaveri-pack.co"] = 9
+
     msg = EmailMessage()
     msg["From"] = "billing@kaveri-pack.co"
-    msg["To"] = "ap@probity-demo.in"
+    msg["To"] = "ap@buyer.test"
     msg["Subject"] = "Invoice"
     msg["Authentication-Results"] = "mx; dkim=fail"
     msg.set_content("Invoice attached.")

@@ -23,3 +23,24 @@ Thumbs.db
 .idea/
 .vscode/
 _refs/
+# Real invoices and labels used for local evaluation: never committed
+benchmark/real/invoices/
+benchmark/real/labels.csv
+benchmark/real/reports/
+# Logs, coverage, tool caches
+*.log
+logs/
+.coverage
+.coverage.*
+htmlcov/
+coverage/
+.mypy_cache/
+.ruff_cache/
+celerybeat-schedule*
+# Local databases and key material
+*.sqlite
+*.sqlite3
+*.pem
+*.key
+*.p12
+*.pfx

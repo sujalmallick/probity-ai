@@ -1,14 +1,14 @@
 """Agent 2 — Document Intelligence: "What does this invoice contain?"
 
-Deterministic labelled-field parser first; LLM extraction only fills gaps in live mode, and an LLM value
-is accepted only if its raw text appears verbatim in the document.
+Deterministic labelled-field parser first; the AI only fills low-confidence gaps, and an AI value is accepted
+only if its raw text appears verbatim in the document. If the AI can't help, the fields stay flagged for review
+and the timeline says why.
 """
 
 from __future__ import annotations
 
 import base64
 import re
-from pathlib import Path
 
 from pydantic import BaseModel, Field
 
@@ -17,12 +17,11 @@ from probity.agents.common import load_case, record_claim, today
 from probity.db.audit import audit
 from probity.db.models import Document
 from probity.db.session import session_scope
-from probity.events import CaseCtx
+from probity.events import CaseCtx, rule_based_fallback
 from probity.evidence.models import AgentClaim, EvidenceIn
 from probity.guardrails import crypto
 from probity.guardrails.text import detect_injection, wrap_untrusted
-from probity.ingestion.parse import _OCR_MARK as OCR_MARK
-from probity.ingestion.parse import CORRECTABLE_FIELDS, OCR_CONFIDENCE_PENALTY, email_attachment_pdf, email_meta, extract, extract_tables, low_confidence, parse_fields
+from probity.ingestion.parse import CORRECTABLE_FIELDS, email_attachment_pdf, email_meta, extract, extract_tables, low_confidence, parse_fields
 from probity.ingestion.validators import normalize_domain
 from probity.ingestion.validators import parse_money_minor, validate_extraction
 from probity.llm import client as llm
@@ -44,15 +43,21 @@ class LLMExtraction(BaseModel):
 
 def _llm_fill(ctx: CaseCtx, text: str, fields: dict, missing: list[str]) -> None:
     pv, system = llm.load_prompt("document", "extract")
-    out = llm.generate(
-        schema=LLMExtraction,
-        system=system,
-        user=f"Fields needed: {missing}\n" + wrap_untrusted("invoice", text),
-        tier="fast",
-        tags={**ctx.tags, "agent": AGENT, "prompt_version": pv},
-        mock=lambda: LLMExtraction(),
-        budget=ctx.budget,
-    )
+    try:
+        out = llm.generate(
+            schema=LLMExtraction,
+            system=system,
+            user=f"Fields needed: {missing}\n" + wrap_untrusted("invoice", text),
+            tier="fast",
+            tags={**ctx.tags, "agent": AGENT, "prompt_version": pv},
+            budget=ctx.budget,
+        )
+    except llm.LLMFailed as e:
+        ctx.unverifiable(AGENT, "ai_extraction", f"{e.reason}; {', '.join(missing)} left for review")
+        for name in missing:  # what the parser read stays, labelled; nothing is filled in
+            if name in fields:
+                fields[name]["fallback"] = rule_based_fallback(f"parser value, not double-checked by AI: {e.reason}")
+        return
     for f in out.fields:
         if f.name in missing and f.raw and f.raw in text:  # grounding: must appear verbatim
             val = parse_money_minor(f.raw) if f.name in ("subtotal", "tax", "total") else f.raw
@@ -63,10 +68,7 @@ def extract_document(ctx: CaseCtx, data: bytes, mime: str, corrections: dict) ->
     """Text → fields → corrections → bank-number protection → deterministic validation → injection scan.
     Shared by the investigation and the pre-launch preview."""
     ctx.progress(AGENT, "Extracting text layer")
-    pages, used_ocr = extract(data, mime)
-    pages = [p for p in pages if p != OCR_MARK]
-    if used_ocr:
-        ctx.progress(AGENT, "No text layer — running OCR")
+    pages, _ = extract(data, mime)
     text = "\n".join(pages)
     pdf_bytes = email_attachment_pdf(data) if mime == "message/rfc822" else (data if mime == "application/pdf" else None)
     fields = parse_fields(pages, extract_tables(pdf_bytes, "application/pdf") if pdf_bytes else None)
@@ -79,10 +81,6 @@ def extract_document(ctx: CaseCtx, data: bytes, mime: str, corrections: dict) ->
             fields.setdefault("vendor_email", {"value": meta["from"], "raw": meta["from"], "confidence": 0.95, "evidence_snippet": f"From: {meta['from']}", "page": 0})
         if meta["dkim"] and meta["dkim"] != "pass":
             fields["email_dkim"] = {"value": meta["dkim"], "raw": meta["dkim"], "confidence": 0.99, "evidence_snippet": f"dkim={meta['dkim']}", "page": 0}
-    if used_ocr:
-        for f in fields.values():
-            f["confidence"] = round(max(0.0, f.get("confidence", 0) - OCR_CONFIDENCE_PENALTY), 2)
-            f["via"] = "ocr"
 
     missing = low_confidence(fields)
     if missing and ctx.budget is not None:
@@ -127,9 +125,6 @@ class PreviewCtx(CaseCtx):
     """Extraction preview before a case exists: same pipeline, no events."""
 
     def emit(self, type_: str, **kw) -> None:  # type: ignore[no-untyped-def, override]
-        return None
-
-    def pause(self, factor: float = 1.0) -> None:
         return None
 
 

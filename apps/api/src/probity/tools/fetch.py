@@ -22,6 +22,10 @@ class FetchBlocked(ValueError):
     pass
 
 
+class FetchUnreachable(FetchBlocked):
+    """The host could not be resolved (no internet / DNS failure) — not a policy block."""
+
+
 def _ip_blocked(ip: str) -> bool:
     addr = ipaddress.ip_address(ip)
     return (
@@ -49,7 +53,7 @@ def check_url(url: str, resolver=socket.getaddrinfo) -> None:  # type: ignore[no
         try:
             ips = sorted({ai[4][0] for ai in resolver(host, p.port or 443)})
         except socket.gaierror as e:
-            raise FetchBlocked(f"cannot resolve {host}") from e
+            raise FetchUnreachable(f"cannot resolve {host} (no network or DNS failure)") from e
     for ip in ips:
         if _ip_blocked(ip):
             raise FetchBlocked(f"{host} resolves to blocked address {ip}")

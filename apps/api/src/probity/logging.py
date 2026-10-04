@@ -14,12 +14,13 @@ from typing import Any
 import structlog
 
 from probity.config import get_settings
+from probity.ingestion.validators import EMAIL_RE
 
 _SCRUB = [
     (re.compile(r"(?i)bearer\s+[a-z0-9._\-]+"), "Bearer <redacted>"),
     (re.compile(r"\b\d{9,18}\b"), "<ACCT>"),
     (re.compile(r"\b[A-Z]{5}[0-9]{4}[A-Z]\b"), "<PAN>"),
-    (re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+"), "<EMAIL>"),
+    (EMAIL_RE, "<EMAIL>"),
     (re.compile(r"(?i)(sk-ant-|re_|sk_live_|sk_test_|tvly-)[a-z0-9_\-]{8,}"), "<SECRET>"),
     (re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), "<SECRET>"),
     (re.compile(r"(://[^:/@\s]*:)[^@\s]*@"), r"\1***@"),  # password inside a connection URL

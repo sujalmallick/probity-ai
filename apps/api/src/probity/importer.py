@@ -176,7 +176,8 @@ def import_vendors(s: Session, user: User, rows: list[dict], commit: bool, can_v
             continue
         rep.rows_ok += 1
         rep.preview.append({"row": i, "name": c["name"], "gstin": gst or None, "bank": crypto.mask(crypto.last4(acct)) if acct else None,
-                            "bank_verified": bool(acct and _yes(c["bank_verified"])), "contact": c["contact_email"] or None})
+                            "bank_verified": bool(acct and _yes(c["bank_verified"])), "contact": c["contact_email"] or None,
+                            "contact_verified": bool(c["contact_email"] and _yes(c["contact_verified"]))})
         if not commit:
             continue
         key = gst or c["name"].lower()

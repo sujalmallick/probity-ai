@@ -39,11 +39,11 @@ def _refresh_business_metrics() -> None:
     from sqlalchemy import create_engine
 
     from probity.db.models import AgentEvent, Case, ClaimRow, LLMCall
-    from probity.db.session import get_engine, get_telemetry_engine
+    from probity.db.session import get_engine
 
     st = get_settings()
-    eng = create_engine(st.database_migrate_url, pool_pre_ping=True) if (st.database_migrate_url and st.database_url.startswith("postgresql")) else get_engine()
-    tel = eng if st.database_url.startswith("postgresql") else get_telemetry_engine()
+    eng = create_engine(st.database_migrate_url, pool_pre_ping=True) if st.database_migrate_url else get_engine()
+    tel = eng
     since = datetime.now(timezone.utc) - timedelta(hours=24)
     with eng.connect() as c:
         CASES.clear()
@@ -119,7 +119,5 @@ def readiness() -> tuple[bool, dict]:
             ok = False
             checks["redis"] = f"error: {type(e).__name__}"
     st = get_settings()
-    checks.update({"env": st.env, "task_backend": st.task_backend, "tools_mode": st.tools_mode, "llm_mode": st.llm_mode,
-                   "auth_mode": st.auth_mode, "email_backend": st.email_backend, "storage_backend": st.storage_backend,
-                   "antivirus": "clamav" if st.clamav_host else "disabled"})
+    checks.update({"env": st.env, "integrations": {name: status for name, status, _ in st.integration_status()}})
     return ok, checks

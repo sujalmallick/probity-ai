@@ -10,6 +10,9 @@ GSTIN_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 GSTIN_RE = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$")
 IFSC_RE = re.compile(r"^[A-Z]{4}0[A-Z0-9]{6}$")
 PAN_RE = re.compile(r"^[A-Z]{5}[0-9]{4}[A-Z]$")
+# Bounded and anchored on the left so scanning untrusted text is linear: the unbounded form
+# [\w.+-]+@[\w-]+(?:\.[\w-]+)+ takes seconds to minutes on inputs like "a." * 20000 + "@".
+EMAIL_RE = re.compile(r"(?<![\w.+-])[\w.+-]{1,64}@[\w-]{1,63}(?:\.[\w-]{1,63}){1,10}")
 
 
 def gstin_check_char(first14: str) -> str:
@@ -44,7 +47,7 @@ def parse_money_minor(raw: str | int | float | None) -> int | None:
         return raw * 100
     s = re.sub(r"(?i)(inr|rs\.?|₹|\s)", "", str(raw))
     s = s.replace(",", "")
-    if not s:
+    if not re.fullmatch(r"-?\d+(?:\.\d+)?", s):  # plain decimal only: no exponent ("1e9"), NaN or Infinity
         return None
     try:
         return int((Decimal(s) * 100).quantize(Decimal("1")))

@@ -1,6 +1,8 @@
 """Agent 3 — Vendor Investigator: "Who is this entity; is it the same as claimed?"
 
-A mismatch becomes a claim only if both sides are evidenced.
+A mismatch becomes a claim only if both sides are evidenced. When a source can't be checked (vendor not in the vendor
+list, RDAP unreachable, no GST registry provider) the check is recorded as "could not verify" and shown in the
+timeline; it never adds risk points and never counts as a pass.
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ from probity.db.session import session_scope
 from probity.events import CaseCtx
 from probity.evidence.models import AgentClaim, EvidenceIn
 from probity.signals import detectors as d
+from probity.ingestion.validators import valid_gstin
 from probity.tools import lookups
 
 AGENT = "vendor_investigator"
@@ -34,7 +37,7 @@ def run(ctx: CaseCtx) -> dict:
 
         # --- vendor master
         if v is None:
-            checks["vendor_identity"] = {"status": "skipped", "reason": "unknown vendor — not in vendor master"}
+            checks["vendor_identity"] = ctx.unverifiable(AGENT, "vendor_identity", "this vendor is not in your vendor list, so there is nothing to compare the invoice against")
             c = record_claim(s, ctx, AGENT, AgentClaim(
                 claim=f"Vendor '{inv_name or 'unnamed'}' is not in the vendor master (unknown vendor).",
                 evidence=[EvidenceIn(source="invoice", field="vendor_name", value=inv_name, source_ref="invoice", excerpt=fsnip(ex, "vendor_name"), tier=1)],
@@ -45,7 +48,10 @@ def run(ctx: CaseCtx) -> dict:
             entity = "same"
             ctx.progress(AGENT, f"Vendor master match: {v.name}")
             res = d.identity_mismatch(inv_gstin, v.gstin, inv_name, v.name)
-            checks["vendor_identity"] = {"status": "fired" if res.fired else ("skipped" if res.skipped else "passed"), "reason": res.skipped or res.detail.get("field", ""), "signal": res.signal}
+            if res.skipped:
+                checks["vendor_identity"] = {**ctx.unverifiable(AGENT, "vendor_identity", res.skipped), "signal": res.signal}
+            else:
+                checks["vendor_identity"] = {"status": "fired" if res.fired else "passed", "reason": res.detail.get("field", "") or "GSTIN and name match the vendor list", "signal": res.signal}
             if res.fired:
                 entity = "different"
                 field = res.detail["field"]
@@ -96,50 +102,62 @@ def run(ctx: CaseCtx) -> dict:
                 ))
                 claims.append(c.id)
 
-        # --- GST registry
+        # --- GST: checksum and format only. There is no registry provider, so registry status is never claimed.
         if inv_gstin:
-            ctx.progress(AGENT, f"Looking up GSTIN {inv_gstin} in GST registry")
-            rec = lookups.gst_lookup(inv_gstin, ctx.budget)
-            sources += 1
-            if rec:
-                excerpt = f"GSTIN: {inv_gstin}\nLegal Name: {rec['legal_name']}\nStatus: {rec['status']}\nAddress: {rec['address']}"
+            ctx.progress(AGENT, f"Checking GSTIN {inv_gstin} format and checksum")
+            fmt_ok = valid_gstin(inv_gstin)
+            checks["gst_format"] = {"status": "passed" if fmt_ok else "fired", "reason": "valid GSTIN format and checksum" if fmt_ok else "GSTIN fails the format/checksum test"}
+            checks["gst_registry"] = ctx.unverifiable(AGENT, "gst_registry", lookups.GST_REGISTRY_REASON)
+            manual = (v.gst_manual or None) if v is not None else None
+            if manual and str(manual.get("gstin", "")).upper() == inv_gstin.upper():
+                who, when = manual.get("entered_by_name") or "a user", str(manual.get("entered_at", ""))[:10]
+                status = manual.get("status")
+                excerpt = (f"GSTIN: {inv_gstin}\nLegal Name: {manual.get('legal_name') or '-'}\nStatus: {status}\n"
+                           f"Entered manually by {who} on {when} (not verified against the GST registry)")
                 c = record_claim(s, ctx, AGENT, AgentClaim(
-                    claim=f"GSTIN {inv_gstin} is registered to {rec['legal_name']} (status: {rec['status']}).",
-                    evidence=[EvidenceIn(source="registry", field="gstin", value=inv_gstin, source_ref=rec["source_ref"], excerpt=excerpt, tier=1)],
-                    confidence=0.95, severity="info", assertion={"op": "quote", "evidence": "$0", "quote": f"Status: {rec['status']}"},
+                    claim=f"GST status for {inv_gstin} was entered manually by {who} on {when}: {status}. This is not a registry verification.",
+                    evidence=[EvidenceIn(source="vendor_master", field="gst_manual_status", value=status, source_ref=f"vendor:{v.id}:gst_manual", excerpt=excerpt, tier=2)],
+                    confidence=0.6, severity="info" if status == "Active" else "warn",
+                    assertion={"op": "quote", "evidence": "$0", "quote": f"Status: {status}"},
+                    data={"observed": status, "baseline": "Active", "label_observed": "GST status (entered manually)", "label_baseline": "Expected",
+                          "manual": True, "entered_by": who, "entered_at": when},
                 ))
                 claims.append(c.id)
-                checks["gst_registry"] = {"status": "passed" if rec["status"] == "Active" else "fired", "reason": rec["status"]}
-            else:
-                checks["gst_registry"] = {"status": "skipped", "reason": "GSTIN not found / registry unavailable"}
+                checks["gst_manual"] = {"status": "passed" if status == "Active" else "fired", "reason": f"{status} — entered manually by {who} on {when}", "manual": True}
 
-        # --- domain
+        # --- domain: a domain already verified for this vendor passes without a lookup; otherwise ask RDAP.
         if domain:
-            ctx.progress(AGENT, f"Checking domain registration for {domain}")
             verified_domains = [x.domain for x in b["domains"] if x.verified]
-            who = lookups.whois(domain, ctx.budget)
-            sources += 1
-            age = (date.today() - who.created).days if who and who.created else None
-            res = d.new_domain(domain, age, verified_domains)
-            checks["domain_verification"] = {"status": "fired" if res.fired else ("skipped" if res.skipped else "passed"), "reason": res.skipped or (f"{age} days old" if age is not None else "verified domain"), "signal": res.signal}
-            if res.fired and who:
-                quote = f"Creation Date: {who.created.isoformat()}"
-                ev = [
-                    EvidenceIn(source="invoice", field="sender_domain", value=domain, source_ref="invoice", excerpt=fsnip(ex, "sender_domain"), tier=1),
-                    EvidenceIn(source="domain", field="creation_date", value=who.created.isoformat(), source_ref=who.source_ref, excerpt=who.excerpt, tier=1),
-                ]
-                if verified_domains:
-                    ev.append(EvidenceIn(source="vendor_master", field="verified_domains", value=verified_domains, source_ref=f"vendor:{v.id}" if v else "vendor_master", tier=1))
-                c = record_claim(s, ctx, AGENT, AgentClaim(
-                    claim=f"Sender domain {domain} was registered {age} days ago" + (f" and is not a verified domain for this vendor (verified: {', '.join(verified_domains)})." if verified_domains else "."),
-                    signal="new_domain",
-                    evidence=ev,
-                    confidence=0.95, severity=res.severity,
-                    assertion={"op": "age_below", "evidence": "$1", "quote": quote, "max_days": 90, "claimed_days": age},
-                    data={"observed": f"{domain} · registered {age} days ago", "baseline": ", ".join(verified_domains) or None, "domain": domain,
-                          "label_observed": "Sender domain", "label_baseline": "Verified domain"},
-                ))
-                claims.append(c.id)
+            if domain in verified_domains:
+                checks["domain_verification"] = {"status": "passed", "reason": "verified domain for this vendor", "signal": "new_domain"}
+            else:
+                ctx.progress(AGENT, f"Looking up registration date of {domain} (RDAP)")
+                who = lookups.rdap_lookup(domain, ctx.budget)
+                if who.status != "ok" or who.created is None:
+                    checks["domain_verification"] = {**ctx.unverifiable(AGENT, "domain_verification", who.reason or "registration date unavailable"), "signal": "new_domain"}
+                else:
+                    sources += 1
+                    age = (date.today() - who.created).days
+                    res = d.new_domain(domain, age, verified_domains)
+                    checks["domain_verification"] = {"status": "fired" if res.fired else "passed", "reason": f"registered {age} days ago", "signal": res.signal}
+                    if res.fired:
+                        quote = f"Creation Date: {who.created.isoformat()}"
+                        ev = [
+                            EvidenceIn(source="invoice", field="sender_domain", value=domain, source_ref="invoice", excerpt=fsnip(ex, "sender_domain"), tier=1),
+                            EvidenceIn(source="domain", field="creation_date", value=who.created.isoformat(), source_ref=who.source_ref, excerpt=who.excerpt, tier=1),
+                        ]
+                        if verified_domains:
+                            ev.append(EvidenceIn(source="vendor_master", field="verified_domains", value=verified_domains, source_ref=f"vendor:{v.id}" if v else "vendor_master", tier=1))
+                        c = record_claim(s, ctx, AGENT, AgentClaim(
+                            claim=f"Sender domain {domain} was registered {age} days ago" + (f" and is not a verified domain for this vendor (verified: {', '.join(verified_domains)})." if verified_domains else "."),
+                            signal="new_domain",
+                            evidence=ev,
+                            confidence=0.95, severity=res.severity,
+                            assertion={"op": "age_below", "evidence": "$1", "quote": quote, "max_days": 90, "claimed_days": age},
+                            data={"observed": f"{domain} · registered {age} days ago", "baseline": ", ".join(verified_domains) or None, "domain": domain,
+                                  "label_observed": "Sender domain", "label_baseline": "Verified domain"},
+                        ))
+                        claims.append(c.id)
 
     ctx.emit("agent.completed", agent=AGENT, status="done", message=f"Entity match: {entity}")
     return {"checks": checks, "entity_match": entity, "sources": sources}

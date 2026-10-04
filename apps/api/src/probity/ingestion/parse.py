@@ -14,7 +14,7 @@ import re
 from email import policy
 from typing import Any
 
-from probity.ingestion.validators import normalize_domain, parse_money_minor
+from probity.ingestion.validators import EMAIL_RE, normalize_domain, parse_money_minor
 
 MAX_BYTES = 15 * 1024 * 1024
 MAX_PAGES = 50
@@ -55,9 +55,30 @@ def _is_utf8(b: bytes) -> bool:
 def email_meta(data: bytes) -> dict:
     """Envelope facts that matter for risk: who actually sent the email (not what the invoice claims)."""
     msg = email.message_from_bytes(data, policy=policy.default)
-    m = re.search(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", str(msg.get("from") or ""))
-    dkim = re.search(r"dkim=(\w+)", str(msg.get("authentication-results") or ""))
-    return {"from": m.group(0).lower() if m else None, "subject": str(msg.get("subject") or ""), "dkim": dkim.group(1).lower() if dkim else None}
+    dkim = re.search(r"dkim=(\w+)", str(msg.get("authentication-results") or "")[:4000])
+    return {"from": _sender_address(msg), "subject": str(msg.get("subject") or ""), "dkim": dkim.group(1).lower() if dkim else None}
+
+
+def _sender_address(msg: email.message.Message) -> str | None:
+    """The actual From address (addr-spec), never an address-looking display name:
+    '"billing@vendor.in" <attacker@evil.example>' is from attacker@evil.example."""
+    try:
+        addrs = msg["from"].addresses if msg["from"] is not None else ()
+    except (AttributeError, IndexError, ValueError):
+        addrs = ()
+    spec = addrs[0].addr_spec if addrs else ""
+    m = EMAIL_RE.fullmatch(spec or "")
+    return m.group(0).lower() if m else None
+
+
+def address_from_header(value: str) -> str | None:
+    """addr-spec of a From header value given as text (inbound-email webhooks), same rules as email_meta."""
+    msg = email.message.EmailMessage(policy=policy.default)
+    try:
+        msg["from"] = (value or "")[:998]
+    except (ValueError, IndexError):
+        return None
+    return _sender_address(msg)
 
 
 def email_attachment_pdf(data: bytes) -> bytes | None:
@@ -70,40 +91,57 @@ def email_attachment_pdf(data: bytes) -> bytes | None:
 
 
 def extract(data: bytes, mime: str) -> tuple[list[str], bool]:
-    """Return (text per page, used_ocr)."""
-    if mime.startswith("image/"):
-        return _ocr_image(data), True
-    pages = extract_text(data, mime)
-    return pages, mime == "application/pdf" and _OCR_MARK in pages[:1]
+    """Return (text per page, used_ocr). Scans are not read (no OCR), so used_ocr is always False."""
+    return extract_text(data, mime), False
 
 
-_OCR_MARK = "<<ocr>>"  # sentinel prepended to pages that came from OCR
+SCAN_MESSAGE = "This looks like a scanned or image-only invoice. Probity can't read scans yet, so upload a PDF with selectable text."
 
 
 def extract_text(data: bytes, mime: str) -> list[str]:
-    """Return text per page."""
+    """Text per page. Untrusted documents are parsed in an isolated process with a hard time limit (isolate.py)."""
     if len(data) > MAX_BYTES:
         raise UnsupportedDocument("File exceeds 15 MB")
+    if mime.startswith("image/"):
+        raise UnsupportedDocument(SCAN_MESSAGE)
+    from probity.ingestion import isolate
+
+    return isolate.run("probity.ingestion.parse._extract_text_local", data, mime)
+
+
+def _pdf_page_count(data: bytes) -> int:
+    """Page count without building every page object (pdfplumber's len(pdf.pages) does, which a 100k-page PDF abuses)."""
+    import pypdfium2 as pdfium
+
+    try:
+        doc = pdfium.PdfDocument(data)
+    except pdfium.PdfiumError as e:
+        raise UnsupportedDocument("the PDF could not be opened") from e
+    try:
+        return len(doc)
+    finally:
+        doc.close()
+
+
+def _extract_text_local(data: bytes, mime: str) -> list[str]:
     if mime == "application/pdf":
+        if _pdf_page_count(data) > MAX_PAGES:
+            raise UnsupportedDocument(f"PDF exceeds {MAX_PAGES} pages")
         import pdfplumber
 
-        pages = []
         with pdfplumber.open(io.BytesIO(data)) as pdf:
-            if len(pdf.pages) > MAX_PAGES:
-                raise UnsupportedDocument(f"PDF exceeds {MAX_PAGES} pages")
-            for p in pdf.pages:
-                pages.append(p.extract_text() or "")
+            pages = [p.extract_text() or "" for p in pdf.pages]
         if not any(t.strip() for t in pages):
-            return [_OCR_MARK] + _ocr_pdf(data)
+            raise UnsupportedDocument(SCAN_MESSAGE)
         return pages
     if mime == "message/rfc822":
         msg = email.message_from_bytes(data, policy=policy.default)
         for part in msg.iter_attachments():  # vendors usually email the invoice as an attachment
             payload = part.get_payload(decode=True) or b""
             if part.get_content_type() == "application/pdf" or payload.startswith(b"%PDF-"):
-                return extract_text(payload, "application/pdf")
+                return _extract_text_local(payload, "application/pdf")
             if part.get_content_type() in ("image/png", "image/jpeg"):
-                return _ocr_image(payload)
+                raise UnsupportedDocument(SCAN_MESSAGE)
         body = msg.get_body(preferencelist=("plain", "html"))
         text = body.get_content() if body else ""
         if body is not None and body.get_content_type() == "text/html":
@@ -112,44 +150,8 @@ def extract_text(data: bytes, mime: str) -> list[str]:
     if mime == "text/plain":
         return [data.decode("utf-8", errors="replace")]
     if mime.startswith("image/"):
-        return _ocr_image(data)
+        raise UnsupportedDocument(SCAN_MESSAGE)
     raise UnsupportedDocument(mime)
-
-
-def _tesseract():  # type: ignore[no-untyped-def]
-    from probity.config import get_settings
-
-    if not get_settings().ocr_enabled:
-        raise UnsupportedDocument("OCR is disabled (OCR_ENABLED=false)")
-    try:
-        import pytesseract  # type: ignore[import-not-found]
-
-        pytesseract.get_tesseract_version()
-    except Exception as e:  # noqa: BLE001
-        raise UnsupportedDocument("OCR unavailable: the tesseract binary is not installed on this host") from e
-    return pytesseract
-
-
-def _ocr_image(data: bytes) -> list[str]:
-    from PIL import Image
-
-    tess = _tesseract()
-    img = Image.open(io.BytesIO(data))
-    if img.width * img.height > 40_000_000:
-        raise UnsupportedDocument("image too large")
-    return [tess.image_to_string(img.convert("L"), config="--psm 6")]
-
-
-def _ocr_pdf(data: bytes) -> list[str]:
-    import pdfplumber
-
-    tess = _tesseract()
-    out = []
-    with pdfplumber.open(io.BytesIO(data)) as pdf:
-        for page in pdf.pages[:MAX_PAGES]:
-            img = page.to_image(resolution=250).original.convert("L")
-            out.append(tess.image_to_string(img, config="--psm 6"))
-    return out
 
 
 # ---------------------------------------------------------------- labelled-field parser
@@ -157,7 +159,7 @@ def _ocr_pdf(data: bytes) -> list[str]:
 # Deterministic extraction that copes with common Indian GST invoice layouts. Every candidate value is
 # type-checked (GSTIN checksum, IFSC pattern, parseable date/amount) before it is accepted, buyer-side
 # details ("Bill To", "Consignee", "Buyer") are ignored for supplier fields, and the line-item table is
-# read from PDF tables when present. In LLM_MODE=live, Claude fills whatever is still missing, and its
+# read from PDF tables when present. Claude then fills whatever is still missing, and its
 # values are accepted only if they appear verbatim in the document.
 
 _LABELS: dict[str, list[str]] = {
@@ -194,7 +196,6 @@ _LINE_RE = re.compile(
     re.I,
 )
 
-OCR_CONFIDENCE_PENALTY = 0.15  # OCR'd values are less certain than a text layer
 
 
 def _field(value: Any, raw: str, snippet: str, page: int, confidence: float) -> dict:
@@ -209,8 +210,7 @@ def _coerce(key: str, raw: str) -> Any | None:
     if not raw:
         return None
     if key in _MONEY_FIELDS:
-        m = re.search(r"(?:₹|rs\.?|inr)?\s*(-?\d[\d,]*(?:\.\d{1,2})?)\s*(?:/-)?$", raw, re.I) or re.search(r"(\d[\d,]*(?:\.\d{1,2})?)", raw)
-        return parse_money_minor(m.group(1)) if m else None
+        return _money_from_label_value(raw)
     if key == "gstin":
         m = re.search(r"\b(\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z])\b", raw.upper())
         return m.group(1) if m and valid_gstin(m.group(1)) else None
@@ -225,7 +225,7 @@ def _coerce(key: str, raw: str) -> Any | None:
         digits = re.sub(r"[\s-]", "", m.group(1)) if m else ""
         return digits if 9 <= len(digits) <= 18 else None
     if key == "vendor_email":
-        m = re.search(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", raw)
+        m = EMAIL_RE.search(raw)
         return m.group(0).lower() if m else None
     if key in ("invoice_date", "due_date"):
         token = re.match(r"(\d{1,4}(?:st|nd|rd|th)?[-/.\s][A-Za-z0-9]{1,9}[-/.\s,]*\d{2,4}|[A-Za-z]{3,9}\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4})", raw, re.I)
@@ -237,6 +237,39 @@ def _coerce(key: str, raw: str) -> Any | None:
     if key == "vendor_phone":
         return raw if len(re.sub(r"\D", "", raw)) >= 8 else None
     return raw
+
+
+_CUR = r"(?:₹|\brs\.?|\binr)"
+_SPACE_GROUPED = re.compile(rf"(?i)({_CUR}\s*)(\d{{1,3}}(?: \d{{2,3}})+(?:\.\d{{1,2}})?)(?![\d.,])")  # "INR 4 85 000.00"
+_MONEY_TOKEN = re.compile(r"(?i)(?<![\w.,])(\d[\d,.]*\d|\d)(?:\s*(lakhs?|lacs?|crores?|cr)\b)?(?!\s*%)(?![\d,.]*\w)")
+_SCALE = {"lakh": 100_000, "lakhs": 100_000, "lac": 100_000, "lacs": 100_000, "crore": 10_000_000, "crores": 10_000_000, "cr": 10_000_000}
+
+
+def _money_token_minor(num: str, unit: str | None) -> int | None:
+    """One amount → paise, or None when its format is ambiguous. Accepts Indian/western comma grouping, dot
+    grouping ("5.90.000"), at most two decimals, and lakh/crore words."""
+    if re.fullmatch(r"\d{1,3}(?:\.\d{2,3}){2,}", num) and len(num.rsplit(".", 1)[1]) == 3:
+        num = num.replace(".", "")  # dot used as a thousands/lakh separator
+    if not re.fullmatch(r"\d{1,3}(?:,\d{2,3})*(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?", num):
+        return None
+    minor = parse_money_minor(num)
+    if minor is None:
+        return None
+    if unit:
+        minor *= _SCALE[unit.lower()]
+    return minor
+
+
+def _money_from_label_value(raw: str) -> int | None:
+    """The amount for a money label. Text after the label can hold several numbers ("4,85,000.00 Round Off: 0.40",
+    "500 Nos 5,66,400.00"); the largest well-formed one is the amount, so a misread errs high (more scrutiny),
+    never low. Negative or ambiguous amounts are rejected (None = amount unknown, held for a human)."""
+    raw = _SPACE_GROUPED.sub(lambda m: m.group(1) + m.group(2).replace(" ", ""), raw[:300])
+    raw = re.sub(rf"(?i){_CUR}", " ", raw)  # "Rs.590" → " 590"
+    if re.search(r"(?<![\w/])-\s*\d", raw):
+        return None
+    vals = [v for m in _MONEY_TOKEN.finditer(raw) if (v := _money_token_minor(m.group(1), m.group(2))) is not None]
+    return max(vals) if vals else None
 
 
 def _segments(line: str) -> list[tuple[str, str]]:
@@ -362,12 +395,39 @@ def parse_fields(pages: list[str], tables: list | None = None) -> dict[str, dict
     if "vendor_email" in fields:
         dom = normalize_domain(fields["vendor_email"]["value"])
         fields["sender_domain"] = _field(dom, fields["vendor_email"]["raw"], fields["vendor_email"]["evidence_snippet"], fields["vendor_email"]["page"], 0.99)
+    _mask_account_in_other_fields(fields)
     return fields
 
 
+def _mask_account_in_other_fields(fields: dict[str, dict]) -> None:
+    """The account number often shares a line with IFSC / bank name, whose snippets would otherwise show it in full to
+    every role. Only the bank_account field keeps it (the document agent then stores last4 + HMAC + ciphertext)."""
+    acct = str((fields.get("bank_account") or {}).get("value") or "")
+    if not acct.isdigit():
+        return
+    pat = re.compile(r"(?<!\d)" + r"[\s-]?".join(acct) + r"(?!\d)")
+    masked = "XXXX" + acct[-4:]
+    for key, f in fields.items():
+        if key == "bank_account":
+            continue
+        for k in ("value", "raw", "evidence_snippet"):
+            if isinstance(f.get(k), str):
+                f[k] = pat.sub(masked, f[k])
+
+
 def extract_tables(data: bytes, mime: str) -> list:
-    if mime != "application/pdf":
+    """Best-effort table rows from a PDF (isolated and time-limited like extract_text); [] when unavailable."""
+    if mime != "application/pdf" or len(data) > MAX_BYTES:
         return []
+    from probity.ingestion import isolate
+
+    try:
+        return isolate.run("probity.ingestion.parse._extract_tables_local", data, mime)
+    except UnsupportedDocument:
+        return []
+
+
+def _extract_tables_local(data: bytes, mime: str) -> list:
     import pdfplumber
 
     out: list = []

@@ -6,6 +6,237 @@
   "version": "1.0.0"
  },
  "paths": {
+  "/api/v1/cases/{case_id}/invoice-risk": {
+   "get": {
+    "tags": [
+     "risk"
+    ],
+    "summary": "Case Invoice Risk",
+    "operationId": "case_invoice_risk_api_v1_cases__case_id__invoice_risk_get",
+    "parameters": [
+     {
+      "name": "case_id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "Case Id"
+      }
+     },
+     {
+      "name": "narrate",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "boolean",
+       "default": false,
+       "title": "Narrate"
+      }
+     },
+     {
+      "name": "authorization",
+      "in": "header",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Authorization"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "additionalProperties": true,
+         "title": "Response Case Invoice Risk Api V1 Cases  Case Id  Invoice Risk Get"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/workspace/invoice-risk-policy": {
+   "get": {
+    "tags": [
+     "risk"
+    ],
+    "summary": "Get Invoice Risk Policy",
+    "operationId": "get_invoice_risk_policy_api_v1_workspace_invoice_risk_policy_get",
+    "parameters": [
+     {
+      "name": "authorization",
+      "in": "header",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Authorization"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "additionalProperties": true,
+         "title": "Response Get Invoice Risk Policy Api V1 Workspace Invoice Risk Policy Get"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   },
+   "put": {
+    "tags": [
+     "risk"
+    ],
+    "summary": "Put Invoice Risk Policy",
+    "operationId": "put_invoice_risk_policy_api_v1_workspace_invoice_risk_policy_put",
+    "parameters": [
+     {
+      "name": "authorization",
+      "in": "header",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Authorization"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "additionalProperties": true,
+        "title": "Body"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "additionalProperties": true,
+         "title": "Response Put Invoice Risk Policy Api V1 Workspace Invoice Risk Policy Put"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   },
+   "delete": {
+    "tags": [
+     "risk"
+    ],
+    "summary": "Reset Invoice Risk Policy",
+    "operationId": "reset_invoice_risk_policy_api_v1_workspace_invoice_risk_policy_delete",
+    "parameters": [
+     {
+      "name": "authorization",
+      "in": "header",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Authorization"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "additionalProperties": true,
+         "title": "Response Reset Invoice Risk Policy Api V1 Workspace Invoice Risk Policy Delete"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
   "/api/v1/vendors": {
    "get": {
     "tags": [
@@ -261,6 +492,125 @@
         }
        }
       }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/vendors/{vendor_id}/gst-manual": {
+   "put": {
+    "tags": [
+     "vendors"
+    ],
+    "summary": "Put Gst Manual",
+    "operationId": "put_gst_manual_api_v1_vendors__vendor_id__gst_manual_put",
+    "parameters": [
+     {
+      "name": "vendor_id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "Vendor Id"
+      }
+     },
+     {
+      "name": "authorization",
+      "in": "header",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Authorization"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/GstManualIn"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "additionalProperties": true,
+         "title": "Response Put Gst Manual Api V1 Vendors  Vendor Id  Gst Manual Put"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   },
+   "delete": {
+    "tags": [
+     "vendors"
+    ],
+    "summary": "Delete Gst Manual",
+    "operationId": "delete_gst_manual_api_v1_vendors__vendor_id__gst_manual_delete",
+    "parameters": [
+     {
+      "name": "vendor_id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "Vendor Id"
+      }
+     },
+     {
+      "name": "authorization",
+      "in": "header",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Authorization"
+      }
+     }
+    ],
+    "responses": {
+     "204": {
+      "description": "Successful Response"
      },
      "422": {
       "description": "Validation Error",
@@ -1013,7 +1363,7 @@
      "workspace"
     ],
     "summary": "App Config",
-    "description": "Public, unauthenticated. Tells the web app what to show; contains no secrets.",
+    "description": "Public, unauthenticated. Tells the web app what is live; contains no secrets.",
     "operationId": "app_config_api_v1_app_config_get",
     "responses": {
      "200": {
@@ -1296,6 +1646,23 @@
        "type": "boolean",
        "default": false,
        "title": "Skip Invalid"
+      }
+     },
+     {
+      "name": "verification_note",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string",
+         "maxLength": 1000
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Verification Note"
       }
      },
      {
@@ -1862,63 +2229,32 @@
     }
    }
   },
-  "/api/v1/auth/demo-users": {
-   "get": {
-    "summary": "Demo Users",
-    "operationId": "demo_users_api_v1_auth_demo_users_get",
+  "/api/v1/auth/demo-login": {
+   "post": {
+    "summary": "Removed Demo Auth",
+    "operationId": "removed_demo_auth_api_v1_auth_demo_login_post",
     "responses": {
      "200": {
       "description": "Successful Response",
       "content": {
        "application/json": {
-        "schema": {
-         "items": {
-          "additionalProperties": true,
-          "type": "object"
-         },
-         "type": "array",
-         "title": "Response Demo Users Api V1 Auth Demo Users Get"
-        }
+        "schema": {}
        }
       }
      }
     }
    }
   },
-  "/api/v1/auth/demo-login": {
-   "post": {
-    "summary": "Demo Login",
-    "operationId": "demo_login_api_v1_auth_demo_login_post",
-    "requestBody": {
-     "content": {
-      "application/json": {
-       "schema": {
-        "$ref": "#/components/schemas/DemoLogin"
-       }
-      }
-     },
-     "required": true
-    },
+  "/api/v1/auth/demo-users": {
+   "get": {
+    "summary": "Removed Demo Auth",
+    "operationId": "removed_demo_auth_api_v1_auth_demo_users_get",
     "responses": {
      "200": {
       "description": "Successful Response",
       "content": {
        "application/json": {
-        "schema": {
-         "additionalProperties": true,
-         "type": "object",
-         "title": "Response Demo Login Api V1 Auth Demo Login Post"
-        }
-       }
-      }
-     },
-     "422": {
-      "description": "Validation Error",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
+        "schema": {}
        }
       }
      }
@@ -2046,9 +2382,7 @@
      "content": {
       "application/json": {
        "schema": {
-        "type": "object",
-        "additionalProperties": true,
-        "title": "Body"
+        "$ref": "#/components/schemas/PolicyIn"
        }
       }
      }
@@ -3837,133 +4171,10 @@
     }
    }
   },
-  "/api/v1/benchmark/summary": {
-   "get": {
-    "summary": "Benchmark Summary",
-    "operationId": "benchmark_summary_api_v1_benchmark_summary_get",
-    "parameters": [
-     {
-      "name": "authorization",
-      "in": "header",
-      "required": false,
-      "schema": {
-       "anyOf": [
-        {
-         "type": "string"
-        },
-        {
-         "type": "null"
-        }
-       ],
-       "title": "Authorization"
-      }
-     }
-    ],
-    "responses": {
-     "200": {
-      "description": "Successful Response",
-      "content": {
-       "application/json": {
-        "schema": {
-         "type": "object",
-         "additionalProperties": true,
-         "title": "Response Benchmark Summary Api V1 Benchmark Summary Get"
-        }
-       }
-      }
-     },
-     "422": {
-      "description": "Validation Error",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/v1/demo/seed": {
-   "post": {
-    "summary": "Demo Seed",
-    "operationId": "demo_seed_api_v1_demo_seed_post",
-    "parameters": [
-     {
-      "name": "authorization",
-      "in": "header",
-      "required": false,
-      "schema": {
-       "anyOf": [
-        {
-         "type": "string"
-        },
-        {
-         "type": "null"
-        }
-       ],
-       "title": "Authorization"
-      }
-     }
-    ],
-    "responses": {
-     "200": {
-      "description": "Successful Response",
-      "content": {
-       "application/json": {
-        "schema": {
-         "type": "object",
-         "additionalProperties": true,
-         "title": "Response Demo Seed Api V1 Demo Seed Post"
-        }
-       }
-      }
-     },
-     "422": {
-      "description": "Validation Error",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/v1/demo/files/{name}": {
-   "get": {
-    "summary": "Demo File",
-    "operationId": "demo_file_api_v1_demo_files__name__get",
-    "parameters": [
-     {
-      "name": "name",
-      "in": "path",
-      "required": true,
-      "schema": {
-       "type": "string",
-       "title": "Name"
-      }
-     },
-     {
-      "name": "authorization",
-      "in": "header",
-      "required": false,
-      "schema": {
-       "anyOf": [
-        {
-         "type": "string"
-        },
-        {
-         "type": "null"
-        }
-       ],
-       "title": "Authorization"
-      }
-     }
-    ],
+  "/api/v1/demo/speed": {
+   "put": {
+    "summary": "Removed Demo",
+    "operationId": "removed_demo_api_v1_demo_speed_put",
     "responses": {
      "200": {
       "description": "Successful Response",
@@ -3972,145 +4183,68 @@
         "schema": {}
        }
       }
-     },
-     "422": {
-      "description": "Validation Error",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
-       }
-      }
      }
     }
    }
   },
   "/api/v1/demo/vendor-reply/{case_id}": {
    "post": {
-    "summary": "Demo Vendor Reply",
-    "description": "Simulated vendor inbox: deliver a scripted reply to the case's sent verification email.",
-    "operationId": "demo_vendor_reply_api_v1_demo_vendor_reply__case_id__post",
-    "parameters": [
-     {
-      "name": "case_id",
-      "in": "path",
-      "required": true,
-      "schema": {
-       "type": "string",
-       "title": "Case Id"
-      }
-     },
-     {
-      "name": "kind",
-      "in": "query",
-      "required": false,
-      "schema": {
-       "enum": [
-        "legit",
-        "spoof"
-       ],
-       "type": "string",
-       "default": "legit",
-       "title": "Kind"
-      }
-     },
-     {
-      "name": "authorization",
-      "in": "header",
-      "required": false,
-      "schema": {
-       "anyOf": [
-        {
-         "type": "string"
-        },
-        {
-         "type": "null"
-        }
-       ],
-       "title": "Authorization"
-      }
-     }
-    ],
+    "summary": "Removed Demo",
+    "operationId": "removed_demo_api_v1_demo_vendor_reply__case_id__post",
     "responses": {
      "200": {
       "description": "Successful Response",
       "content": {
        "application/json": {
-        "schema": {
-         "type": "object",
-         "additionalProperties": true,
-         "title": "Response Demo Vendor Reply Api V1 Demo Vendor Reply  Case Id  Post"
-        }
-       }
-      }
-     },
-     "422": {
-      "description": "Validation Error",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
+        "schema": {}
        }
       }
      }
     }
    }
   },
-  "/api/v1/demo/speed": {
-   "put": {
-    "summary": "Demo Speed",
-    "operationId": "demo_speed_api_v1_demo_speed_put",
-    "parameters": [
-     {
-      "name": "delay_ms",
-      "in": "query",
-      "required": true,
-      "schema": {
-       "type": "integer",
-       "maximum": 5000,
-       "minimum": 0,
-       "title": "Delay Ms"
-      }
-     },
-     {
-      "name": "authorization",
-      "in": "header",
-      "required": false,
-      "schema": {
-       "anyOf": [
-        {
-         "type": "string"
-        },
-        {
-         "type": "null"
-        }
-       ],
-       "title": "Authorization"
-      }
-     }
-    ],
+  "/api/v1/demo/files/{name}": {
+   "get": {
+    "summary": "Removed Demo",
+    "operationId": "removed_demo_api_v1_demo_files__name__get",
     "responses": {
      "200": {
       "description": "Successful Response",
       "content": {
        "application/json": {
-        "schema": {
-         "type": "object",
-         "additionalProperties": true,
-         "title": "Response Demo Speed Api V1 Demo Speed Put"
-        }
+        "schema": {}
        }
       }
-     },
-     "422": {
-      "description": "Validation Error",
+     }
+    }
+   }
+  },
+  "/api/v1/demo/seed": {
+   "post": {
+    "summary": "Removed Demo",
+    "operationId": "removed_demo_api_v1_demo_seed_post",
+    "responses": {
+     "200": {
+      "description": "Successful Response",
       "content": {
        "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/HTTPValidationError"
-        }
+        "schema": {}
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/benchmark/summary": {
+   "get": {
+    "summary": "Removed Demo",
+    "operationId": "removed_demo_api_v1_benchmark_summary_get",
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {}
        }
       }
      }
@@ -4205,6 +4339,7 @@
      },
      "resolution": {
       "type": "string",
+      "maxLength": 4000,
       "title": "Resolution",
       "default": ""
      }
@@ -4363,6 +4498,7 @@
      },
      "reason": {
       "type": "string",
+      "maxLength": 4000,
       "title": "Reason",
       "default": ""
      }
@@ -4372,19 +4508,6 @@
      "decision"
     ],
     "title": "DecisionIn"
-   },
-   "DemoLogin": {
-    "properties": {
-     "user_id": {
-      "type": "string",
-      "title": "User Id"
-     }
-    },
-    "type": "object",
-    "required": [
-     "user_id"
-    ],
-    "title": "DemoLogin"
    },
    "DomainIn": {
     "properties": {
@@ -4445,6 +4568,49 @@
     },
     "type": "object",
     "title": "DraftPatch"
+   },
+   "GstManualIn": {
+    "properties": {
+     "legal_name": {
+      "anyOf": [
+       {
+        "type": "string",
+        "maxLength": 300
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Legal Name"
+     },
+     "status": {
+      "type": "string",
+      "enum": [
+       "Active",
+       "Cancelled",
+       "Suspended"
+      ],
+      "title": "Status"
+     },
+     "note": {
+      "anyOf": [
+       {
+        "type": "string",
+        "maxLength": 1000
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Note"
+     }
+    },
+    "type": "object",
+    "required": [
+     "status"
+    ],
+    "title": "GstManualIn",
+    "description": "What a user read on the GST portal themselves. Stored and shown as a manual entry, never as a registry check."
    },
    "HTTPValidationError": {
     "properties": {
@@ -4568,6 +4734,18 @@
        }
       ],
       "title": "Known Channel"
+     },
+     "confirmed_account_last4": {
+      "anyOf": [
+       {
+        "type": "string",
+        "pattern": "^[0-9]{4}$"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Confirmed Account Last4"
      }
     },
     "type": "object",
@@ -4577,6 +4755,89 @@
      "note"
     ],
     "title": "OOBIn"
+   },
+   "PolicyIn": {
+    "properties": {
+     "auto_clear_enabled": {
+      "anyOf": [
+       {
+        "type": "boolean"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Auto Clear Enabled"
+     },
+     "auto_clear_max_amount_minor": {
+      "anyOf": [
+       {
+        "type": "integer",
+        "maximum": 100000000000000.0,
+        "minimum": 0.0
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Auto Clear Max Amount Minor"
+     },
+     "external_research_amount_minor": {
+      "anyOf": [
+       {
+        "type": "integer",
+        "maximum": 100000000000000.0,
+        "minimum": 0.0
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "External Research Amount Minor"
+     },
+     "dual_approval_amount_minor": {
+      "anyOf": [
+       {
+        "type": "integer",
+        "maximum": 100000000000000.0,
+        "minimum": 0.0
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Dual Approval Amount Minor"
+     },
+     "weight_overrides": {
+      "anyOf": [
+       {
+        "additionalProperties": {
+         "type": "integer"
+        },
+        "type": "object"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Weight Overrides"
+     },
+     "require_mfa_for_approvals": {
+      "anyOf": [
+       {
+        "type": "boolean"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Require Mfa For Approvals"
+     }
+    },
+    "additionalProperties": false,
+    "type": "object",
+    "title": "PolicyIn",
+    "description": "Owner-editable policy. Strict types and bounds: a string where a number belongs used to be stored as-is and\nmade every later investigation fail; negative weights silently lowered scores."
    },
    "ReplyIn": {
     "properties": {

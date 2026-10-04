@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -26,6 +27,7 @@ from probity.evidence.models import AgentClaim, EvidenceIn
 from probity.evidence.store import evidence_public
 from probity.graph.build import investigate
 from probity.guardrails.crypto import decrypt, mask
+from probity.guardrails.text import mask_account_numbers
 from probity.ingestion.parse import CORRECTABLE_FIELDS, MAX_CORRECTION_LENGTH, sha256, sniff_mime
 from probity.ingestion.validators import normalize_invoice_number, parse_date
 from probity.policy import get_policy
@@ -73,18 +75,20 @@ def transition(case: Case, to: str) -> None:
     case.status = to
 
 
-def get_case(s: Session, workspace_id: str, case_id: str) -> Case:
-    c = s.get(Case, case_id)
+def get_case(s: Session, workspace_id: str, case_id: str, *, for_update: bool = False) -> Case:
+    """for_update: lock the row until commit (Postgres SELECT ... FOR UPDATE) so concurrent state changes on one case
+    (approve vs reject, two "investigate further" clicks) run one after the other and the loser sees the new status."""
+    if for_update:
+        c = s.execute(select(Case).where(Case.id == case_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
+    else:
+        c = s.get(Case, case_id)
     if c is None or c.workspace_id != workspace_id:  # tenant isolation: never leak existence across workspaces
         raise LookupError("case not found")
     return c
 
 
 def _ctx(workspace_id: str, case_id: str) -> CaseCtx:
-    with session_scope() as s:
-        ws = s.get(Workspace, workspace_id)
-        delay = int((ws.policy or {}).get("demo_agent_delay_ms", get_settings().agent_delay_ms)) if ws else 0
-    return CaseCtx(workspace_id, case_id, Budget.from_settings(), delay_ms=delay)
+    return CaseCtx(workspace_id, case_id, Budget.from_settings())
 
 
 # ---------------------------------------------------------------- execution
@@ -94,7 +98,7 @@ _SYNC = {"on": False}
 
 
 def run_sync(flag: bool = True) -> None:
-    """Tests/benchmark run cases inline instead of on the worker pool."""
+    """Tests run cases inline instead of on the worker pool."""
     _SYNC["on"] = flag
 
 
@@ -109,6 +113,56 @@ def _submit(fn, *args) -> None:  # type: ignore[no-untyped-def]
         run_case.apply_async(args=[workspace_id, case_id, depth], queue="probity")
     else:
         _pool.submit(fn, *args)
+
+
+def check_followups() -> int:
+    """Flag verification emails whose follow-up date passed without a vendor reply (never auto-sends)."""
+    from probity.logging import get_logger
+    from probity.notify import notify
+
+    now = datetime.now(timezone.utc)
+    flagged = 0
+    with session_scope() as s:
+        workspaces = [w.id for w in s.scalars(select(Workspace))]
+    for ws in workspaces:
+        with session_scope(ws) as s:
+            for d in s.scalars(select(Draft).where(Draft.workspace_id == ws, Draft.status == "sent", Draft.followup_at <= now)):
+                case = s.get(Case, d.case_id)
+                if case is None or case.status != "AWAITING_VENDOR":
+                    continue
+                d.status = "followup_due"
+                notify(s, ws, "approver", "followup_due", f"No vendor reply on case #{case.number}",
+                       f"Verification email to {d.to_email} sent {d.sent_at:%Y-%m-%d} has no reply. Call the known contact or send a reminder.", d.case_id)
+                flagged += 1
+                emit(ws, d.case_id, "action.sent", agent="action", status="waiting",
+                     message=f"No reply from {d.to_email} since {d.sent_at:%Y-%m-%d}; follow-up due — draft a reminder or call the known contact")
+    get_logger("followups").info("followups.checked", flagged=flagged)
+    return flagged
+
+
+_SCHEDULER = {"started": False}
+
+
+def start_inline_scheduler(interval_seconds: int = 15 * 60) -> None:
+    """TASK_BACKEND=inline: run periodic jobs on a daemon thread inside the API process (Celery beat does this
+    when a worker is used)."""
+    import threading
+
+    from probity.logging import get_logger
+
+    if _SCHEDULER["started"]:
+        return
+    _SCHEDULER["started"] = True
+    stop = threading.Event()
+
+    def loop() -> None:
+        while not stop.wait(interval_seconds):
+            try:
+                check_followups()
+            except Exception:  # noqa: BLE001 - a failed sweep is retried next interval
+                get_logger("followups").exception("followups.failed")
+
+    threading.Thread(target=loop, name="probity-scheduler", daemon=True).start()
 
 
 def _run(workspace_id: str, case_id: str, depth: int) -> None:
@@ -199,31 +253,64 @@ def create_case(s: Session, user: User, document_id: str, corrections: dict | No
 
 # ---------------------------------------------------------------- decisions
 
+TIER_ORDER = ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
+REASON_MIN_ALNUM = 10
+
+
+def peak_tier(s: Session, case: Case) -> str:
+    """The highest tier this case ever reached. Approval rules use it, so lowering the score (an out-of-band
+    confirmation) cannot also lower the bar for approving: a once-CRITICAL case still needs two approvers."""
+    tiers = [(case.risk or {}).get("tier"), *s.scalars(select(RiskScoreRow.tier).where(RiskScoreRow.case_id == case.id))]
+    return max((t for t in tiers if t in TIER_ORDER), key=TIER_ORDER.index, default="LOW")
+
+
+def meaningful(reason: str | None) -> bool:
+    return len(re.findall(r"[^\W_]", reason or "")) >= REASON_MIN_ALNUM
+
+
+def _oob_confirmers(s: Session, case: Case) -> set[str]:
+    from probity.db.models import AuditLog
+
+    return set(s.scalars(select(AuditLog.actor).where(AuditLog.workspace_id == case.workspace_id, AuditLog.entity == case.id,
+                                                      AuditLog.action == "verification.out_of_band")))
+
+
 def decide(s: Session, user: User, case_id: str, decision: str, reason: str) -> Case:
-    case = get_case(s, user.workspace_id, case_id)
+    case = get_case(s, user.workspace_id, case_id, for_update=True)
     if case.status != "AWAITING_HUMAN":
         raise Conflict(f"case is {case.status}, not AWAITING_HUMAN")
     require_role(user, "approver")
     policy = get_policy(s.get(Workspace, user.workspace_id))
-    tier = (case.risk or {}).get("tier")
-    if decision == "APPROVE" and tier in policy["require_reason_for_approve_tiers"] and len((reason or "").strip()) < 5:
-        raise BadRequest(f"approving a {tier} case requires a written reason")
+    tier = peak_tier(s, case)
+    if decision in ("APPROVE", "REJECT") and tier in policy["require_reason_for_approve_tiers"] and not meaningful(reason):
+        raise BadRequest(f"{'approving' if decision == 'APPROVE' else 'rejecting'} a case that reached {tier} requires a written reason "
+                         f"(at least {REASON_MIN_ALNUM} letters or digits)")
     s.add(Decision(workspace_id=user.workspace_id, case_id=case.id, decision=decision, reason=reason or "", actor_id=user.id))
     s.flush()
     audit(s, user.workspace_id, user.id, f"decision.{decision.lower()}", case.id, {"reason": reason, "score": case.risk.get("score"), "tier": tier})
     msg = f"{decision.replace('_', ' ').title()} by {user.name}"
     if decision == "APPROVE":
-        if risk_case.requires_dual_approval(case, policy):
-            approvers = set(s.scalars(select(Decision.actor_id).where(Decision.case_id == case.id, Decision.decision == "APPROVE")))
-            if len(approvers) < 2:
-                case.recommendation = {**case.recommendation, "approvals": sorted(approvers)}
-                s.flush()
-                from probity.notify import notify
+        # Approvals count only if given after the latest score: an approval of an earlier version of the case
+        # (before a re-run or an out-of-band rescore) is not an approval of what the case says now.
+        scored_at = s.scalar(select(func.max(RiskScoreRow.created_at)).where(RiskScoreRow.case_id == case.id))
+        q = select(Decision.actor_id).where(Decision.case_id == case.id, Decision.decision == "APPROVE")
+        approvers = set(s.scalars(q.where(Decision.created_at >= scored_at) if scored_at else q))
+        needed = 2 if risk_case.requires_dual_approval(case, policy, tier=tier) else 1
+        # Separation of duties: whoever confirmed the vendor's statements out-of-band (which lowered the score)
+        # cannot be the only approver of the payment.
+        confirmers = _oob_confirmers(s, case)
+        independent = approvers - confirmers
+        if len(approvers) < needed or (confirmers and not independent):
+            case.recommendation = {**case.recommendation, "approvals": sorted(approvers)}
+            s.flush()
+            from probity.notify import notify
 
-                notify(s, user.workspace_id, "approver", "approval_needed", f"Second approval needed on case #{case.number}",
-                       f"{user.name} approved. This case needs a second approver.", case.id, exclude_user=user.id)
-                emit(user.workspace_id, case.id, "decision.recorded", agent="human_gate", status="waiting", message=f"{msg} — 1 of 2 approvals (dual approval required)")
-                return case
+            why = (f"{len(approvers)} of {needed} approvals (dual approval required)" if len(approvers) < needed
+                   else "needs an approver other than the person who confirmed out-of-band")
+            notify(s, user.workspace_id, "approver", "approval_needed", f"Another approval needed on case #{case.number}",
+                   f"{user.name} approved. This case {why}.", case.id, exclude_user=user.id)
+            emit(user.workspace_id, case.id, "decision.recorded", agent="human_gate", status="waiting", message=f"{msg} — {why}")
+            return case
         transition(case, "APPROVED")
     elif decision == "REJECT":
         transition(case, "REJECTED")
@@ -277,7 +364,7 @@ def update_draft(s: Session, user: User, case_id: str, draft_id: str, subject: s
 
 def send_draft(s: Session, user: User, case_id: str, draft_id: str, override_unverified_recipient: bool = False) -> Draft:
     require_role(user, "approver")
-    case = get_case(s, user.workspace_id, case_id)
+    case = get_case(s, user.workspace_id, case_id, for_update=True)
     d = s.get(Draft, draft_id)
     if d is None or d.case_id != case.id:
         raise LookupError("draft not found")
@@ -291,6 +378,10 @@ def send_draft(s: Session, user: User, case_id: str, draft_id: str, override_unv
 
     try:
         provider_id = mailer.send_case_email(case.id, d.to_email, d.subject, d.body)
+    except mailer.MailBlocked as e:
+        audit(s, user.workspace_id, user.id, "email.blocked", d.id, {"to": mailer.masked(d.to_email), "case_id": case.id, "reason": "not on EMAIL_ALLOWLIST"})
+        s.commit()
+        raise BadRequest(f"email not sent: {e}") from e
     except mailer.MailError as e:
         raise BadRequest(f"email not sent: {e}") from e
     d.status, d.approved_by, d.sent_at = "sent", user.id, datetime.now(timezone.utc)
@@ -304,13 +395,13 @@ def send_draft(s: Session, user: User, case_id: str, draft_id: str, override_unv
 
 
 def vendor_reply(s: Session, workspace_id: str, actor: str, case_id: str, from_email: str, subject: str, body: str) -> dict:
-    case = get_case(s, workspace_id, case_id)
+    case = get_case(s, workspace_id, case_id, for_update=True)
     if case.status != "AWAITING_VENDOR":
         raise Conflict(f"case is {case.status}, not AWAITING_VENDOR")
     ctx = _ctx(workspace_id, case.id)
     bundle = vendor_bundle(s, workspace_id, case.vendor_id)
     claims, indicators = action.analyze_reply(ctx, case, bundle, from_email, body)
-    s.add(Message(workspace_id=workspace_id, case_id=case.id, direction="in", from_email=from_email, to_email="ap@probity-demo.in", subject=subject, body=body, indicators=indicators))
+    s.add(Message(workspace_id=workspace_id, case_id=case.id, direction="in", from_email=from_email, to_email=get_settings().email_from or "", subject=subject, body=body, indicators=indicators))
     rows = [record_claim(s, ctx, "action", c) for c in claims]
     from probity.evidence.verifier import verify_claims
 
@@ -340,7 +431,7 @@ def confirm_out_of_band(s: Session, user: User, case_id: str, claim_ids: list[st
     invoice pays (and the approver re-types its last 4 digits), a domain confirmation only the domain the invoice
     came from. A reply that names a different account or domain cannot be confirmed into the vendor master."""
     require_role(user, "approver")
-    case = get_case(s, user.workspace_id, case_id)
+    case = get_case(s, user.workspace_id, case_id, for_update=True)
     if case.status != "AWAITING_HUMAN":
         raise Conflict(f"case is {case.status}")
     if known_channel is False:
@@ -416,7 +507,6 @@ def rescore(workspace_id: str, case_id: str, reason: str = "manual_rescore", rer
 
 def _rescore(workspace_id: str, case_id: str, reason: str, rerun_checks: bool) -> dict:
     ctx = _ctx(workspace_id, case_id)
-    ctx.delay_ms = min(ctx.delay_ms, 300)
     if rerun_checks:
         with session_scope() as s:
             deactivate_agent_claims(s, ctx, ["vendor_investigator", "transaction_analyst"], reason)
@@ -437,13 +527,18 @@ def _rescore(workspace_id: str, case_id: str, reason: str, rerun_checks: bool) -
 # ---------------------------------------------------------------- close & memory
 
 def close_case(s: Session, user: User, case_id: str, outcome: str, resolution: str) -> Case:
-    case = get_case(s, user.workspace_id, case_id)
+    case = get_case(s, user.workspace_id, case_id, for_update=True)
     if case.status == "AUTO_CLEARED":
         require_role(user, "accountant")
     else:
         require_role(user, "approver")
     if outcome not in ("CONFIRMED_ISSUE", "CLEARED", "INCONCLUSIVE"):
         raise BadRequest("invalid outcome")
+    if not meaningful(resolution):
+        raise BadRequest(f"describe the resolution (at least {REASON_MIN_ALNUM} letters or digits)")
+    if case.status == "REJECTED" and outcome == "CLEARED":
+        raise BadRequest("a rejected case cannot be closed as CLEARED")
+    paid = case.status in ("APPROVED", "AUTO_CLEARED")  # only paid invoices become part of the vendor's history
     transition(case, "CLOSED")
     case.outcome, case.resolution = outcome, resolution
     peak = s.scalars(select(RiskScoreRow).where(RiskScoreRow.case_id == case.id).order_by(RiskScoreRow.score.desc())).first()
@@ -458,7 +553,7 @@ def close_case(s: Session, user: User, case_id: str, outcome: str, resolution: s
                      summary=summary[:2000], peak_score=peak_score, peak_tier=peak.tier if peak else case.risk.get("tier", "LOW"),
                      evidence_ids=[e.id for e in s.scalars(select(EvidenceRow).where(EvidenceRow.case_id == case.id))],
                      bank_hmacs=[bank] if bank else [], domains=[dom] if dom else []))
-    if case.vendor_id and outcome in ("CLEARED",) and fv(case.extraction, "invoice_number"):
+    if paid and case.vendor_id and outcome == "CLEARED" and fv(case.extraction, "invoice_number"):
         ex = case.extraction
         s.add(HistoricalInvoice(workspace_id=user.workspace_id, vendor_id=case.vendor_id, invoice_number=fv(ex, "invoice_number"),
                                 invoice_number_norm=normalize_invoice_number(fv(ex, "invoice_number")), invoice_date=parse_date(fv(ex, "invoice_date")) or datetime.now().date(),
@@ -512,17 +607,19 @@ def serialize_case(s: Session, case: Case, user: User, full: bool = True) -> dic
         "memory_hits": case.memory_hits,
         "budget": case.budget,
         "claims": [
-            {"id": c.id, "agent": c.agent, "statement": c.statement, "signal": c.signal, "status": c.status, "confidence": c.confidence, "severity": c.severity,
-             "evidence_ids": c.evidence_ids, "verifier_notes": c.verifier_notes, "supporting_quote": c.supporting_quote, "data": c.data, "active": c.active}
+            {"id": c.id, "agent": c.agent, "statement": mask_account_numbers(c.statement), "signal": c.signal, "status": c.status, "confidence": c.confidence,
+             "severity": c.severity, "evidence_ids": c.evidence_ids, "verifier_notes": c.verifier_notes,
+             "supporting_quote": mask_account_numbers(c.supporting_quote), "data": c.data, "active": c.active}
             for c in claims
         ],
         "drafts": [
             {"id": d.id, "to_email": d.to_email, "recipient_verified": d.recipient_verified, "subject": d.subject, "body": d.body, "requested_items": d.requested_items,
-             "status": d.status, "sent_at": iso(d.sent_at), "followup_at": iso(d.followup_at)}
+             "fallback": d.fallback, "status": d.status, "sent_at": iso(d.sent_at), "followup_at": iso(d.followup_at)}
             for d in s.scalars(select(Draft).where(Draft.case_id == case.id))
         ],
         "messages": [
-            {"id": m.id, "direction": m.direction, "from": m.from_email, "to": m.to_email, "subject": m.subject, "body": m.body, "indicators": m.indicators, "at": iso(m.created_at)}
+            {"id": m.id, "direction": m.direction, "from": m.from_email, "to": m.to_email, "subject": mask_account_numbers(m.subject),
+             "body": mask_account_numbers(m.body), "indicators": m.indicators, "at": iso(m.created_at)}
             for m in s.scalars(select(Message).where(Message.case_id == case.id).order_by(Message.created_at))
         ],
         "decisions": [
@@ -538,7 +635,10 @@ def serialize_case(s: Session, case: Case, user: User, full: bool = True) -> dic
 
 
 def case_evidence(s: Session, case: Case) -> list[dict]:
-    return [evidence_public(e) for e in s.scalars(select(EvidenceRow).where(EvidenceRow.case_id == case.id).order_by(EvidenceRow.retrieved_at))]
+    out = [evidence_public(e) for e in s.scalars(select(EvidenceRow).where(EvidenceRow.case_id == case.id).order_by(EvidenceRow.retrieved_at))]
+    for e in out:  # excerpts quote documents and replies verbatim (G8)
+        e["excerpt"] = mask_account_numbers(e.get("excerpt"))
+    return out
 
 
 def reveal_account(s: Session, user: User, case: Case) -> str | None:

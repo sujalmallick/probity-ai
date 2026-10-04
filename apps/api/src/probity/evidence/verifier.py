@@ -130,7 +130,7 @@ def check_assertion(a: dict[str, Any], ev: dict[str, EvidenceRow]) -> tuple[str,
 
 
 def verify_claims(s: Session, workspace_id: str, case_id: str, claims: list[ClaimRow], entail: Any = None) -> dict[str, int]:
-    """Verify claims in place. `entail` is an optional callable(claim, excerpts) -> (status, quote) for live mode."""
+    """Verify claims in place. `entail` is an optional callable(claim, excerpts) -> (status, quote[, note]); a note means it could not check."""
     stats = {"verified": 0, "refuted": 0, "unverified": 0, "dropped": 0}
     all_ev = {
         e.id: e
@@ -149,8 +149,11 @@ def verify_claims(s: Session, workspace_id: str, case_id: str, claims: list[Clai
         status, note, quote = check_assertion(c.assertion or {}, ev)
         # 4. optional LLM entailment for claims with no deterministic check
         if status == "unverified" and entail is not None and (c.assertion or {}).get("op") in (None, "entail"):
-            status, quote = entail(c.statement, [e.excerpt or "" for e in ev.values()])
-            if status == "verified" and not any(quote_in(quote, e.excerpt) for e in ev.values()):
+            res = entail(c.statement, [e.excerpt or "" for e in ev.values()])
+            status, quote = res[0], res[1]
+            if len(res) > 2 and res[2]:  # the checker could not run (e.g. AI unavailable): say so, never imply a check
+                note = res[2]
+            elif status == "verified" and not any(quote_in(quote, e.excerpt) for e in ev.values()):
                 status, note = "unverified", "LLM quote not found verbatim in evidence"
             else:
                 note = f"LLM entailment: {status}"

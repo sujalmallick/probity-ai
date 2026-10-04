@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from probity import __version__, importer
 from probity import services as svc
-from probity.api.deps import current_user, db, demo_login_on, demo_on
+from probity.api.deps import current_user, db, require_mfa_for_approvals
 from probity.config import get_settings
 from probity.db.audit import audit
 from probity.db.models import (
@@ -30,23 +30,26 @@ ImportKind = Literal["vendors", "invoices", "purchase_orders"]
 # ---------------------------------------------------------------- public app config
 
 @router.get("/app/config")
-def app_config(request: Request) -> dict:
-    """Public, unauthenticated. Tells the web app what to show; contains no secrets."""
+def app_config() -> dict:
+    """Public, unauthenticated. Tells the web app what is live; contains no secrets."""
     st = get_settings()
-    demo = demo_on()
-    live = lambda ok: "live" if ok else "offline"  # noqa: E731
+    status = {name: state for name, state, _ in st.integration_status()}
     return {
         "env": st.env,
         "version": __version__,
-        "auth": {"mode": st.auth_mode, "demo_login": demo_login_on(request), "sign_up": st.auth_mode == "clerk"},
-        "features": {"landing_page": st.show_landing_page, "demo": demo, "benchmark": demo, "simulated_inbox": demo and st.email_backend == "outbox"},
+        "auth": {"mode": "clerk", "sign_up": True, "demo_login": False},
+        # demo/benchmark/simulated_inbox stay false until the web app stops reading them, then they are removed.
+        "features": {"landing_page": st.show_landing_page, "demo": False, "benchmark": False, "simulated_inbox": False},
         "integrations": {
-            "ai": live(st.llm_mode == "live" and bool(st.anthropic_api_key)),
-            "web_search": live(st.tools_mode == "live" and bool(st.tavily_api_key)),
-            "email": live(st.email_backend != "outbox"),
-            "storage": "cloud" if st.storage_backend == "s3" else "local",
-            "antivirus": "on" if st.clamav_host else "off",
-            "ocr": "on" if st.ocr_enabled else "off",
+            "ai": status["ai"],
+            "web_search": status["web_search"],
+            "domain_lookup": status["domain_lookup"],
+            "gst_registry": status["gst_registry"],
+            "email": "live" if status["email"].startswith("live") else "missing",
+            "email_allowlist_only": not st.email_send_to_any,
+            "storage": status["storage"],
+            "antivirus": status["antivirus"],
+            "background_jobs": status["background_jobs"],
         },
         "limits": {"max_upload_mb": 15, "max_import_mb": 5},
     }
@@ -82,7 +85,7 @@ def onboarding(user: User = Depends(current_user), s: Session = Depends(db)) -> 
         {"key": "policy", "title": "Review risk policy", "required": False, "done": policy_reviewed, "detail": "auto-clear limit, research threshold, MFA",
          "action": {"type": "route", "to": "/settings/policy"}, "why": "Decide what may clear automatically."},
         {"key": "first_case", "title": "Investigate your first invoice", "required": True, "done": cases > 0, "detail": f"{cases} case(s)",
-         "action": {"type": "route", "to": "/cases/new"}, "why": "Upload a PDF, image or email invoice."},
+         "action": {"type": "route", "to": "/cases/new"}, "why": "Upload a PDF or email invoice with selectable text."},
     ]
     required = [st for st in steps if st["required"]]
     return {"complete": all(st["done"] for st in required), "progress": f"{sum(st['done'] for st in steps)}/{len(steps)}", "steps": steps}
@@ -93,7 +96,7 @@ class WorkspacePatch(BaseModel):
 
 
 @router.patch("/workspace")
-def rename_workspace(body: WorkspacePatch, request: Request, user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
+def rename_workspace(body: WorkspacePatch, request: Request, user: User = Depends(require_mfa_for_approvals), s: Session = Depends(db)) -> dict:
     svc.require_role(user, "owner")
     ws = s.get(Workspace, user.workspace_id)
     assert ws
@@ -118,7 +121,8 @@ def import_spec(user: User = Depends(current_user)) -> dict:
 @router.post("/imports/{kind}")
 async def run_import(
     kind: ImportKind, request: Request, file: UploadFile = File(...), dry_run: bool = Query(True), skip_invalid: bool = Query(False),
-    user: User = Depends(current_user), s: Session = Depends(db),
+    verification_note: str | None = Query(None, max_length=1000),
+    user: User = Depends(require_mfa_for_approvals), s: Session = Depends(db),
 ) -> dict:
     """dry_run=true (default) validates and returns a report without writing. dry_run=false commits:
     refused if any row is invalid unless skip_invalid=true (then only valid rows are written)."""
@@ -132,6 +136,12 @@ async def run_import(
         return {**rep.as_dict(), "dry_run": True, "committed": False}
     if rep.errors and not skip_invalid:
         raise svc.BadRequest(f"{len(rep.errors)} row(s) have errors — fix them or retry with skip_invalid=true")
+    # Importing a bank account or contact as *verified* is the same act as verifying it by hand: it silences the
+    # bank-change check and makes the contact the out-of-band channel, so it needs the same written note.
+    verified_rows = [r for r in rep.preview if r.get("bank_verified") or r.get("contact_verified")]
+    if verified_rows and not svc.meaningful(verification_note):
+        raise svc.BadRequest(f"{len(verified_rows)} row(s) mark a bank account or contact as verified: add verification_note describing how "
+                             f"each was confirmed out-of-band (at least {svc.REASON_MIN_ALNUM} letters or digits), or import them unverified")
     rep = importer.run_import(s, user, kind, data, commit=True, can_verify=svc.ROLES.index(user.role) >= svc.ROLES.index("approver"))
     job = ImportJob(workspace_id=user.workspace_id, kind=kind, filename=(file.filename or "import.csv")[:300], status="committed",
                     rows_total=rep.rows_total, rows_ok=rep.rows_ok, created=rep.created, updated=rep.updated, errors=rep.errors[:200], actor_id=user.id)
@@ -139,6 +149,10 @@ async def run_import(
     s.flush()
     audit(s, user.workspace_id, user.id, "import.committed", job.id, {"kind": kind, "rows_ok": rep.rows_ok, "created": rep.created, "updated": rep.updated,
                                                                        "skipped": len(rep.errors)}, request.state.request_id)
+    for r in verified_rows:
+        audit(s, user.workspace_id, user.id, "import.verified_item", job.id,
+              {"row": r["row"], "vendor": r["name"], "bank": r["bank"] if r.get("bank_verified") else None,
+               "contact": r["contact"] if r.get("contact_verified") else None, "note": verification_note}, request.state.request_id)
     return {**rep.as_dict(), "dry_run": False, "committed": True, "import_id": job.id}
 
 

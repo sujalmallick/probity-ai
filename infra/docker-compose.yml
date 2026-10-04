@@ -1,29 +1,19 @@
-# Dev/demo stack. Redis and Qdrant are provisioned for the scale-out path (worker queue, vector memory);
-# the MVP runs investigations in-process and keeps memory in Postgres (see docs/DECISIONS.md).
+# Full local stack (Postgres + API + web). Settings come from apps/api/.env (git-ignored); the database URLs are
+# overridden here to point at the postgres service. Nothing is seeded: sign in with Clerk and add your own data.
 services:
   postgres:
     image: postgres:16-alpine
     environment: { POSTGRES_USER: probity, POSTGRES_PASSWORD: probity, POSTGRES_DB: probity }
     ports: ["127.0.0.1:5432:5432"]  # backing services are never exposed beyond this machine
-    volumes: [pgdata:/var/lib/postgresql/data]
+    volumes: [pgdata:/var/lib/postgresql/data, ./postgres:/docker-entrypoint-initdb.d:ro]
     healthcheck: { test: ["CMD-SHELL", "pg_isready -U probity"], interval: 5s, retries: 10 }
-  redis:
-    image: redis:7-alpine
-    ports: ["127.0.0.1:6379:6379"]
-  qdrant:
-    image: qdrant/qdrant:latest
-    ports: ["127.0.0.1:6333:6333"]
   api:
     build: { context: .., dockerfile: infra/api.Dockerfile }
+    env_file: [../apps/api/.env]
     environment:
-      DATABASE_URL: postgresql+psycopg://probity:probity@postgres:5432/probity
-      TOOLS_MODE: cached
-      LLM_MODE: mock
-      AUTH_MODE: local
-      ENV: demo
-      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET to a random value of at least 32 characters (demo logins are signed with it)}
-      AGENT_DELAY_MS: "400"
-      CORS_ORIGINS: http://localhost:5180
+      DATABASE_URL: postgresql+psycopg://probity_app:probity_app@postgres:5432/probity
+      DATABASE_MIGRATE_URL: postgresql+psycopg://probity:probity@postgres:5432/probity
+      TASK_BACKEND: inline
     ports: ["8010:8000"]
     depends_on: { postgres: { condition: service_healthy } }
   web:

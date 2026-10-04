@@ -2,14 +2,23 @@
 
 import copy
 
-from conftest import login
-from sqlalchemy import select
-from test_demo_flow import API, upload_and_run
+import pytest
+from conftest import bearer, login
+from factories import NEW_DOMAIN, bank_change_spec, build_world, clean_spec
+from helpers import API, run_case
 
-from probity.db.models import User
-from probity.db.session import session_scope
-from probity.demo import seed
 from probity.risk.case_scoring import default_policy
+
+SPECS = {"bank_change": bank_change_spec, "clean": clean_spec}
+
+
+@pytest.fixture(autouse=True)
+def _world(world, fake_lookups):
+    fake_lookups.domains[NEW_DOMAIN] = 21
+
+
+def upload_and_run(client, h, name):
+    return run_case(client, h, SPECS[name]())
 
 
 def sig(out, name):
@@ -18,7 +27,7 @@ def sig(out, name):
 
 def test_case_scored_against_workspace_history(client):
     acc = login(client, "accountant")
-    case = upload_and_run(client, acc, "invoice_4821.pdf")
+    case = upload_and_run(client, acc, "bank_change")
     r = client.get(f"{API}/cases/{case['id']}/invoice-risk", headers=acc)
     assert r.status_code == 200, r.text
     out = r.json()
@@ -35,7 +44,7 @@ def test_case_scored_against_workspace_history(client):
 
 def test_clean_case_is_low(client):
     acc = login(client, "accountant")
-    case = upload_and_run(client, acc, "invoice_kaveri_clean.pdf")
+    case = upload_and_run(client, acc, "clean")
     out = client.get(f"{API}/cases/{case['id']}/invoice-risk", headers=acc).json()
     assert out["tier"] == "LOW", out["explanation"]["text"]
     assert out["recommended_action"] == "approve"
@@ -43,7 +52,7 @@ def test_clean_case_is_low(client):
 
 def test_narrative_is_optional_and_never_fails(client):
     acc = login(client, "accountant")
-    case = upload_and_run(client, acc, "invoice_4821.pdf")
+    case = upload_and_run(client, acc, "bank_change")
     out = client.get(f"{API}/cases/{case['id']}/invoice-risk?narrate=true", headers=acc).json()
     n = out["narrative"]
     assert n["source"] in ("llm", "template") and "HIGH" in n["summary"]
@@ -51,11 +60,8 @@ def test_narrative_is_optional_and_never_fails(client):
 
 def test_other_workspace_cannot_score_case(client):
     acc = login(client, "accountant")
-    case = upload_and_run(client, acc, "invoice_4821.pdf")
-    with session_scope() as s:
-        ws = seed.seed_workspace(s, name="Other Co")
-        uid = s.scalars(select(User).where(User.workspace_id == ws.id, User.role == "owner")).first().id
-    other = {"Authorization": "Bearer " + client.post(f"{API}/auth/demo-login", json={"user_id": uid}).json()["token"]}
+    case = upload_and_run(client, acc, "bank_change")
+    other = bearer(build_world(name="Other Co").user("owner"))
     assert client.get(f"{API}/cases/{case['id']}/invoice-risk", headers=other).status_code == 404
 
 
@@ -71,7 +77,7 @@ def test_workspace_policy_roundtrip(client):
     got = client.get(f"{API}/workspace/invoice-risk-policy", headers=acc).json()
     assert got["source"] == "workspace" and got["policy"]["tiers"][0]["max_score"] == 0.1
 
-    case = upload_and_run(client, acc, "invoice_4821.pdf")
+    case = upload_and_run(client, acc, "bank_change")
     assert client.get(f"{API}/cases/{case['id']}/invoice-risk", headers=acc).json()["meta"]["policy_source"] == "workspace"
 
     assert client.delete(f"{API}/workspace/invoice-risk-policy", headers=owner).json()["source"] == "default"

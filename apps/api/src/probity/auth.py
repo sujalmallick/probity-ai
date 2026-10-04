@@ -1,17 +1,15 @@
-"""Authentication.
+"""Authentication: Clerk only.
 
-AUTH_MODE=clerk (production): verify Clerk session JWTs against Clerk's JWKS (RS256), check issuer,
-expiry and authorized party, then map the Clerk user to a Probity user. First sign-in provisions:
-a pending invitation for the email joins that workspace with the invited role; otherwise the user gets a
-new workspace as owner.
-
-AUTH_MODE=local (dev/demo only, refused in prod): HS256 tokens for seeded demo users.
+Verify Clerk session JWTs against Clerk's JWKS (RS256): signature, issuer, expiry and authorized party (`azp`).
+Then map the Clerk user to a Probity user. On first sign-in the user's primary email is read from the Clerk Backend
+API and must be *verified* by Clerk. A pending invitation for that email joins the inviting workspace with the
+invited role; otherwise the user gets a new workspace as its owner.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any
 
@@ -38,36 +36,9 @@ class Principal:
     @property
     def mfa_verified(self) -> bool:
         """Clerk `fva` = [minutes since first factor, minutes since second factor]; -1 = never."""
-        if get_settings().auth_mode != "clerk":
-            return True
         fva = self.claims.get("fva")
         return isinstance(fva, list) and len(fva) == 2 and fva[1] is not None and fva[1] >= 0
 
-
-# ---------------------------------------------------------------- local (dev/demo)
-
-def issue_local_token(user: User) -> str:
-    s = get_settings()
-    now = datetime.now(timezone.utc)
-    return jwt.encode(
-        {"sub": user.id, "ws": user.workspace_id, "role": user.role, "iat": now, "exp": now + timedelta(minutes=s.jwt_ttl_minutes), "iss": "probity-local"},
-        s.jwt_secret,
-        algorithm="HS256",
-    )
-
-
-def _verify_local(token: str, s: Session) -> Principal:
-    try:
-        claims = jwt.decode(token, get_settings().jwt_secret, algorithms=["HS256"], issuer="probity-local")
-    except jwt.PyJWTError as e:
-        raise AuthError("invalid or expired token") from e
-    user = s.get(User, claims["sub"])
-    if user is None or user.workspace_id != claims.get("ws") or not user.active:
-        raise AuthError("unknown user")
-    return Principal(user, claims)
-
-
-# ---------------------------------------------------------------- clerk
 
 @lru_cache
 def _jwks_client() -> jwt.PyJWKClient:
@@ -78,37 +49,42 @@ def _jwks_client() -> jwt.PyJWKClient:
 
 def verify_clerk_token(token: str) -> dict[str, Any]:
     st = get_settings()
+    if not st.clerk_issuer:
+        raise AuthError("sign-in is not configured (CLERK_ISSUER missing)")
     try:
         key = _jwks_client().get_signing_key_from_jwt(token)
         claims = jwt.decode(
-            token, key.key, algorithms=["RS256"], issuer=st.clerk_issuer.rstrip("/") if st.clerk_issuer else None,
+            token, key.key, algorithms=["RS256"], issuer=st.clerk_issuer.rstrip("/"),
             options={"require": ["exp", "iat", "sub", "iss"], "verify_aud": False}, leeway=10,
         )
     except jwt.PyJWTError as e:
         raise AuthError(f"invalid session token: {e}") from e
     allowed = [a.strip() for a in st.clerk_authorized_parties.split(",") if a.strip()]
-    if allowed and claims.get("azp") not in allowed:
+    if not allowed or claims.get("azp") not in allowed:
         raise AuthError("token issued for an unauthorized origin")
     return claims
 
 
-def _clerk_profile(user_id: str, claims: dict[str, Any]) -> tuple[str, str]:
-    """Email + display name. Prefer claims (configure a session-token template with `email`/`name`);
-    fall back to the Clerk Backend API."""
-    email, name = claims.get("email"), claims.get("name")
-    if email:
-        return email.lower(), name or email.split("@")[0]
+def clerk_profile(user_id: str) -> tuple[str, str]:
+    """(verified primary email, display name) from the Clerk Backend API. Unverified emails are refused, because
+    the email decides which workspace and role a new sign-in receives."""
     st = get_settings()
     if not st.clerk_secret_key:
-        raise AuthError("cannot resolve user email: add `email` to the Clerk session token or set CLERK_SECRET_KEY")
-    r = httpx.get(f"https://api.clerk.com/v1/users/{user_id}", headers={"Authorization": f"Bearer {st.clerk_secret_key}"}, timeout=10)
-    r.raise_for_status()
+        raise AuthError("sign-in is not configured (CLERK_SECRET_KEY missing)")
+    try:
+        r = httpx.get(f"https://api.clerk.com/v1/users/{user_id}", headers={"Authorization": f"Bearer {st.clerk_secret_key}"}, timeout=10)
+        r.raise_for_status()
+    except httpx.HTTPError as e:
+        raise AuthError("could not reach Clerk to load your profile; try again") from e
     u = r.json()
-    primary = next((e["email_address"] for e in u.get("email_addresses", []) if e["id"] == u.get("primary_email_address_id")), None)
-    if not primary:
-        raise AuthError("Clerk user has no primary email")
-    full = " ".join(x for x in (u.get("first_name"), u.get("last_name")) if x) or primary.split("@")[0]
-    return primary.lower(), full
+    primary = next((e for e in u.get("email_addresses", []) if e.get("id") == u.get("primary_email_address_id")), None)
+    if not primary or not primary.get("email_address"):
+        raise AuthError("your account has no primary email address")
+    if (primary.get("verification") or {}).get("status") != "verified":
+        raise AuthError("verify your email address in the sign-in screen, then sign in again")
+    email = primary["email_address"].strip().lower()
+    full = " ".join(x for x in (u.get("first_name"), u.get("last_name")) if x) or email.split("@")[0]
+    return email, full
 
 
 def provision(s: Session, external_id: str, email: str, name: str) -> User:
@@ -116,7 +92,7 @@ def provision(s: Session, external_id: str, email: str, name: str) -> User:
     if user:
         return user
     existing = s.scalars(select(User).where(User.email == email)).first()
-    if existing:  # pre-created user (e.g. owner added by email) — link the Clerk identity
+    if existing:  # the same verified email signed in with a new Clerk identity
         existing.external_id = external_id
         return existing
     inv = s.scalars(select(Invitation).where(Invitation.email == email, Invitation.accepted_at.is_(None)).order_by(Invitation.created_at.desc())).first()
@@ -139,20 +115,14 @@ def provision(s: Session, external_id: str, email: str, name: str) -> User:
     return user
 
 
-def _verify_clerk(token: str, s: Session) -> Principal:
+def authenticate(token: str, s: Session) -> Principal:
     claims = verify_clerk_token(token)
     user = s.scalars(select(User).where(User.external_id == claims["sub"])).first()
     if user is None:
-        email, name = _clerk_profile(claims["sub"], claims)
+        email, name = clerk_profile(claims["sub"])
         user = provision(s, claims["sub"], email, name)
         s.commit()
     if not user.active:
         raise AuthError("user deactivated")
+    set_tenant(s, user.workspace_id)
     return Principal(user, claims)
-
-
-def authenticate(token: str, s: Session) -> Principal:
-    mode = get_settings().auth_mode
-    p = _verify_clerk(token, s) if mode == "clerk" else _verify_local(token, s)
-    set_tenant(s, p.user.workspace_id)
-    return p

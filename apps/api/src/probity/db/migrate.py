@@ -1,6 +1,6 @@
-"""Schema management for PostgreSQL (Alembic).   python -m probity.db.migrate upgrade|reset|revision -m "msg"
+"""Schema management (Alembic).   python -m probity.db.migrate upgrade|reset|revision -m "msg"
 
-SQLite dev/test databases are created with metadata.create_all instead.
+`python -m probity.bootstrap` is the normal way to create an empty database; this module is the low-level tool.
 """
 
 from __future__ import annotations
@@ -19,7 +19,10 @@ MIGRATIONS = Path(__file__).resolve().parent / "migrations"
 
 def migrate_url() -> str:
     s = get_settings()
-    return s.database_migrate_url or s.database_url
+    url = s.database_migrate_url or s.database_url
+    if not url:
+        raise SystemExit("DATABASE_URL is not set in apps/api/.env")
+    return url
 
 
 def alembic_config() -> Config:
@@ -31,6 +34,34 @@ def alembic_config() -> Config:
 
 def upgrade(rev: str = "head") -> None:
     command.upgrade(alembic_config(), rev)
+
+
+def current_revision() -> str | None:
+    from sqlalchemy import create_engine
+    from sqlalchemy.exc import ProgrammingError
+
+    eng = create_engine(migrate_url())
+    try:
+        with eng.connect() as conn:
+            return conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
+    except ProgrammingError:
+        return None  # empty database
+    finally:
+        eng.dispose()
+
+
+def head_revision() -> str:
+    from alembic.script import ScriptDirectory
+
+    return ScriptDirectory.from_config(alembic_config()).get_current_head()  # type: ignore[return-value]
+
+
+def pending_migrations() -> str | None:
+    """None when the schema is at head, otherwise a short description."""
+    current, head = current_revision(), head_revision()
+    if current == head:
+        return None
+    return "empty database" if current is None else f"at revision {current}, expected {head}"
 
 
 def reset_postgres() -> None:

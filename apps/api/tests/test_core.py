@@ -48,7 +48,7 @@ def _hist(prices, bank="h1"):
     return [d.PastInvoice(f"{i}", date(2026, 1, 1) + timedelta(days=30 * i), 100, bank, (("Industrial Components", 100, p),)) for i, p in enumerate(prices)]
 
 
-def test_price_anomaly_demo_numbers():
+def test_price_anomaly_numbers():
     res = d.price_anomaly([("Industrial Components", 500, 96000)], _hist([57500, 58000, 58500, 59000, 59500, 60000, 60500, 59000, 58500, 59500, 58000, 60000]))
     assert res.fired and res.baseline == 59000 and res.detail["pct_change"] == 62.7
 
@@ -96,7 +96,7 @@ def test_core_weights_sum_to_100():
     assert sum(w[s] for s in engine.CORE_SIGNALS) == 100
 
 
-def test_demo_score_and_tiers():
+def test_three_core_signals_score_and_tiers():
     r = engine.score([_sig("bank_account_changed"), _sig("price_anomaly"), _sig("new_domain")])
     assert (r.score, r.tier) == (70, "HIGH")
     assert engine.tier_for(29) == "LOW" and engine.tier_for(30) == "MEDIUM" and engine.tier_for(60) == "HIGH" and engine.tier_for(80) == "CRITICAL"

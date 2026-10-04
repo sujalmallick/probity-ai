@@ -9,8 +9,11 @@ import struct
 from probity.config import get_settings
 from probity.ingestion.parse import UnsupportedDocument
 
-# PDF features that execute or embed content. Legitimate invoices don't need them.
-_ACTIVE_PDF = re.compile(rb"/(JavaScript|JS|Launch|EmbeddedFile|RichMedia|OpenAction\s*<<[^>]*?/S\s*/JavaScript|XFA|AA)\b")
+# PDF features that execute or embed content. Legitimate invoices don't need them. A plain alternation is linear;
+# an /OpenAction→JavaScript action is caught by /JavaScript (or /JS) itself.
+_ACTIVE_PDF = re.compile(rb"/(JavaScript|JS|Launch|EmbeddedFile|RichMedia|XFA|AA)\b")
+# PDF names may hex-escape characters ("/J#61vaScript" is /JavaScript); decode them before matching.
+_NAME_ESCAPE = re.compile(rb"#([0-9A-Fa-f]{2})")
 
 
 class InfectedFile(UnsupportedDocument):
@@ -18,9 +21,13 @@ class InfectedFile(UnsupportedDocument):
 
 
 def reject_active_content(data: bytes, mime: str) -> None:
+    if mime == "message/rfc822":  # an emailed invoice's PDF attachment gets the same check
+        from probity.ingestion.parse import email_attachment_pdf
+
+        data, mime = email_attachment_pdf(data) or b"", "application/pdf"
     if mime != "application/pdf":
         return
-    m = _ACTIVE_PDF.search(data)
+    m = _ACTIVE_PDF.search(_NAME_ESCAPE.sub(lambda e: bytes([int(e.group(1), 16)]), data))
     if m:
         raise UnsupportedDocument(f"PDF contains active content ({m.group(1).decode(errors='replace')}); re-export it as a plain PDF")
 

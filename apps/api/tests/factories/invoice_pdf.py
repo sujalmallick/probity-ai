@@ -1,4 +1,4 @@
-"""Synthetic invoice PDFs (reportlab). Synthetic data only — no real customer data."""
+"""Test-only invoice PDFs (reportlab), built from factory data. Never imported by app code."""
 
 from __future__ import annotations
 
@@ -32,6 +32,7 @@ class InvoiceSpec:
     bank_name: str
     gst_rate: int = 18
     footer: str | None = None
+    bill_to: str = "Test Buyer Pvt Ltd, 1 Test Road, Pune 411001"
     extra_lines: list[str] = field(default_factory=list)
 
     @property
@@ -71,7 +72,7 @@ def render(spec: InvoiceSpec, path: Path) -> Path:
     line(f"Due Date: {spec.due_date}")
     if spec.po_number:
         line(f"PO Number: {spec.po_number}")
-    line("Bill To: Probity Demo Traders Pvt Ltd, 5th Floor, Baner Road, Pune 411045", dy=26)
+    line(f"Bill To: {spec.bill_to}", dy=26)
 
     c.setFont("Helvetica-Bold", 10)
     for x, t in ((50, "Description"), (300, "Qty"), (360, "Unit Price"), (460, "Amount")):
@@ -106,3 +107,10 @@ def render(spec: InvoiceSpec, path: Path) -> Path:
     c.showPage()
     c.save()
     return path
+
+
+def render_bytes(spec: InvoiceSpec) -> bytes:
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        return render(spec, Path(d) / "invoice.pdf").read_bytes()

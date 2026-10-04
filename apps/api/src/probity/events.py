@@ -2,21 +2,20 @@
 
 from __future__ import annotations
 
-import time
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
-import json
-
 from probity.db.models import AgentEvent, iso
-from probity.redis_client import channel, sync_redis
 from probity.db.session import telemetry_scope
+from probity.redis_client import channel, sync_redis
 from probity.tools.base import Budget
 
 EVENT_TYPES = {
     "case.created", "plan.created", "agent.started", "agent.progress", "agent.completed", "agent.failed",
     "agent.skipped", "evidence.added", "claim.verified", "claim.refuted", "risk.updated", "gate.waiting",
     "decision.recorded", "action.sent", "vendor.reply_received", "verification.confirmed_out_of_band", "case.closed",
+    "check.could_not_verify",
 }
 
 
@@ -40,12 +39,24 @@ def event_payload(r: AgentEvent) -> dict[str, Any]:
     return {"seq": r.id, "ts": iso(r.ts), "case_id": r.case_id, "type": r.type, "agent": r.agent, "status": r.status, "message": r.message, "data": r.data}
 
 
+FALLBACK_LABEL = "rule-based fallback, AI unavailable"
+
+
+def rule_based_fallback(reason: str) -> dict[str, str]:
+    """Attached to any result produced by rules because the AI failed; the UI shows `label` next to that result."""
+    return {"kind": "rule_based", "label": FALLBACK_LABEL, "reason": reason}
+
+
+def could_not_verify(reason: str, **extra: Any) -> dict[str, Any]:
+    """A check result meaning "a tool or data source failed, so this was not checked" — never a pass."""
+    return {"status": "could_not_verify", "reason": reason, **extra}
+
+
 @dataclass
 class CaseCtx:
     workspace_id: str
     case_id: str
     budget: Budget
-    delay_ms: int = 0
     trace: list[str] = field(default_factory=list)
 
     def emit(self, type_: str, **kw: Any) -> None:
@@ -53,11 +64,12 @@ class CaseCtx:
 
     def progress(self, agent: str, message: str, **data: Any) -> None:
         self.emit("agent.progress", agent=agent, status="running", message=message, data=data)
-        self.pause()
 
-    def pause(self, factor: float = 1.0) -> None:
-        if self.delay_ms:
-            time.sleep(self.delay_ms * factor / 1000)
+    def unverifiable(self, agent: str, check: str, reason: str) -> dict[str, Any]:
+        """Report in the timeline that `check` could not be verified, and return the check result to store."""
+        self.emit("check.could_not_verify", agent=agent, status="warning", message=f"Could not verify {check.replace('_', ' ')}: {reason}",
+                  data={"check": check, "reason": reason})
+        return could_not_verify(reason)
 
     @property
     def tags(self) -> dict[str, str]:

@@ -134,7 +134,6 @@ def extract(invoice: str | bytes | dict, warnings: list[str]) -> tuple[dict, str
     if isinstance(invoice, bytes):
         mime = parse.sniff_mime(invoice, "")
         pages, _ocr = parse.extract(invoice, mime)
-        pages = [p for p in pages if p != parse._OCR_MARK]
         tables = parse.extract_tables(invoice, mime)
     else:
         pages, tables = [invoice], []

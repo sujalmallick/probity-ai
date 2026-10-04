@@ -1,20 +1,13 @@
-"""Tool runtime: modes (live|cached|mock), per-case budgets, fixture replay."""
+"""Per-case budgets for tool and LLM calls (Guardrails G7)."""
 
 from __future__ import annotations
 
-import json
-import re
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import date, timedelta
-from functools import lru_cache
-from pathlib import Path
 from typing import Any
 
 from probity.config import get_settings
-
-FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures"
 
 
 class BudgetExceeded(RuntimeError):
@@ -70,33 +63,3 @@ class Budget:
 
     def snapshot(self) -> dict[str, Any]:
         return {"llm_calls": self.llm_calls, "tokens": self.tokens, "web_calls": self.web_calls, "seconds": round(self.elapsed(), 2), "exhausted": list(self.exhausted)}
-
-
-_REL_DATE = re.compile(r"\{\{today([+-]\d+)d\}\}")
-
-
-def _resolve_dates(obj: Any, today: date) -> Any:
-    """Fixtures store dates relative to 'today' (e.g. {{today-21d}}) so cached replays stay true over time."""
-    if isinstance(obj, str):
-        return _REL_DATE.sub(lambda m: (today + timedelta(days=int(m.group(1)))).isoformat(), obj)
-    if isinstance(obj, list):
-        return [_resolve_dates(o, today) for o in obj]
-    if isinstance(obj, dict):
-        return {k: _resolve_dates(v, today) for k, v in obj.items()}
-    return obj
-
-
-@lru_cache
-def _raw_fixture(name: str) -> dict[str, Any]:
-    path = FIXTURES_DIR / f"{name}.json"
-    if not path.exists():
-        return {}
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def fixture(name: str) -> dict[str, Any]:
-    return _resolve_dates(_raw_fixture(name), date.today())
-
-
-def mode() -> str:
-    return get_settings().tools_mode

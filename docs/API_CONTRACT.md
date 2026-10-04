@@ -19,26 +19,30 @@ Owner: IMPLEMENTATION (backend). Consumers: apps/web. Machine-readable schema: [
 ### `GET /app/config`  ← fetch once at startup; **landing page must render even if this fails**
 ```json
 {
-  "env": "dev|demo|test|prod", "version": "0.1.0",
-  "auth": { "mode": "local|clerk", "demo_login": true, "sign_up": false },
-  "features": { "landing_page": true, "demo": true, "benchmark": true, "simulated_inbox": true },
-  "integrations": { "ai": "live|offline", "web_search": "live|offline", "email": "live|offline",
-                    "storage": "cloud|local", "antivirus": "on|off", "ocr": "on|off" },
+  "env": "dev|test|prod", "version": "0.1.0",
+  "auth": { "mode": "clerk", "sign_up": true, "demo_login": false },
+  "features": { "landing_page": true, "demo": false, "benchmark": false, "simulated_inbox": false },
+  "integrations": { "ai": "live|missing", "web_search": "live|missing", "domain_lookup": "live", "gst_registry": "unavailable",
+                    "email": "live|missing", "email_allowlist_only": true, "storage": "cloud|local", "antivirus": "on|off",
+                    "background_jobs": "inline|worker|missing" },
   "limits": { "max_upload_mb": 15, "max_import_mb": 5 }
 }
 ```
-UI rules:
-| Flag false → hide | |
-|---|---|
-| `features.demo` | Dashboard "Demo invoices" panel, Policy "Demo: agent animation speed", any demo copy |
-| `features.simulated_inbox` | "Simulated vendor inbox / Deliver vendor reply" buttons on the case page |
-| `features.benchmark` | Benchmark nav item + page |
-| `auth.demo_login` | Demo-user picker on `/login` (in clerk mode render `<SignIn/>` instead) |
-| `features.landing_page` | Public landing at `/` (signed-in users go to `/dashboard`) |
-Show an "Offline mode" badge only when `features.demo` is true and some integration is `offline`.
+There is no demo, offline or mock mode. `features.demo/benchmark/simulated_inbox` and `auth.demo_login` are always `false` and will
+be removed once the web app stops reading them. Show a **Live** indicator; list integrations that are `missing` as
+"not configured — affected checks report *could not verify*".
 
-`GET /auth/config` → `{mode, demo_login}` (kept for compatibility; prefer `/app/config`).
-`GET /auth/demo-users` → `[{id, name, email, role, workspace: {id, name}}]`, `POST /auth/demo-login {user_id}` → `{token, user}` — 404 unless `auth.demo_login`.
+`GET /auth/config` → `{mode: "clerk", demo_login: false}` (kept for compatibility; prefer `/app/config`).
+Removed (answer **410 Gone** until the web app no longer calls them, then deleted): `GET /auth/demo-users`, `POST /auth/demo-login`,
+`POST /demo/seed`, `GET /demo/files/{name}`, `POST /demo/vendor-reply/{id}`, `PUT /demo/speed`, `GET /benchmark/summary`.
+
+### Check results ("could not verify")
+`case.checks[<name>] = {status, reason, ...}` with `status` one of `passed | fired | skipped | could_not_verify | failed`.
+`skipped` = not applicable to this invoice; `could_not_verify` = a source failed or data was missing (never a pass, never adds points);
+`failed` = the agent crashed. A **required** check that is `skipped`, `could_not_verify` or `failed` holds the invoice; the gate lists
+them in `recommendation.gate.could_not_verify: [{check, status, reason}]` and as reasons `"Could not verify: <check> — <reason>"`.
+SSE event `check.could_not_verify` `{agent, status: "warning", message, data: {check, reason}}` is emitted at the moment it happens.
+`recommendation.summary_source`: `"ai"` or `"engine"` (AI unavailable — show "Summary written by the risk engine").
 
 ## 2. Onboarding (new workspace checklist)
 
@@ -143,7 +147,7 @@ Rules: import vendors **before** invoices/POs (they reference vendors by GSTIN o
 | `POST /cases/{id}/close {outcome, resolution}` | approver (accountant for auto-cleared) |
 | **new** `GET /cases/{id}/notes` → `{items:[{id,text,author,author_id,author_role,at}]}` | any |
 | **new** `POST /cases/{id}/notes {text}` | accountant+ → note (201). Show as a comment thread on the case |
-| `POST /demo/vendor-reply/{id}?kind=legit|spoof` | **only when `features.simulated_inbox`** |
+| `POST /cases/{id}/vendor-reply {from_email, subject?, body}` | accountant+. Records a reply received outside Probity (statements stay unverified) |
 
 ## 6. Notifications (per user)
 
@@ -174,3 +178,10 @@ PUT validates weights/tiers/escalation rules → 400 with the problems; DELETE r
   `author_role` on case notes. Migration 0006 (provenance columns).
 - 2026-10-04 — v1.4: `GET /cases/{id}/invoice-risk` (policy-driven, explainable invoice risk with optional LLM narrative) and
   `GET|PUT|DELETE /workspace/invoice-risk-policy`. Additive; the case score and existing fields are unchanged.
+- 2026-10-04 — v2.0 (real data only): `/app/config` reshaped (Clerk only, integrations `live|missing`, `gst_registry: unavailable`);
+  demo/benchmark endpoints → 410; check status `could_not_verify` + SSE `check.could_not_verify` + `gate.could_not_verify`;
+  `GET /vendors/{id}` gains `gst {gstin_format, registry_status: "could_not_verify", registry_reason}` and
+  `gst_manual {gstin, legal_name, status, note, entered_by:{id,name}, entered_at, stale, source:"manual", label}`;
+  `PUT /vendors/{id}/gst-manual {legal_name?, status: Active|Cancelled|Suspended, note?}` (accountant+) and `DELETE` (204);
+  invitations return `email_sent`/`email_note`; email to addresses outside `EMAIL_ALLOWLIST` → 400 and audited `email.blocked`.
+  Migration 0007 (`vendors.gst_manual`).

@@ -1,4 +1,4 @@
-"""Celery worker: investigations run here when TASK_BACKEND=celery (production).
+"""Celery worker (optional): investigations run here when TASK_BACKEND=celery. The default is inline (API process).
 
     celery -A probity.worker worker -B --loglevel=INFO --concurrency=4      (Linux / Docker)
     celery -A probity.worker worker -B --pool=solo --loglevel=INFO          (Windows dev)
@@ -9,10 +9,8 @@ redelivered message never re-runs a finished investigation.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 
 from celery import Celery
-from sqlalchemy import select
 
 from probity.config import get_settings
 from probity.logging import configure_logging, get_logger
@@ -20,6 +18,8 @@ from probity.logging import configure_logging, get_logger
 configure_logging()
 log = get_logger("worker")
 _settings = get_settings()
+print(_settings.checklist_text(), flush=True)
+_settings.validate_required()  # the worker refuses to start with missing required settings, like the API
 
 app = Celery("probity", broker=_settings.redis_url or "memory://")
 app.conf.update(
@@ -59,29 +59,6 @@ def run_case(self, workspace_id: str, case_id: str, depth: int = 0) -> str:  # t
 
 @app.task(name="probity.followups")
 def followups() -> int:
-    """Flag verification emails whose follow-up date passed without a vendor reply (never auto-sends)."""
-    from probity.db.models import Case, Draft, Workspace
-    from probity.db.session import session_scope
-    from probity.events import emit
+    from probity import services
 
-    now = datetime.now(timezone.utc)
-    flagged = 0
-    with session_scope() as s:
-        workspaces = [w.id for w in s.scalars(select(Workspace))]
-    for ws in workspaces:
-        with session_scope(ws) as s:
-            due = s.scalars(select(Draft).where(Draft.workspace_id == ws, Draft.status == "sent", Draft.followup_at <= now))
-            for d in due:
-                case = s.get(Case, d.case_id)
-                if case is None or case.status != "AWAITING_VENDOR":
-                    continue
-                d.status = "followup_due"
-                from probity.notify import notify
-
-                notify(s, ws, "approver", "followup_due", f"No vendor reply on case #{case.number}",
-                       f"Verification email to {d.to_email} sent {d.sent_at:%Y-%m-%d} has no reply. Call the known contact or send a reminder.", d.case_id)
-                flagged += 1
-                emit(ws, d.case_id, "action.sent", agent="action", status="waiting",
-                     message=f"No reply from {d.to_email} since {d.sent_at:%Y-%m-%d}; follow-up due — draft a reminder or call the known contact")
-    log.info("followups.checked", flagged=flagged)
-    return flagged
+    return services.check_followups()
