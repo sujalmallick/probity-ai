@@ -52,6 +52,17 @@ def _is_utf8(b: bytes) -> bool:
         return False
 
 
+def extract(data: bytes, mime: str) -> tuple[list[str], bool]:
+    """Return (text per page, used_ocr)."""
+    if mime.startswith("image/"):
+        return _ocr_image(data), True
+    pages = extract_text(data, mime)
+    return pages, mime == "application/pdf" and _OCR_MARK in pages[:1]
+
+
+_OCR_MARK = "<<ocr>>"  # sentinel prepended to pages that came from OCR
+
+
 def extract_text(data: bytes, mime: str) -> list[str]:
     """Return text per page."""
     if len(data) > MAX_BYTES:
@@ -66,7 +77,7 @@ def extract_text(data: bytes, mime: str) -> list[str]:
             for p in pdf.pages:
                 pages.append(p.extract_text() or "")
         if not any(t.strip() for t in pages):
-            return _ocr_pdf(data)
+            return [_OCR_MARK] + _ocr_pdf(data)
         return pages
     if mime == "message/rfc822":
         msg = email.message_from_bytes(data, policy=policy.default)
@@ -81,17 +92,40 @@ def extract_text(data: bytes, mime: str) -> list[str]:
     raise UnsupportedDocument(mime)
 
 
-def _ocr_image(data: bytes) -> list[str]:
+def _tesseract():  # type: ignore[no-untyped-def]
+    from probity.config import get_settings
+
+    if not get_settings().ocr_enabled:
+        raise UnsupportedDocument("OCR is disabled (OCR_ENABLED=false)")
     try:
         import pytesseract  # type: ignore[import-not-found]
-        from PIL import Image
-    except ImportError as e:  # pragma: no cover - depends on host
-        raise UnsupportedDocument("OCR unavailable: install tesseract + pytesseract to process images") from e
-    return [pytesseract.image_to_string(Image.open(io.BytesIO(data)))]  # pragma: no cover
+
+        pytesseract.get_tesseract_version()
+    except Exception as e:  # noqa: BLE001
+        raise UnsupportedDocument("OCR unavailable: the tesseract binary is not installed on this host") from e
+    return pytesseract
 
 
-def _ocr_pdf(data: bytes) -> list[str]:  # pragma: no cover - depends on host
-    raise UnsupportedDocument("Scanned PDF with no text layer: OCR unavailable on this host")
+def _ocr_image(data: bytes) -> list[str]:
+    from PIL import Image
+
+    tess = _tesseract()
+    img = Image.open(io.BytesIO(data))
+    if img.width * img.height > 40_000_000:
+        raise UnsupportedDocument("image too large")
+    return [tess.image_to_string(img.convert("L"), config="--psm 6")]
+
+
+def _ocr_pdf(data: bytes) -> list[str]:
+    import pdfplumber
+
+    tess = _tesseract()
+    out = []
+    with pdfplumber.open(io.BytesIO(data)) as pdf:
+        for page in pdf.pages[:MAX_PAGES]:
+            img = page.to_image(resolution=250).original.convert("L")
+            out.append(tess.image_to_string(img, config="--psm 6"))
+    return out
 
 
 # ---------------------------------------------------------------- labelled-field parser
@@ -116,6 +150,9 @@ _LABELS: dict[str, list[str]] = {
 }
 _MONEY_FIELDS = {"subtotal", "tax", "total"}
 _LINE_RE = re.compile(r"^(?P<desc>[A-Za-z][\w &/().,'-]*?)\s+(?P<qty>\d[\d,]*)\s+(?P<price>[\d,]+\.\d{2})\s+(?P<amt>[\d,]+\.\d{2})$")
+
+
+OCR_CONFIDENCE_PENALTY = 0.15  # OCR'd values are less certain than a text layer
 
 
 def _field(value: Any, raw: str, snippet: str, page: int, confidence: float) -> dict:

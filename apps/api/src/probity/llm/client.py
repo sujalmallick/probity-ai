@@ -145,7 +145,7 @@ def generate(
 def _anthropic_parse(schema: type[T], system: str, user: str, model: str) -> tuple[T, int, int]:
     import anthropic
 
-    client = anthropic.Anthropic()
+    client = anthropic.Anthropic(api_key=get_settings().anthropic_api_key or None, max_retries=2, timeout=90)
     resp = client.messages.parse(
         model=model,
         max_tokens=16000,

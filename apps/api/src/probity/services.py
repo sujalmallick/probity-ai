@@ -146,14 +146,16 @@ def upload_document(s: Session, user: User, filename: str, data: bytes) -> tuple
     if existing:
         prior = s.scalars(select(Case).where(Case.document_id == existing.id).order_by(Case.created_at.desc())).first()
         return existing, prior.id if prior else existing.id
-    storage = get_settings().storage_dir / user.workspace_id
-    storage.mkdir(parents=True, exist_ok=True)
-    path = storage / f"{digest}"
-    path.write_bytes(data)
-    doc = Document(workspace_id=user.workspace_id, sha256=digest, filename=filename[:300], mime=mime, size=len(data), storage_path=str(path), uploaded_by=user.id)
+    from probity import storage
+    from probity.ingestion.scan import clamav_scan, reject_active_content
+
+    reject_active_content(data, mime)
+    av = clamav_scan(data)
+    ref = storage.put(user.workspace_id, digest, data, mime)
+    doc = Document(workspace_id=user.workspace_id, sha256=digest, filename=filename[:300], mime=mime, size=len(data), storage_path=ref, uploaded_by=user.id)
     s.add(doc)
     s.flush()
-    audit(s, user.workspace_id, user.id, "document.uploaded", doc.id, {"sha256": digest, "filename": filename, "mime": mime})
+    audit(s, user.workspace_id, user.id, "document.uploaded", doc.id, {"sha256": digest, "filename": filename, "mime": mime, "antivirus": av})
     return doc, None
 
 
@@ -259,11 +261,17 @@ def send_draft(s: Session, user: User, case_id: str, draft_id: str, override_unv
         raise BadRequest("recipient comes from the invoice, not the verified vendor master — explicit approver override required")
     if case.status != "AWAITING_HUMAN":
         raise Conflict(f"case is {case.status}")
+    from probity import mailer
+
+    try:
+        provider_id = mailer.send_case_email(case.id, d.to_email, d.subject, d.body)
+    except mailer.MailError as e:
+        raise BadRequest(f"email not sent: {e}") from e
     d.status, d.approved_by, d.sent_at = "sent", user.id, datetime.now(timezone.utc)
     d.followup_at = d.sent_at + timedelta(days=2)
-    s.add(Message(workspace_id=user.workspace_id, case_id=case.id, direction="out", from_email="ap@probity-demo.in", to_email=d.to_email, subject=d.subject, body=d.body))
+    s.add(Message(workspace_id=user.workspace_id, case_id=case.id, direction="out", from_email=get_settings().email_from, to_email=d.to_email, subject=d.subject, body=d.body))
     transition(case, "AWAITING_VENDOR")
-    audit(s, user.workspace_id, user.id, "draft.sent", d.id, {"to": d.to_email, "case_id": case.id, "override": override_unverified_recipient})
+    audit(s, user.workspace_id, user.id, "draft.sent", d.id, {"to": d.to_email, "case_id": case.id, "override": override_unverified_recipient, "provider_id": provider_id})
     s.flush()
     emit(user.workspace_id, case.id, "action.sent", agent="action", status="done", message=f"Verification email sent to {d.to_email}; follow-up {d.followup_at.date()}")
     return d

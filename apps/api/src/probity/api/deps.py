@@ -6,15 +6,13 @@ import threading
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterator
-from datetime import datetime, timedelta, timezone
 
-import jwt
-from fastapi import Depends, Header, HTTPException, Query, Request
+from fastapi import Depends, Header, HTTPException, Request
 from sqlalchemy.orm import Session
 
-from probity.config import get_settings
+from probity.auth import AuthError, Principal, authenticate, issue_local_token
 from probity.db.models import User
-from probity.db.session import get_sessionmaker, set_tenant
+from probity.db.session import get_sessionmaker
 from probity.redis_client import sync_redis
 
 
@@ -30,41 +28,35 @@ def db() -> Iterator[Session]:
         s.close()
 
 
-def issue_token(user: User) -> str:
-    st = get_settings()
-    now = datetime.now(timezone.utc)
-    return jwt.encode(
-        {"sub": user.id, "ws": user.workspace_id, "role": user.role, "iat": now, "exp": now + timedelta(minutes=st.jwt_ttl_minutes)},
-        st.jwt_secret,
-        algorithm="HS256",
-    )
+issue_token = issue_local_token
 
 
-def _decode(token: str) -> dict:
-    st = get_settings()
-    if st.auth_mode != "local":
-        raise HTTPException(501, "Clerk/Supabase JWKS verification not configured in this build")
-    try:
-        return jwt.decode(token, st.jwt_secret, algorithms=["HS256"])
-    except jwt.PyJWTError as e:
-        raise HTTPException(401, "invalid or expired token") from e
-
-
-def current_user(
-    s: Session = Depends(db),
-    authorization: str | None = Header(default=None),
-    token: str | None = Query(default=None, description="SSE only: EventSource cannot set headers"),
-) -> User:
-    raw = authorization.split(" ", 1)[1] if authorization and authorization.lower().startswith("bearer ") else token
-    if not raw:
+def principal(request: Request, s: Session = Depends(db), authorization: str | None = Header(default=None)) -> Principal:
+    """Bearer token from the Authorization header only (never from the URL)."""
+    if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(401, "missing bearer token")
-    claims = _decode(raw)
-    user = s.get(User, claims["sub"])
-    if user is None or user.workspace_id != claims["ws"] or not user.active:
-        raise HTTPException(401, "unknown user")
-    set_tenant(s, user.workspace_id)
-    _rate_limit(f"u:{user.id}", 120, 60)
-    return user
+    try:
+        p = authenticate(authorization.split(" ", 1)[1].strip(), s)
+    except AuthError as e:
+        raise HTTPException(401, str(e)) from e
+    request.state.principal = p
+    _rate_limit(f"u:{p.user.id}", 120, 60)
+    return p
+
+
+def current_user(p: Principal = Depends(principal)) -> User:
+    return p.user
+
+
+def require_mfa_for_approvals(p: Principal = Depends(principal), s: Session = Depends(db)) -> User:
+    """Approver actions (decisions, sends, out-of-band confirmations) require a second factor when the
+    workspace policy says so (Security.md §2). Enforced only with Clerk, which reports factor verification."""
+    from probity.db.models import Workspace
+    from probity.policy import get_policy
+
+    if get_policy(s.get(Workspace, p.user.workspace_id)).get("require_mfa_for_approvals") and not p.mfa_verified:
+        raise HTTPException(403, "this action requires multi-factor authentication — enable MFA in your account and sign in again")
+    return p.user
 
 
 _buckets: dict[str, deque[float]] = defaultdict(deque)

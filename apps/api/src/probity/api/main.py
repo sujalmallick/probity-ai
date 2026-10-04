@@ -10,16 +10,16 @@ from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from probity import services as svc
-from probity.api.deps import current_user, db, issue_token, upload_limit
+from probity.api.deps import current_user, db, issue_token, require_mfa_for_approvals, upload_limit
 from probity.config import REPO_ROOT, get_settings
 from probity.db.audit import audit, verify_chain
-from probity.db.models import iso, AuditLog, Case, CaseMemory, Document, HistoricalInvoice, User, Vendor, VendorBankAccount, VendorContact, VendorDomain, Workspace
+from probity.db.models import iso, AuditLog, Invitation, Case, CaseMemory, Document, HistoricalInvoice, User, Vendor, VendorBankAccount, VendorContact, VendorDomain, Workspace
 from probity.db.session import init_db, session_scope, set_tenant
 from probity.guardrails import crypto
 from probity.ingestion.parse import UnsupportedDocument
@@ -112,9 +112,15 @@ def ready(s: Session = Depends(db)) -> dict:
 
 # ---------------------------------------------------------------- auth (AUTH_MODE=local, non-prod)
 
+@app.get(f"{API}/auth/config")
+def auth_config() -> dict:
+    st = get_settings()
+    return {"mode": st.auth_mode, "demo_login": st.auth_mode == "local" and st.env != "prod"}
+
+
 @app.get(f"{API}/auth/demo-users")
 def demo_users(s: Session = Depends(db)) -> list[dict]:
-    if get_settings().auth_mode != "local":
+    if get_settings().auth_mode != "local" or get_settings().env == "prod":
         raise HTTPException(404, "not available")
     return [{"id": u.id, "name": u.name, "email": u.email, "role": u.role} for u in s.scalars(select(User).order_by(User.role))]
 
@@ -125,7 +131,7 @@ class DemoLogin(BaseModel):
 
 @app.post(f"{API}/auth/demo-login")
 def demo_login(body: DemoLogin, request: Request, s: Session = Depends(db)) -> dict:
-    if get_settings().auth_mode != "local":
+    if get_settings().auth_mode != "local" or get_settings().env == "prod":
         raise HTTPException(404, "not available")
     u = s.get(User, body.user_id)
     if not u:
@@ -152,7 +158,8 @@ def put_ws_policy(body: dict[str, Any], request: Request, user: User = Depends(c
     svc.require_role(user, "owner")
     ws = s.get(Workspace, user.workspace_id)
     assert ws
-    allowed = {"auto_clear_enabled", "auto_clear_max_amount_minor", "external_research_amount_minor", "dual_approval_amount_minor", "weight_overrides", "demo_agent_delay_ms"}
+    allowed = {"auto_clear_enabled", "auto_clear_max_amount_minor", "external_research_amount_minor", "dual_approval_amount_minor", "weight_overrides",
+               "demo_agent_delay_ms", "require_mfa_for_approvals"}
     bad = set(body) - allowed
     if bad:
         raise svc.BadRequest(f"unknown policy keys: {sorted(bad)}")
@@ -160,6 +167,79 @@ def put_ws_policy(body: dict[str, Any], request: Request, user: User = Depends(c
     ws.policy = {**before, **body}
     audit(s, ws.id, user.id, "policy.updated", ws.id, {"before": before, "after": ws.policy}, request.state.request_id)
     return get_policy(ws)
+
+
+# ---------------------------------------------------------------- team: members, invitations, roles
+
+ROLE_NAMES = Literal["viewer", "accountant", "approver", "owner"]
+
+
+@app.get(f"{API}/workspace/members")
+def members(user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
+    rows = s.scalars(select(User).where(User.workspace_id == user.workspace_id).order_by(User.created_at))
+    return {"items": [{"id": u.id, "name": u.name, "email": u.email, "role": u.role, "active": u.active, "linked": bool(u.external_id)} for u in rows]}
+
+
+class InviteIn(BaseModel):
+    email: str = Field(min_length=3, max_length=200, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+    role: ROLE_NAMES
+
+
+@app.get(f"{API}/workspace/invitations")
+def invitations(user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
+    svc.require_role(user, "owner")
+    rows = s.scalars(select(Invitation).where(Invitation.workspace_id == user.workspace_id, Invitation.accepted_at.is_(None)).order_by(Invitation.created_at.desc()))
+    return {"items": [{"id": i.id, "email": i.email, "role": i.role, "created_at": iso(i.created_at)} for i in rows]}
+
+
+@app.post(f"{API}/workspace/invitations", status_code=201)
+def invite(body: InviteIn, request: Request, user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
+    svc.require_role(user, "owner")
+    email = body.email.strip().lower()
+    if s.scalars(select(User).where(User.email == email)).first():
+        raise svc.Conflict("a user with this email already exists")
+    inv = Invitation(workspace_id=user.workspace_id, email=email, role=body.role, invited_by=user.id)
+    s.add(inv)
+    s.flush()
+    audit(s, user.workspace_id, user.id, "invitation.created", inv.id, {"email": email, "role": body.role}, request.state.request_id)
+    from probity import mailer
+
+    mailer.send_invitation(email, user.name, body.role)
+    return {"id": inv.id, "email": email, "role": body.role, "sign_in_url": get_settings().public_app_url}
+
+
+@app.delete(f"{API}/workspace/invitations/{{inv_id}}", status_code=204)
+def revoke_invite(inv_id: str, request: Request, user: User = Depends(current_user), s: Session = Depends(db)) -> None:
+    svc.require_role(user, "owner")
+    inv = s.get(Invitation, inv_id)
+    if not inv or inv.workspace_id != user.workspace_id or inv.accepted_at:
+        raise LookupError("invitation not found")
+    s.delete(inv)
+    audit(s, user.workspace_id, user.id, "invitation.revoked", inv_id, {"email": inv.email}, request.state.request_id)
+
+
+class MemberPatch(BaseModel):
+    role: ROLE_NAMES | None = None
+    active: bool | None = None
+
+
+@app.patch(f"{API}/workspace/members/{{member_id}}")
+def update_member(member_id: str, body: MemberPatch, request: Request, user: User = Depends(require_mfa_for_approvals), s: Session = Depends(db)) -> dict:
+    svc.require_role(user, "owner")
+    m = s.get(User, member_id)
+    if not m or m.workspace_id != user.workspace_id:
+        raise LookupError("member not found")
+    owners = [u for u in s.scalars(select(User).where(User.workspace_id == user.workspace_id, User.role == "owner", User.active.is_(True)))]
+    losing_owner = m.role == "owner" and m.active and ((body.role and body.role != "owner") or body.active is False)
+    if losing_owner and len(owners) <= 1:
+        raise svc.Conflict("a workspace needs at least one active owner")
+    before = {"role": m.role, "active": m.active}
+    if body.role:
+        m.role = body.role
+    if body.active is not None:
+        m.active = body.active
+    audit(s, user.workspace_id, user.id, "member.updated", m.id, {"before": before, "after": {"role": m.role, "active": m.active}}, request.state.request_id)
+    return {"id": m.id, "role": m.role, "active": m.active}
 
 
 # ---------------------------------------------------------------- documents & cases
@@ -186,7 +266,10 @@ def get_document_file(doc_id: str, user: User = Depends(current_user), s: Sessio
     d = s.get(Document, doc_id)
     if not d or d.workspace_id != user.workspace_id:
         raise LookupError("document not found")
-    return FileResponse(d.storage_path, media_type=d.mime, filename=d.filename, content_disposition_type="inline")
+    from probity import storage
+
+    return Response(storage.get(d.storage_path), media_type=d.mime, headers={
+        "Content-Disposition": f'inline; filename="{d.filename}"', "Content-Security-Policy": "sandbox", "X-Content-Type-Options": "nosniff"})
 
 
 class CreateCase(BaseModel):
@@ -329,7 +412,7 @@ class DecisionIn(BaseModel):
 
 
 @app.post(f"{API}/cases/{{case_id}}/decision")
-def decision(case_id: str, body: DecisionIn, user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
+def decision(case_id: str, body: DecisionIn, user: User = Depends(require_mfa_for_approvals), s: Session = Depends(db)) -> dict:
     c = svc.decide(s, user, case_id, body.decision, body.reason)
     return {"status": c.status}
 
@@ -367,7 +450,7 @@ class SendIn(BaseModel):
 
 
 @app.post(f"{API}/cases/{{case_id}}/drafts/{{draft_id}}/send")
-def send(case_id: str, draft_id: str, body: SendIn | None = None, user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
+def send(case_id: str, draft_id: str, body: SendIn | None = None, user: User = Depends(require_mfa_for_approvals), s: Session = Depends(db)) -> dict:
     d = svc.send_draft(s, user, case_id, draft_id, (body or SendIn()).override_unverified_recipient)
     return {"status": d.status, "sent_at": d.sent_at}
 
@@ -391,7 +474,7 @@ class OOBIn(BaseModel):
 
 
 @app.post(f"{API}/cases/{{case_id}}/out-of-band-confirmation")
-def oob(case_id: str, body: OOBIn, user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
+def oob(case_id: str, body: OOBIn, user: User = Depends(require_mfa_for_approvals), s: Session = Depends(db)) -> dict:
     return svc.confirm_out_of_band(s, user, case_id, body.claim_ids, body.method, body.note)
 
 
@@ -415,8 +498,56 @@ def close(case_id: str, body: CloseIn, user: User = Depends(current_user), s: Se
 
 
 @app.get(f"{API}/cases/{{case_id}}/reveal-account")
-def reveal(case_id: str, user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
+def reveal(case_id: str, user: User = Depends(require_mfa_for_approvals), s: Session = Depends(db)) -> dict:
     return {"bank_account": svc.reveal_account(s, user, svc.get_case(s, user.workspace_id, case_id))}
+
+
+# ---------------------------------------------------------------- inbound email webhook
+
+@app.post(f"{API}/webhooks/inbound-email")
+async def inbound_email(request: Request) -> dict:
+    """Vendor replies. Your email provider (Resend inbound, SES → Lambda, Cloudflare Email Worker, Mailgun
+    route) POSTs JSON {from, to, subject, text, dkim?}. Signed: X-Probity-Timestamp + X-Probity-Signature =
+    hex HMAC-SHA256(INBOUND_EMAIL_SECRET, f"{timestamp}.{raw body}"), 5-minute replay window."""
+    import hashlib
+    import hmac as _hmac
+    import re as _re
+    import time as _time
+
+    st = get_settings()
+    if not st.inbound_email_secret:
+        raise HTTPException(404, "inbound email not configured")
+    raw = await request.body()
+    ts = request.headers.get("X-Probity-Timestamp", "")
+    sig = request.headers.get("X-Probity-Signature", "")
+    expected = _hmac.new(st.inbound_email_secret.encode(), f"{ts}.".encode() + raw, hashlib.sha256).hexdigest()
+    if not ts.isdigit() or abs(_time.time() - int(ts)) > 300 or not _hmac.compare_digest(expected, sig):
+        raise HTTPException(401, "invalid signature")
+    msg = json.loads(raw)
+    rcpts = msg.get("to") if isinstance(msg.get("to"), list) else [msg.get("to", "")]
+    case_id = next((m.group(1) for r in rcpts if (m := _re.search(r"case\+(case_[a-z0-9]+)@", str(r), _re.I))), None)
+    if not case_id:
+        raise HTTPException(422, "no case address in recipients")
+
+    def _deliver() -> dict:
+        with session_scope() as s:
+            if s.get_bind().dialect.name == "postgresql":
+                from sqlalchemy import text as _text
+
+                ws = s.execute(_text("SELECT probity_case_workspace(:c)"), {"c": case_id}).scalar()
+            else:
+                c = s.get(Case, case_id)
+                ws = c.workspace_id if c else None
+        if not ws:
+            raise LookupError("case not found")
+        with session_scope(ws) as s:
+            body = str(msg.get("text") or "")[:20000]
+            out = svc.vendor_reply(s, ws, "inbound-email", case_id, str(msg.get("from", "")), str(msg.get("subject", ""))[:300], body)
+            if msg.get("dkim") and str(msg["dkim"]).lower() != "pass":
+                out["indicators"].append("Sender failed DKIM verification")
+            return out
+
+    return await asyncio.to_thread(_deliver)
 
 
 # ---------------------------------------------------------------- vendors, memory
@@ -455,7 +586,7 @@ class BankIn(BaseModel):
 
 
 @app.post(f"{API}/vendors/{{vendor_id}}/bank-accounts", status_code=201)
-def add_bank(vendor_id: str, body: BankIn, request: Request, user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
+def add_bank(vendor_id: str, body: BankIn, request: Request, user: User = Depends(require_mfa_for_approvals), s: Session = Depends(db)) -> dict:
     svc.require_role(user, "approver")
     v = s.get(Vendor, vendor_id)
     if not v or v.workspace_id != user.workspace_id:

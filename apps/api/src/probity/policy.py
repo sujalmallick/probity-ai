@@ -16,6 +16,7 @@ DEFAULT_POLICY: dict[str, Any] = {
     "weights_version": CURRENT_VERSION,
     "weight_overrides": {},
     "previously_flagged_blocks_auto_clear": True,
+    "require_mfa_for_approvals": False,  # turn on once approvers have MFA enrolled in Clerk
 }
 
 

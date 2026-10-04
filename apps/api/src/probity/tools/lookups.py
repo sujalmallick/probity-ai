@@ -11,7 +11,10 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 
 from probity.tools.base import Budget, fixture, mode
-from probity.tools.fetch import FetchBlocked, safe_get
+import httpx
+
+from probity.config import get_settings
+from probity.tools.fetch import FetchBlocked, check_url, safe_get
 
 T1_SUFFIXES = (".gov.in", ".nic.in", "mca.gov.in", "gst.gov.in")
 T2_DOMAINS = ("indiamart.com", "justdial.com", "zaubacorp.com", "tofler.in", "economictimes.indiatimes.com", "thehindubusinessline.com")
@@ -68,7 +71,23 @@ def web_search(query: str, budget: Budget) -> list[SearchHit]:
     if mode() in ("cached", "mock"):
         hits = fixture("web_search").get(query.lower().strip(), [])
         return [SearchHit(h["url"], h["title"], h["snippet"], source_tier(h["url"])) for h in hits]
-    return []  # live search provider (Tavily/Serper) plugs in here; not configured in this build
+    key = get_settings().tavily_api_key
+    if not key:
+        return []
+    try:
+        r = httpx.post("https://api.tavily.com/search", json={"query": query, "max_results": 5, "search_depth": "basic", "include_answer": False},
+                       headers={"Authorization": f"Bearer {key}"}, timeout=15)
+        r.raise_for_status()
+    except httpx.HTTPError:
+        return []
+    out = []
+    for h in r.json().get("results", []):
+        try:
+            check_url(h["url"])  # never surface links to private/internal hosts
+        except FetchBlocked:
+            continue
+        out.append(SearchHit(h["url"], h.get("title", ""), (h.get("content") or "")[:600], source_tier(h["url"])))
+    return out
 
 
 def fetch_page(url: str, budget: Budget) -> str | None:
