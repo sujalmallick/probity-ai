@@ -23,7 +23,9 @@ from probity.db.models import iso, AuditLog, Case, CaseMemory, Document, Histori
 from probity.db.session import init_db, session_scope, set_tenant
 from probity.guardrails import crypto
 from probity.ingestion.parse import UnsupportedDocument
+from probity.events import event_payload
 from probity.policy import get_policy
+from probity.redis_client import async_redis, channel
 from probity.risk.engine import WEIGHTS
 
 app = FastAPI(title="Probity API", version="0.1.0", description="Evidence before payment.")
@@ -260,26 +262,61 @@ def export_case(case_id: str, request: Request, format: Literal["json"] = "json"
 
 @app.get(f"{API}/cases/{{case_id}}/events")
 async def case_events(case_id: str, request: Request, user: User = Depends(current_user)) -> StreamingResponse:
+    """SSE agent stream. Backfills from the database after Last-Event-ID, then streams live events from
+    Redis pub/sub (or polls the database when Redis is not configured). Keepalive every 15 s."""
     ws = user.workspace_id
     with session_scope(ws) as s:
         svc.get_case(s, ws, case_id)
     last = int(request.headers.get("Last-Event-ID") or request.query_params.get("last_event_id") or 0)
 
+    def frame(p: dict) -> str:
+        return f"id: {p['seq']}\nevent: message\ndata: {json.dumps(p, default=str)}\n\n"
+
+    async def backfill():  # type: ignore[no-untyped-def]
+        nonlocal last
+        rows = await asyncio.to_thread(svc.events_after, ws, case_id, last)
+        out = []
+        for r in rows:
+            last = r.id
+            out.append(frame(event_payload(r)))
+        return out
+
     async def gen():  # type: ignore[no-untyped-def]
         nonlocal last
-        idle = 0
-        while True:
-            if await request.is_disconnected():
-                break
-            rows = await asyncio.to_thread(svc.events_after, ws, case_id, last)
-            for r in rows:
-                last = r.id
-                payload = {"seq": r.id, "ts": iso(r.ts), "case_id": case_id, "type": r.type, "agent": r.agent, "status": r.status, "message": r.message, "data": r.data}
-                yield f"id: {r.id}\nevent: message\ndata: {json.dumps(payload, default=str)}\n\n"
-            idle = 0 if rows else idle + 1
-            if idle and idle % 30 == 0:
-                yield ": keepalive\n\n"
-            await asyncio.sleep(0.25)
+        r = async_redis()
+        pubsub = None
+        if r is not None:
+            pubsub = r.pubsub()
+            await pubsub.subscribe(channel(ws, case_id))  # subscribe before backfill so nothing is missed
+        try:
+            for f in await backfill():
+                yield f
+            idle = 0.0
+            while not await request.is_disconnected():
+                if pubsub is not None:
+                    msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                    if msg and msg.get("type") == "message":
+                        p = json.loads(msg["data"])
+                        if p["seq"] > last:
+                            last = p["seq"]
+                            yield frame(p)
+                        idle = 0.0
+                        continue
+                    idle += 1.0
+                else:
+                    frames = await backfill()
+                    for f in frames:
+                        yield f
+                    idle = 0.0 if frames else idle + 0.5
+                    await asyncio.sleep(0.5)
+                if idle >= 15:
+                    idle = 0.0
+                    yield ": keepalive\n\n"
+        finally:
+            if pubsub is not None:
+                await pubsub.unsubscribe()
+                await pubsub.aclose()
+                await r.aclose()
 
     return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 

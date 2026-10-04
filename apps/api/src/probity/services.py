@@ -99,8 +99,14 @@ def run_sync(flag: bool = True) -> None:
 
 
 def _submit(fn, *args) -> None:  # type: ignore[no-untyped-def]
+    """Run an investigation: inline (tests), on a Celery worker (production), or on the local thread pool."""
     if _SYNC["on"]:
         fn(*args)
+    elif get_settings().task_backend == "celery":
+        from probity.worker import run_case
+
+        workspace_id, case_id, depth = args
+        run_case.apply_async(args=[workspace_id, case_id, depth], queue="probity")
     else:
         _pool.submit(fn, *args)
 

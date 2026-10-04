@@ -14,6 +14,10 @@ os.environ.setdefault("ENV", "test")
 os.environ.setdefault("LLM_MODE", "mock")
 os.environ.setdefault("TOOLS_MODE", "cached")
 os.environ.setdefault("AUTH_MODE", "local")
+# Tests never touch the developer .env services unless asked to.
+os.environ.setdefault("REDIS_URL", "")
+os.environ.setdefault("TASK_BACKEND", "inline")
+os.environ.setdefault("AGENT_DELAY_MS", "0")
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402

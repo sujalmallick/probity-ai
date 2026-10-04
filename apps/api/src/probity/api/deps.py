@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from probity.config import get_settings
 from probity.db.models import User
 from probity.db.session import get_sessionmaker, set_tenant
+from probity.redis_client import sync_redis
 
 
 def db() -> Iterator[Session]:
@@ -71,6 +72,21 @@ _rl_lock = threading.Lock()
 
 
 def _rate_limit(key: str, limit: int, window: int) -> None:
+    """Fixed-window limit in Redis (shared by all API instances); in-process fallback without Redis."""
+    r = sync_redis()
+    if r is not None:
+        try:
+            bucket = f"probity:rl:{key}:{int(time.time()) // window}"
+            n = r.incr(bucket)
+            if n == 1:
+                r.expire(bucket, window + 1)
+            if n > limit:
+                raise HTTPException(429, "rate limit exceeded")
+            return
+        except HTTPException:
+            raise
+        except Exception:  # noqa: BLE001 - Redis down: fall back to local limiting rather than fail open entirely
+            pass
     now = time.monotonic()
     with _rl_lock:
         q = _buckets[key]
