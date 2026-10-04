@@ -5,7 +5,8 @@ import { ClerkProvider, SignedIn, SignedOut, UserButton, useAuth as useClerkAuth
 import { Brain, Building2, ClipboardCheck, FilePlus2, Gauge as GaugeIcon, LogOut, Menu, Moon, PanelLeftClose, PanelLeftOpen, Settings, Sun, Users, WifiOff, X } from "lucide-react";
 import "./index.css";
 import { AuthCtx, useAuth } from "./lib/auth";
-import { api, can, errMsg, setTokenGetter, setUnauthorizedHandler, type Me } from "./lib/api";
+import { api, ApiError, can, errMsg, setTokenGetter, setUnauthorizedHandler, type Me } from "./lib/api";
+import { InvitationChoice, type Invitation } from "./components/InvitationChoice";
 import Login, { SignInUnavailable, SignUpPage } from "./pages/Login";
 import Landing from "./pages/Landing";
 import Dashboard from "./pages/Dashboard";
@@ -272,6 +273,7 @@ function ClerkApp() {
   const clerk = useClerk();
   const [user, setUser] = useState<Me | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [invites, setInvites] = useState<Invitation[] | null>(null);
   useEffect(() => {
     setTokenGetter(() => getToken());
     return () => setTokenGetter(null);
@@ -286,9 +288,20 @@ function ClerkApp() {
     });
     return () => setUnauthorizedHandler(null);
   }, [clerk]);
+  // A first-time user with pending invitations gets 409 `invitation_pending` from /me and must choose: accept one or
+  // start their own workspace. Nobody is added to someone else's workspace without saying yes.
+  const loadMe = () => {
+    setErr(null);
+    api<Me>("/me")
+      .then((me) => { setUser(me); setInvites(null); })
+      .catch((e) => {
+        if (e instanceof ApiError && e.code === "invitation_pending") setInvites((e.details?.invitations as Invitation[]) ?? []);
+        else setErr(errMsg(e));
+      });
+  };
   useEffect(() => {
-    if (isLoaded && isSignedIn) api<Me>("/me").then(setUser).catch((e) => setErr(errMsg(e)));
-    if (isLoaded && !isSignedIn) setUser(null);
+    if (isLoaded && isSignedIn) loadMe();
+    if (isLoaded && !isSignedIn) { setUser(null); setInvites(null); }
   }, [isLoaded, isSignedIn]);
   const cfg = useAppConfig();
   const signOut = () => clerk.signOut({ redirectUrl: "/" });
@@ -309,7 +322,19 @@ function ClerkApp() {
             {cfg.features.landing_page && <Route path="/" element={<Landing signedIn />} />}
             <Route path="*" element={<AppRoutes />} />
           </Routes>
-        ) : <Centered>{err ? <div className="card p-4 text-sm text-high">Could not load your account: {err}</div> : <Spinner size={20} />}</Centered>}
+        ) : invites ? (
+          <InvitationChoice invitations={invites} onJoined={(me) => { setUser(me); setInvites(null); }} onRefresh={loadMe} onSignOut={signOut} />
+        ) : (
+          <Centered>
+            {err ? (
+              <div className="card flex max-w-md flex-col gap-3 p-5 text-sm">
+                <div className="font-semibold">Couldn't load your account</div>
+                <p className="text-muted">{err}</p>
+                <div className="flex gap-2"><button className="btn btn-primary" onClick={loadMe}>Try again</button><button className="btn" onClick={signOut}>Sign out</button></div>
+              </div>
+            ) : <Spinner size={20} />}
+          </Centered>
+        )}
       </SignedIn>
     </AuthCtx.Provider>
   );
