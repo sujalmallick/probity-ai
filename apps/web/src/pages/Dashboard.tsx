@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { AlertTriangle, ArrowRight, CheckCircle2, Clock3, FilePlus2, FileText, Inbox, PauseCircle, ShieldAlert, ShieldCheck, UploadCloud } from "lucide-react";
-import { api, can } from "../lib/api";
+import { api, can, errMsg } from "../lib/api";
 import { useAuth } from "../lib/auth";
-import { inr, relTime, RUNNING, tierColor } from "../lib/format";
+import { inr, money, relTime, RUNNING, tierColor } from "../lib/format";
 import { Skeleton, Spinner, StatusChip, TierChip } from "../components/ui";
 import { isDismissed, OnboardingChecklist, type Onboarding } from "../components/Onboarding";
 
@@ -13,7 +13,7 @@ interface Row {
   status: string;
   vendor_name: string;
   invoice_number: string;
-  amount: { amount_minor: number | null };
+  amount: { amount_minor: number | null; currency?: string | null };
   risk: { score?: number; tier?: string };
   created_at: string;
   outcome: string | null;
@@ -53,7 +53,7 @@ export default function Dashboard() {
   const [err, setErr] = useState<string | null>(null);
 
   const load = () => {
-    api<{ items: Row[] }>("/cases").then((r) => setRows(r.items)).catch((e) => setErr(e.message));
+    api<{ items: Row[] }>("/cases").then((r) => setRows(r.items)).catch((e) => setErr(errMsg(e)));
     api("/dashboard/kpis").then(setKpi).catch(() => {});
   };
   useEffect(() => {
@@ -182,18 +182,18 @@ export default function Dashboard() {
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="text-left text-xs text-muted">
-                        {["Risk", "Case", "Vendor", "Amount", "Status", "Age"].map((h) => <th key={h} className="px-4 py-2 font-medium whitespace-nowrap">{h}</th>)}
+                        {["Risk", "Case", "Vendor", "Amount", "Status", "Age"].map((h) => <th key={h} className="px-3 py-2 font-medium whitespace-nowrap">{h}</th>)}
                       </tr>
                     </thead>
                     <tbody>
                       {shown.map((r) => (
                         <tr key={r.id} className="cursor-pointer border-t border-line transition-colors duration-150 hover:bg-surface-2" onClick={() => nav(`/cases/${r.id}`)}>
-                          <td className="px-4 py-3">{RUNNING.has(r.status) ? <span className="inline-flex items-center gap-1.5 text-xs text-muted"><Spinner size={12} />Investigating</span> : <TierChip tier={r.risk?.tier} score={r.risk?.score} />}</td>
-                          <td className="px-4 py-3 whitespace-nowrap"><Link to={`/cases/${r.id}`} className="font-medium hover:underline" onClick={(e) => e.stopPropagation()}>#{r.number}</Link> <span className="text-muted">· {r.invoice_number ?? "—"}</span></td>
-                          <td className="max-w-[220px] truncate px-4 py-3 whitespace-nowrap" title={r.vendor_name ?? undefined}>{r.vendor_name ?? "—"}</td>
-                          <td className="px-4 py-3 tabular-nums whitespace-nowrap">{inr(r.amount?.amount_minor)}</td>
-                          <td className="px-4 py-3"><StatusChip status={r.status} /></td>
-                          <td className="px-4 py-3 whitespace-nowrap text-muted">{relTime(r.created_at)}</td>
+                          <td className="px-3 py-3">{RUNNING.has(r.status) ? <span className="inline-flex items-center gap-1.5 text-xs text-muted"><Spinner size={12} />Investigating</span> : <TierChip tier={r.risk?.tier} score={r.risk?.score} />}</td>
+                          <td className="px-3 py-3 whitespace-nowrap"><Link to={`/cases/${r.id}`} className="font-medium hover:underline" onClick={(e) => e.stopPropagation()}>#{r.number}</Link> <span className="text-muted">· {r.invoice_number ?? "—"}</span></td>
+                          <td className="max-w-[220px] truncate px-3 py-3 whitespace-nowrap" title={r.vendor_name ?? undefined}>{r.vendor_name ?? "—"}</td>
+                          <td className="px-3 py-3 tabular-nums whitespace-nowrap">{money(r.amount?.amount_minor, r.amount?.currency ?? null)}</td>
+                          <td className="px-3 py-3"><StatusChip status={r.status} /></td>
+                          <td className="px-3 py-3 whitespace-nowrap text-muted">{relTime(r.created_at)}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -254,7 +254,7 @@ function DecisionCard({ row }: { row: Row }) {
         <span className="text-xs text-muted">{relTime(row.created_at)}</span>
       </div>
       <div className="min-w-0">
-        <div className="kpi-value truncate">{inr(row.amount?.amount_minor)}</div>
+        <div className="kpi-value truncate">{money(row.amount?.amount_minor, row.amount?.currency ?? null)}</div>
         <div className="mt-0.5 truncate text-sm text-muted">{row.vendor_name ?? "Unknown vendor"} · {row.invoice_number ?? `#${row.number}`}</div>
       </div>
       <span className="flex items-center gap-1 text-sm font-medium">Review<ArrowRight size={14} className="transition-transform duration-150 group-hover:translate-x-0.5" aria-hidden /></span>

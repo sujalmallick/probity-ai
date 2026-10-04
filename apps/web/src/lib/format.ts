@@ -19,6 +19,18 @@ export function inr(minor: number | null | undefined, paise = false): string {
   return `${neg ? "-" : ""}₹${s}${paise || p ? "." + String(p).padStart(2, "0") : ""}`;
 }
 
+/** An amount in the currency the invoice states. Only INR gets ₹; other currencies keep their code and are never
+ *  converted; with no stated currency the bare number is shown and labelled. */
+export function money(minor: number | null | undefined, currency: string | null | undefined): string {
+  if (minor === null || minor === undefined) return "—";
+  if (currency === "INR") return inr(minor);
+  const n = (minor / 100).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (!currency) return `${n} (currency not stated)`;
+  if (currency === "MIXED") return `${n} (mixed currencies)`;
+  if (currency === "UNRECOGNISED") return `${n} (unrecognised currency)`;
+  return `${currency} ${n}`;
+}
+
 export function relTime(iso: string | null | undefined): string {
   if (!iso) return "";
   const d = new Date(iso);
@@ -64,10 +76,10 @@ export const STATUS_LABEL: Record<string, string> = {
 
 export const RUNNING = new Set(["QUEUED", "EXTRACTING", "INVESTIGATING", "VERIFYING", "SCORING"]);
 
-/** Display value for evidence: minor-unit money fields formatted as ₹. */
-export function evValue(field: string | null, value: unknown): string {
+/** Display value for evidence: minor-unit money fields in the given currency (₹ only for INR). */
+export function evValue(field: string | null, value: unknown, currency: string | null = "INR"): string {
   if (value === null || value === undefined) return "—";
-  if (typeof value === "number" && field && /(price|total|amount|subtotal|tax)/.test(field)) return inr(value);
+  if (typeof value === "number" && field && /(price|total|amount|subtotal|tax)/.test(field)) return money(value, currency);
   if (Array.isArray(value)) return value.join(", ");
   if (typeof value === "object") return JSON.stringify(value);
   return String(value);

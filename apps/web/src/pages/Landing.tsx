@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 const HERO_VIDEO =
   "https://d8j0ntlcm91z4.cloudfront.net/user_38xzZboKViGWJOttwIXH07lWA1P/hf_20260307_083826_e938b29f-a43a-41ec-a153-3d4730578ab8.mp4";
 const REPO_URL = "https://github.com/sujalmallick/probity-ai";
-const DOCS = (f: string) => `${REPO_URL}/blob/main/docs/${f}`;
+const DOCS = (f: string) => `${REPO_URL}/blob/real-data/docs/${f}`;
 
 const NAV = [
   { label: "How it works", href: "#how" },
@@ -208,14 +208,20 @@ function Hero({ signInTo }: { signInTo: string }) {
           aria-hidden
         />
         <div className="absolute inset-0 z-10 flex items-center justify-center">
-          <motion.img
-            src="/landing/hero-dashboard.webp"
-            alt="Preview of the Probity dashboard layout: key numbers, cases that need a decision, the case queue and the risk mix"
-            width={2048}
-            height={1280}
-            style={{ y: dashY, mixBlendMode: "luminosity" }}
-            className="w-[90%] max-w-5xl rounded-2xl"
-          />
+          <motion.div style={{ y: dashY }} className="relative w-[90%] max-w-5xl">
+            <img
+              src="/landing/hero-dashboard.webp"
+              alt="The Probity dashboard with sample data: key numbers, invoices that need a decision, the case queue and the risk mix"
+              width={2048}
+              height={1280}
+              style={{ mixBlendMode: "luminosity" }}
+              className="w-full rounded-2xl"
+            />
+            {/* The screenshot uses invented vendors and figures; say so rather than imply real usage. */}
+            <span className="absolute right-3 bottom-3 md:right-4 md:bottom-4">
+              <span className="liquid-glass block rounded-md px-2 py-1 text-[11px] text-muted-foreground">Sample data</span>
+            </span>
+          </motion.div>
         </div>
       </motion.div>
 

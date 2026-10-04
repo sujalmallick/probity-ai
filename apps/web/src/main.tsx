@@ -2,10 +2,10 @@ import React, { useEffect, useState } from "react";
 import ReactDOM from "react-dom/client";
 import { BrowserRouter, Link, Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { ClerkProvider, SignedIn, SignedOut, UserButton, useAuth as useClerkAuth, useClerk } from "@clerk/clerk-react";
-import { Brain, Building2, FilePlus2, Gauge as GaugeIcon, LogOut, Menu, Moon, PanelLeftClose, PanelLeftOpen, Settings, Sun, Users, X } from "lucide-react";
+import { Brain, Building2, ClipboardCheck, FilePlus2, Gauge as GaugeIcon, LogOut, Menu, Moon, PanelLeftClose, PanelLeftOpen, Settings, Sun, Users, WifiOff, X } from "lucide-react";
 import "./index.css";
 import { AuthCtx, useAuth } from "./lib/auth";
-import { api, setTokenGetter, type Me } from "./lib/api";
+import { api, can, errMsg, setTokenGetter, setUnauthorizedHandler, type Me } from "./lib/api";
 import Login, { SignInUnavailable, SignUpPage } from "./pages/Login";
 import Landing from "./pages/Landing";
 import Dashboard from "./pages/Dashboard";
@@ -16,6 +16,9 @@ import ImportPage from "./pages/Import";
 import Memory from "./pages/Memory";
 import SettingsPage from "./pages/Settings";
 import Team from "./pages/Team";
+import StatusPage, { fetchReady } from "./pages/Status";
+import Baseline from "./pages/Baseline";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Spinner } from "./components/ui";
 import { loadAppConfig, unavailableIntegrations, useAppConfig } from "./lib/config";
 import { LogoMark } from "./components/Logo";
@@ -68,6 +71,7 @@ function Shell({ children }: { children: React.ReactNode }) {
     { to: "/dashboard", icon: GaugeIcon, label: "Dashboard" },
     { to: "/cases/new", icon: FilePlus2, label: "New case" },
     { to: "/vendors", icon: Building2, label: "Vendors" },
+    ...(can(user?.role, "approver") ? [{ to: "/baseline", icon: ClipboardCheck, label: "Approvals" }] : []),
     { to: "/memory", icon: Brain, label: "Case memory" },
     { to: "/settings/policy", icon: Settings, label: "Policy" },
     { to: "/settings/team", icon: Users, label: "Team" },
@@ -167,7 +171,10 @@ function Shell({ children }: { children: React.ReactNode }) {
           )}
         </div>
       </aside>
-      <main className="min-w-0 flex-1 px-4 py-6 md:px-10 md:py-9">{children}</main>
+      <main className="min-w-0 flex-1 px-4 py-6 md:px-10 md:py-9">
+        <DegradedBanner />
+        <ErrorBoundary resetKey={location.pathname}>{children}</ErrorBoundary>
+      </main>
     </div>
   );
 }
@@ -178,19 +185,42 @@ function LiveStatus({ compact = false }: { compact?: boolean }) {
   const missing = unavailableIntegrations(cfg);
   const detail = missing.length ? `Live · not available: ${missing.join(", ")}` : "Live · all integrations available";
   return (
-    <span
-      tabIndex={0}
-      role="status"
-      title={detail}
-      aria-label={detail}
-      className={`inline-flex items-center gap-2 rounded-lg text-xs text-muted outline-offset-2 ${compact ? "p-1.5" : "px-3 py-1.5"}`}
+    <Link
+      to="/status"
+      title={`${detail} · open system status`}
+      aria-label={`${detail}. Open system status`}
+      className={`inline-flex items-center gap-2 rounded-lg text-xs text-muted outline-offset-2 transition-colors duration-150 hover:bg-surface-2 hover:text-ink ${compact ? "p-1.5" : "px-3 py-1.5"}`}
     >
       <span className="relative flex h-2 w-2" aria-hidden>
         <span className="pulse absolute inline-flex h-full w-full rounded-full bg-low opacity-60" />
         <span className="relative inline-flex h-2 w-2 rounded-full bg-low" />
       </span>
       {!compact && <span>Live{missing.length ? <span className="text-muted"> · {missing.length} not available</span> : null}</span>}
-    </span>
+    </Link>
+  );
+}
+
+/** Shown above every app page while the server reports a problem (/ready not ok) or can't be reached. Checked every minute. */
+function DegradedBanner() {
+  const [state, setState] = useState<"ok" | "degraded" | "unreachable">("ok");
+  useEffect(() => {
+    let alive = true;
+    const check = () => fetchReady().then((r) => alive && setState(r === null ? "unreachable" : r.ok ? "ok" : "degraded"));
+    check();
+    const t = setInterval(check, 60_000);
+    return () => { alive = false; clearInterval(t); };
+  }, []);
+  if (state === "ok") return null;
+  return (
+    <div role="status" className="mx-auto mb-5 flex max-w-6xl items-start gap-2.5 rounded-lg border border-medium/40 bg-medium-soft px-3.5 py-2.5 text-sm text-medium">
+      <WifiOff size={16} className="mt-0.5 shrink-0" aria-hidden />
+      <span className="min-w-0 flex-1">
+        {state === "unreachable"
+          ? "Can't reach Probity's server right now. It may be starting up; anything you change may not save until it's back."
+          : "Part of Probity isn't working right now, so investigations may be delayed or fail."}{" "}
+        <Link to="/status" className="font-medium underline underline-offset-2">System status</Link>
+      </span>
+    </div>
   );
 }
 
@@ -223,6 +253,8 @@ function AppRoutes() {
         <Route path="/memory" element={<Memory />} />
         <Route path="/settings/policy" element={<SettingsPage />} />
         <Route path="/settings/team" element={<Team />} />
+        <Route path="/baseline" element={<Baseline />} />
+        <Route path="/status" element={<StatusPage />} />
         <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Routes>
     </Shell>
@@ -245,7 +277,17 @@ function ClerkApp() {
     return () => setTokenGetter(null);
   }, [getToken]);
   useEffect(() => {
-    if (isLoaded && isSignedIn) api<Me>("/me").then(setUser).catch((e) => setErr(e.message));
+    // The API said the session is no longer valid: sign out once and land on sign-in with an explanation.
+    let fired = false;
+    setUnauthorizedHandler(() => {
+      if (fired) return;
+      fired = true;
+      clerk.signOut({ redirectUrl: "/login?expired=1" });
+    });
+    return () => setUnauthorizedHandler(null);
+  }, [clerk]);
+  useEffect(() => {
+    if (isLoaded && isSignedIn) api<Me>("/me").then(setUser).catch((e) => setErr(errMsg(e)));
     if (isLoaded && !isSignedIn) setUser(null);
   }, [isLoaded, isSignedIn]);
   const cfg = useAppConfig();
@@ -256,6 +298,7 @@ function ClerkApp() {
         <Routes>
           <Route path="/" element={cfg.features.landing_page ? <Landing /> : <Navigate to="/login" replace />} />
           <Route path="/login" element={<Login />} />
+          <Route path="/status" element={<Centered><div className="w-full max-w-3xl"><StatusPage /></div></Centered>} />
           {cfg.auth.sign_up && <Route path="/sign-up" element={<SignUpPage />} />}
           <Route path="*" element={<Navigate to="/login" replace />} />
         </Routes>
@@ -294,7 +337,7 @@ function Root() {
     );
   }
   return (
-    <ClerkProvider publishableKey={CLERK_KEY} afterSignOutUrl="/">
+    <ClerkProvider publishableKey={CLERK_KEY} afterSignOutUrl="/" signInFallbackRedirectUrl="/dashboard" signUpFallbackRedirectUrl="/dashboard">
       <BrowserRouter><ClerkApp /></BrowserRouter>
     </ClerkProvider>
   );
