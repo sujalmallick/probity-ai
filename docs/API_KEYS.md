@@ -350,7 +350,16 @@ Without it, the scan is skipped and the audit log says "SKIPPED". It's optional 
 already rewritten without active content before it's stored. ClamAV adds signature-based scanning and needs 1–3 GB of RAM. Check it
 with `python -m probity.check antivirus`.
 
+### The live deployment (Render + Neon)
+
+The public app at https://probity-3xgk.onrender.com runs on Render, with Neon for the database and file storage. **Its keys and settings
+are set in Render's dashboard (Environment page), not in any file in the repo.** It uses its own fresh `FIELD_KEY_B64` and `HMAC_KEY`,
+never someone's local ones. Only the maintainer manages them. Contributors never need production keys: develop with your own local
+setup. Setup guide: [infra/render/README.md](../infra/render/README.md).
+
 ### Production stack (Docker + Cloudflare)
+
+An alternative to Render, if you want to host Probity on your own server.
 
 **You don't need this for development.** `infra/docker-compose.yml` runs Probity as a full production stack:
 - PostgreSQL

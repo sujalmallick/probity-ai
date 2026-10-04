@@ -12,6 +12,7 @@
 
 ## Checklist
 
+- [ ] This PR targets `real-data` (merging it deploys to the live site)
 - [ ] Backend tests pass: `cd apps/api && python -m pytest -q`
 - [ ] Frontend checks pass (if I touched `apps/web`): `npm run typecheck` and `npm run build`
 - [ ] I added or updated tests for the behaviour I changed

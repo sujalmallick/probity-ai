@@ -203,6 +203,7 @@ Roles from least to most access: **viewer < accountant < approver < owner**. Eac
 | Upload safety | Working | Size limits, content-type sniffing, active-content check, parsing in an isolated helper process with a time limit. |
 | Two-factor for approvers | Working | Optional owner setting. |
 | Production start-up rules | Working | With `ENV=prod` the API refuses to start without cloud storage, a metrics token, a Redis password, and TLS for remote database connections. |
+| Live hosted deployment | Working | https://probity-3xgk.onrender.com: Render (free) + Neon (database and files) + Clerk. Deployed automatically from the `real-data` branch. Guide: `infra/render/README.md`. |
 | Production Docker stack | Working | `infra/docker-compose.yml`: PostgreSQL, password-protected Redis, migrations, API, worker, scheduler, web and a Cloudflare Tunnel (about 2 GB RAM). See `infra/cloudflare/README.md`. |
 | Data retention and deletion | Planned | Open item, see [SECURITY_HANDOVER.md](SECURITY_HANDOVER.md). |
 

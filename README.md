@@ -10,6 +10,9 @@ findings into a score. Low-risk invoices can be cleared automatically; anything 
 > **The AI can investigate, but it cannot change the risk score.** Agents find signals, every claim needs evidence, code computes the
 > score, and a human decides the payment.
 
+**Try it live: https://probity-3xgk.onrender.com.** Sign up with your email and you get your own empty workspace. It's on free hosting,
+so the first visit after a quiet spell can take about a minute to wake up.
+
 ## Who it's for
 
 - **The accounts person (accountant):** uploads invoices, keeps the vendor list and past invoices up to date, and fixes misread fields.
@@ -72,15 +75,17 @@ Agents in order: document reader → planner → vendor investigator + transacti
 You need Git, Python 3.12+, Node 22, Docker Desktop, an AI key (Anthropic, or Google Gemini) and a free Clerk development app. On Windows:
 
 ```powershell
-git clone https://github.com/sujalmallick/probity-ai.git
+git clone -b real-data https://github.com/sujalmallick/probity-ai.git
 cd probity-ai
 powershell -ExecutionPolicy Bypass -File scripts\dev.ps1
 ```
 
-The first run sets things up and tells you which keys to add. Add them and run it again, then open http://localhost:5180.
+`-b real-data` matters: that branch has the current code (see [Branches and deployment](#branches-and-deployment)). The first run
+sets things up and tells you which keys to add. Add them and run it again, then open http://localhost:5180.
 
 **Full step-by-step guide (Windows, macOS, Linux):** [docs/SETUP.md](docs/SETUP.md). **Getting the keys:** [docs/API_KEYS.md](docs/API_KEYS.md).
-**Deploying (Docker + Cloudflare):** [infra/cloudflare/README.md](infra/cloudflare/README.md).
+**Deploying:** the live app runs on Render + Neon ([infra/render/README.md](infra/render/README.md)). There's also a Docker + Cloudflare
+alternative: [infra/cloudflare/README.md](infra/cloudflare/README.md).
 
 ## Current status
 
@@ -125,6 +130,30 @@ Probity is a **hackathon prototype**. It works end to end on real data, but it h
 
 Full list: [docs/FEATURES.md](docs/FEATURES.md).
 
+## Branches and deployment
+
+| Branch | What it is |
+|---|---|
+| `real-data` | **The current code, and what's live.** Render rebuilds and deploys https://probity-3xgk.onrender.com automatically on every push to this branch. |
+| `main` | An older snapshot from before the real-data work. Not deployed. It will be brought up to date with `real-data`. |
+
+```
+your branch  →  pull request into real-data  →  tests pass, review  →  merge  →  Render deploys  →  live in a few minutes
+```
+
+- **Changing files on your computer never changes the live site.** Only a commit **pushed to `real-data` on GitHub** does.
+- **Pushing to any other branch is safe.** That includes your own branch and `main`; nothing is deployed.
+- **Don't push straight to `real-data`.** Work on your own branch and open a pull request, so the tests run first.
+
+How it's hosted:
+- **Render** (free plan) runs one web service: the API, plus the built web app on the same address. It's set up by `render.yaml` and
+  `infra/render.Dockerfile`.
+- **Neon** holds the PostgreSQL database and the uploaded invoice files.
+- **Clerk** handles sign-in.
+- The live settings and keys are set in Render's dashboard, never in the repo.
+
+Step-by-step setup: [infra/render/README.md](infra/render/README.md).
+
 ## Documentation
 
 | Doc | What it's for |
@@ -136,7 +165,8 @@ Full list: [docs/FEATURES.md](docs/FEATURES.md).
 | [docs/Guardrails.md](docs/Guardrails.md) | The safety rules and how they're enforced |
 | [docs/DECISIONS.md](docs/DECISIONS.md) | Design decisions and current limits |
 | [docs/API_CONTRACT.md](docs/API_CONTRACT.md) | The API the web app uses |
-| [infra/cloudflare/README.md](infra/cloudflare/README.md) | Deploying the Docker stack behind Cloudflare (Tunnel, R2) |
+| [infra/render/README.md](infra/render/README.md) | How the live app is deployed for free (Render + Neon) |
+| [infra/cloudflare/README.md](infra/cloudflare/README.md) | Alternative: deploying the Docker stack behind Cloudflare (Tunnel, R2) |
 | [benchmark/real/README.md](benchmark/real/README.md) | Running Probity on your own labelled invoices |
 | [docs/SECURITY_HANDOVER.md](docs/SECURITY_HANDOVER.md) | What the security review fixed, the tests that guard it, what's still open |
 | [docs/FAILURE_AUDIT.md](docs/FAILURE_AUDIT.md) | How failures, stuck cases and errors are handled |
@@ -146,7 +176,7 @@ Full list: [docs/FEATURES.md](docs/FEATURES.md).
 ## Contributing
 
 Friends and newcomers are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md): it has starter tasks, the workflow, and the checks to
-run before a pull request. To report a security problem privately, see [SECURITY.md](SECURITY.md).
+run before a pull request. Pull requests go into `real-data`. To report a security problem privately, see [SECURITY.md](SECURITY.md).
 
 ## License
 
