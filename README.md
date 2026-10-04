@@ -24,26 +24,31 @@ Claim ──► Evidence ──► Verification ──► Risk engine (pure code
 | 7. Resolution | The vendor reply arrives, and its statements stay *Unverified* (score unchanged). The approver confirms out-of-band and the score re-scores **70 → 20 LOW** (bank −35, domain −15) |
 | 8. Memory | Close the case as CLEARED. The next invoice says: *"Previous investigation found a bank-account change … for this vendor"* |
 
-## Quick start (offline, no API keys)
+## Run it locally (Windows)
 
-```bash
-make install     # venv + pip install -e apps/api[dev] + npm install
-make seed        # demo workspace, 5 users, 6 vendors with 12-invoice histories, demo PDFs
-make dev         # API on :8010, web on :5180
+Prerequisites: **Docker Desktop** (running), **Python 3.12+**, **Node 20+**.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\dev.ps1          # start everything
+powershell -ExecutionPolicy Bypass -File scripts\dev.ps1 -Reset   # start with a fresh demo database
 ```
 
-Open http://localhost:5180 and sign in as **Vikram Mehta (approver)**. Then click **ABC Supplies · INV-4821** on the dashboard. To slow the timeline down for a stage demo, use *Policy → Demo: agent animation speed*.
+The script installs dependencies on first run, starts Postgres + Redis in Docker, applies migrations, loads demo data,
+then opens three windows: **API** (http://127.0.0.1:8010, docs at `/docs`), **worker** (runs the agents) and **web**
+(http://localhost:5180). Close those windows to stop; `docker compose -f infra/docker-compose.dev.yml down` stops the databases.
 
-Without `make` (Windows PowerShell):
+| Service | Port |
+|---|---|
+| Web app | 5180 |
+| API | 8010 |
+| Postgres | 5434 (owner `probity` / app role `probity_app`) |
+| Redis | 6380 |
 
-```bash
-python -m venv .venv; .venv\Scripts\pip install -e "apps/api[dev]"; cd apps/web; npm install; cd ../..
-cd apps/api; ..\..\.venv\Scripts\python -m probity.demo.seed --reset; ..\..\.venv\Scripts\python -m uvicorn probity.api.main:app --port 8010
-```
+Everything runs offline by default (recorded web results, rule-based agents, demo sign-in). Add keys to `.env` to go live:
+`ANTHROPIC_API_KEY` + `LLM_MODE=live`, `TAVILY_API_KEY` + `TOOLS_MODE=live`, `AUTH_MODE=clerk` + Clerk keys, `EMAIL_BACKEND=resend` + key.
 
-In a second terminal, run `cd apps/web; npm run dev`.
-
-Docker (Postgres + Redis + Qdrant + API + web): `make up`.
+macOS/Linux: `make install`, `docker compose -f infra/docker-compose.dev.yml up -d`, `make seed`, then `make dev` and run the worker with
+`cd apps/api && ../../.venv/bin/python -m celery -A probity.worker worker -B -Q probity`.
 
 ## Verification
 
