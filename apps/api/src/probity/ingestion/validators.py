@@ -75,7 +75,10 @@ def parse_date(raw: str | None) -> date | None:
     if not raw:
         return None
     raw = raw.strip()
-    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%d %b %Y", "%d %B %Y", "%b %d, %Y"):
+    raw = re.sub(r"(\d)(st|nd|rd|th)\b", r"\1", raw).replace(",", " ").strip()  # 3rd Oct 2026 -> 3 Oct 2026
+    raw = re.sub(r"\s+", " ", raw)
+    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%d.%m.%Y", "%d %b %Y", "%d %B %Y", "%b %d %Y", "%B %d %Y", "%d-%b-%Y", "%d-%B-%Y",
+                "%d/%b/%Y", "%Y/%m/%d", "%d-%b-%y", "%d/%m/%y", "%d-%m-%y", "%d.%m.%y"):
         try:
             return datetime.strptime(raw, fmt).date()
         except ValueError:
@@ -100,11 +103,12 @@ def normalize_domain(email_or_url: str | None) -> str | None:
 def check_arithmetic(line_items: list[dict], subtotal: int | None, tax: int | None, total: int | None) -> list[dict]:
     """Return a list of arithmetic findings; empty means consistent."""
     issues = []
+    tolerance = 100  # ₹1: invoices round totals ("Round Off") and per-line amounts
     if line_items and subtotal is not None:
-        computed = sum(int(li["qty"]) * int(li["unit_price_minor"]) for li in line_items)
-        if computed != subtotal:
+        computed = round(sum(float(li["qty"]) * int(li["unit_price_minor"]) for li in line_items))
+        if abs(computed - subtotal) > max(tolerance, len(line_items) * 100):
             issues.append({"check": "line_items_sum", "expected": computed, "printed": subtotal})
-    if subtotal is not None and tax is not None and total is not None and subtotal + tax != total:
+    if subtotal is not None and tax is not None and total is not None and abs(subtotal + tax - total) > tolerance:
         issues.append({"check": "subtotal_plus_tax", "expected": subtotal + tax, "printed": total})
     return issues
 

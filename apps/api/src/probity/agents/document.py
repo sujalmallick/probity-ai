@@ -21,7 +21,8 @@ from probity.evidence.models import AgentClaim, EvidenceIn
 from probity.guardrails import crypto
 from probity.guardrails.text import detect_injection, wrap_untrusted
 from probity.ingestion.parse import _OCR_MARK as OCR_MARK
-from probity.ingestion.parse import OCR_CONFIDENCE_PENALTY, extract, low_confidence, parse_fields
+from probity.ingestion.parse import OCR_CONFIDENCE_PENALTY, email_attachment_pdf, email_meta, extract, extract_tables, low_confidence, parse_fields
+from probity.ingestion.validators import normalize_domain
 from probity.ingestion.validators import parse_money_minor, validate_extraction
 from probity.llm import client as llm
 
@@ -66,7 +67,17 @@ def extract_document(ctx: CaseCtx, data: bytes, mime: str, corrections: dict) ->
     if used_ocr:
         ctx.progress(AGENT, "No text layer — running OCR")
     text = "\n".join(pages)
-    fields = parse_fields(pages)
+    pdf_bytes = email_attachment_pdf(data) if mime == "message/rfc822" else (data if mime == "application/pdf" else None)
+    fields = parse_fields(pages, extract_tables(pdf_bytes, "application/pdf") if pdf_bytes else None)
+    if mime == "message/rfc822":
+        # The envelope sender is what matters for spoofing — it overrides any email printed on the invoice.
+        meta = email_meta(data)
+        if meta["from"]:
+            fields["sender_domain"] = {"value": normalize_domain(meta["from"]), "raw": meta["from"], "confidence": 0.99,
+                                       "evidence_snippet": f"From: {meta['from']}", "page": 0, "via": "email_header"}
+            fields.setdefault("vendor_email", {"value": meta["from"], "raw": meta["from"], "confidence": 0.95, "evidence_snippet": f"From: {meta['from']}", "page": 0})
+        if meta["dkim"] and meta["dkim"] != "pass":
+            fields["email_dkim"] = {"value": meta["dkim"], "raw": meta["dkim"], "confidence": 0.99, "evidence_snippet": f"dkim={meta['dkim']}", "page": 0}
     if used_ocr:
         for f in fields.values():
             f["confidence"] = round(max(0.0, f.get("confidence", 0) - OCR_CONFIDENCE_PENALTY), 2)

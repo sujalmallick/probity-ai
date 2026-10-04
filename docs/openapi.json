@@ -4343,7 +4343,19 @@
      },
      "note": {
       "type": "string",
+      "maxLength": 2000,
       "title": "Note"
+     },
+     "known_channel": {
+      "anyOf": [
+       {
+        "type": "boolean"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Known Channel"
      }
     },
     "type": "object",

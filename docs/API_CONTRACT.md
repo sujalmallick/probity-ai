@@ -122,7 +122,7 @@ Rules: import vendors **before** invoices/POs (they reference vendors by GSTIN o
 
 | Endpoint | Notes |
 |---|---|
-| `POST /documents` (multipart `file`) | → `{document_id, sha256, filename, mime, duplicate_of}`; 415 = rejected (wrong type, active PDF content, virus) — show message |
+| `POST /documents` (multipart `file`) | → `{document_id, sha256, filename, mime, duplicate_of}`; 415 = rejected (wrong type, active PDF content, virus) — show message. Accepts PDF, PNG/JPG (OCR) and **.eml**: for emails the attached PDF/image is read, and the *envelope sender* becomes `sender_domain` (field `via: "email_header"`); a failed DKIM check appears as extracted field `email_dkim` |
 | `POST /documents/{id}/preview` | → `{fields, validation, low_confidence[], injection_detected}` before launching |
 | `POST /cases {document_id, corrections?}` | starts the investigation |
 | `GET /cases?tier&status&vendor_id&limit` | queue |
@@ -132,7 +132,7 @@ Rules: import vendors **before** invoices/POs (they reference vendors by GSTIN o
 | `GET /cases/{id}/export?format=pdf|json` | download |
 | `POST /cases/{id}/decision {decision, reason}` | approver · MFA |
 | drafts: `GET /cases/{id}/drafts`, `PATCH …/drafts/{draft_id}`, `POST …/drafts/{draft_id}/send {override_unverified_recipient?}` | send = approver · MFA |
-| `POST /cases/{id}/out-of-band-confirmation {claim_ids, method, note}` | approver · MFA |
+| `POST /cases/{id}/out-of-band-confirmation {claim_ids, method, note, known_channel?}` | approver · MFA. `note`: required, ≥ 20 chars after trimming (`OOB_NOTE_MIN_CHARS`), ≤ 2000 — "who did you contact, on which number already on file". `known_channel`: `true` = confirmed via a channel already on file; `false` → 400 (a channel taken from the invoice/email can't confirm anything); omitted = allowed (older clients). Recorded in the audit entry. UI: ask "Did you use a phone number/email that was already on file before this invoice?" |
 | `POST /cases/{id}/close {outcome, resolution}` | approver (accountant for auto-cleared) |
 | **new** `GET /cases/{id}/notes` → `{items:[{id,text,author,author_id,at}]}` | any |
 | **new** `POST /cases/{id}/notes {text}` | accountant+ → note (201). Show as a comment thread on the case |
@@ -146,3 +146,5 @@ Rules: import vendors **before** invoices/POs (they reference vendors by GSTIN o
 
 ## Changelog
 - 2026-10-04 — v1 of this contract: app config, onboarding, vendor CRUD + verification rules, CSV import, case notes, demo gating.
+- 2026-10-04 — v1.1: out-of-band confirmation `known_channel` + 20-char note minimum (FRONTEND); emailed invoices (.eml) read from the
+  attachment with envelope-sender domain; extracted `invoice_date`/`due_date` values are now normalized ISO dates (raw text kept in `raw`).
