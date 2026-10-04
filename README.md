@@ -180,7 +180,8 @@ run before a pull request. Pull requests go into `real-data`. To report a securi
 
 ## License
 
-No license has been chosen yet. Until one is added, the code is not licensed for reuse.
+Probity is open source under the [MIT License](LICENSE). You can use, copy, change and share it, as long as you keep the copyright
+and license notice. It comes with no warranty.
 
 ---
 

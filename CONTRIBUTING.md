@@ -130,7 +130,12 @@ git config user.email "12345678+yourname@users.noreply.github.com"
 - Once the checks pass and the review is approved, the maintainer merges it into `real-data`, which deploys it to the live site.
   That's why reviews are careful.
 
-## 8. Security problems
+## 8. License of your contributions
+
+Probity is licensed under the [MIT License](LICENSE). By opening a pull request, you agree that your contribution is shared
+under the same license.
+
+## 9. Security problems
 
 Please **don't open a public issue** for a security problem. See [SECURITY.md](SECURITY.md) for how to report it privately.
 
