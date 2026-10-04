@@ -71,6 +71,17 @@ export function Empty({ icon, title, children }: { icon: ReactNode; title: strin
   );
 }
 
+/** A section that failed to load: the server's message (with its reference) and a way to try again. */
+export function LoadError({ error, onRetry, className = "" }: { error: string; onRetry?: () => void; className?: string }) {
+  return (
+    <div role="alert" className={`card flex flex-wrap items-center gap-3 p-4 text-sm ${className}`}>
+      <AlertTriangle size={16} className="shrink-0 text-high" aria-hidden />
+      <span className="min-w-0 flex-1 break-words">{error}</span>
+      {onRetry && <button className="btn !py-1 text-xs" onClick={onRetry}>Try again</button>}
+    </div>
+  );
+}
+
 export function Skeleton({ className = "" }: { className?: string }) {
   return <div className={`pulse rounded-md bg-surface-2 ${className}`} />;
 }

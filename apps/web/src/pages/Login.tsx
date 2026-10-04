@@ -1,25 +1,58 @@
 import { SignIn, SignUp } from "@clerk/clerk-react";
 import { useState, type FormEvent } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { Eye, EyeOff, KeyRound, Lock, Mail } from "lucide-react";
 import { AuthLayout, authInput, authPrimary } from "../components/AuthLayout";
 import { useAppConfig } from "../lib/config";
 
-// Clerk's form sits inside our own auth card, so drop its card chrome and header.
-// "Forgot password?" and email verification are part of Clerk's form.
+// Clerk's form sits inside our own auth card, so its card chrome and header are removed and it fills our card's width.
+// Style objects (not class names) so they apply regardless of stylesheet order. "Forgot password?" and email
+// verification are part of Clerk's form.
+const BORDER = "1px solid #2e2e2e";
+// Clerk draws field borders as a box-shadow, so the outline is set the same way.
+const FIELD = { height: "2.75rem", background: "#0a0a0a", border: "none", borderRadius: "0.75rem", boxShadow: "inset 0 0 0 1px #3a3a3a !important", color: "#fafafa" };
 const CLERK_APPEARANCE = {
   variables: {
-    colorPrimary: "#fafafa", colorTextOnPrimaryBackground: "#0a0a0a", colorBackground: "transparent", colorText: "#fafafa",
-    colorTextSecondary: "#a6a6a6", colorInputBackground: "#0a0a0a", colorInputText: "#fafafa", borderRadius: "0.75rem",
+    colorPrimary: "#fafafa", colorPrimaryForeground: "#0a0a0a", colorBackground: "#0a0a0a", colorForeground: "#fafafa",
+    colorMutedForeground: "#a6a6a6", colorNeutral: "#fafafa", colorInput: "#0a0a0a", colorInputForeground: "#fafafa",
+    colorBorder: "#3a3a3a", colorDanger: "#ff6b6b", borderRadius: "0.75rem", fontFamily: "inherit",
   },
-  elements: { rootBox: "w-full", cardBox: "w-full !shadow-none !border-0", card: "!bg-transparent !shadow-none !border-0 !p-0", header: "hidden", footer: "!bg-transparent" },
-};
+  elements: {
+    rootBox: { width: "100%" },
+    cardBox: { width: "100%", maxWidth: "100%", background: "transparent", border: "none", boxShadow: "none", overflow: "visible" },
+    card: { width: "100%", padding: 0, background: "transparent", border: "none", boxShadow: "none", gap: "1.25rem" },
+    header: { display: "none" },
+    socialButtonsBlockButton: { ...FIELD, position: "relative", "&:focus-visible": { boxShadow: "inset 0 0 0 1.5px #fafafa !important" } },
+    socialButtonsBlockButtonText: { color: "#fafafa", fontWeight: 500, fontSize: "0.875rem" },
+    lastAuthenticationStrategyBadge: { position: "absolute", top: "-0.6rem", right: "0.75rem", background: "#1f1f1f", color: "#a6a6a6", border: BORDER },
+    dividerLine: { background: "#2e2e2e" },
+    dividerText: { color: "#a6a6a6" },
+    formFieldLabel: { color: "#fafafa", fontWeight: 500 },
+    formFieldInput: { ...FIELD, "&:focus": { boxShadow: "inset 0 0 0 1.5px #fafafa !important" } },
+    formButtonPrimary: { height: "2.75rem", background: "#fafafa", color: "#0a0a0a", fontSize: "0.9375rem", fontWeight: 600, textTransform: "none", boxShadow: "none", borderRadius: "0.75rem" },
+    footer: { background: "transparent", backgroundImage: "none", padding: 0, marginTop: "0.25rem" },
+    footerAction: { background: "transparent" },
+    footerActionText: { color: "#a6a6a6" },
+    footerActionLink: { color: "#fafafa", fontWeight: 600 },
+    identityPreview: { background: "#0a0a0a", border: BORDER },
+    otpCodeFieldInput: { background: "#0a0a0a", border: BORDER, color: "#fafafa" },
+  },
+} as const;
+
+/** Where people land after signing in or creating an account (Clerk otherwise returns them to "/", the landing page). */
+const AFTER_AUTH = "/dashboard";
 
 export default function Login() {
   const cfg = useAppConfig();
+  const expired = new URLSearchParams(useLocation().search).has("expired");
   return (
     <AuthLayout title="Welcome back" subtitle="Sign in to your Probity workspace.">
-      <SignIn routing="hash" signUpUrl={cfg.auth.sign_up ? "/sign-up" : undefined} appearance={CLERK_APPEARANCE} />
+      {expired && (
+        <p role="status" className="mb-4 rounded-xl border border-border bg-black/30 px-4 py-3 text-sm text-muted-foreground">
+          Your session ended, so you were signed out. Sign in again to continue.
+        </p>
+      )}
+      <SignIn routing="hash" signUpUrl={cfg.auth.sign_up ? "/sign-up" : undefined} fallbackRedirectUrl={AFTER_AUTH} signUpFallbackRedirectUrl={AFTER_AUTH} appearance={CLERK_APPEARANCE} />
     </AuthLayout>
   );
 }
@@ -27,7 +60,7 @@ export default function Login() {
 export function SignUpPage() {
   return (
     <AuthLayout title="Create an account" subtitle="Use your work email.">
-      <SignUp routing="hash" signInUrl="/login" appearance={CLERK_APPEARANCE} />
+      <SignUp routing="hash" signInUrl="/login" fallbackRedirectUrl={AFTER_AUTH} signInFallbackRedirectUrl={AFTER_AUTH} appearance={CLERK_APPEARANCE} />
     </AuthLayout>
   );
 }

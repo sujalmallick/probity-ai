@@ -3,11 +3,11 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   Archive, ArchiveRestore, ArrowLeft, Building2, CircleDashed, CreditCard, FileUp, Globe, History, Landmark, Mail, Pencil, Plus, Search, ShieldCheck, Trash2,
 } from "lucide-react";
-import { api, can, del, patch, post, type Role } from "../lib/api";
+import { api, can, del, errMsg, patch, post, type Role } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { inr, isoDate, relTime } from "../lib/format";
 import { RelGraph } from "../components/RelGraph";
-import { CouldNotVerify, Modal, Skeleton, Spinner, TierChip } from "../components/ui";
+import { CouldNotVerify, LoadError, Modal, Skeleton, Spinner, TierChip } from "../components/ui";
 
 type Any = Record<string, any>;
 type Verification = { by?: { id: string; name: string } | null; at?: string | null; method?: string | null; note?: string | null };
@@ -43,7 +43,7 @@ export function Vendors() {
   useEffect(() => {
     const t = setTimeout(() => {
       const qs = new URLSearchParams({ ...(q.trim() ? { q: q.trim() } : {}), ...(archived ? { include_archived: "true" } : {}) });
-      api<{ items: Any[] }>(`/vendors?${qs}`).then((r) => { setRows(r.items); setErr(null); }).catch((e) => setErr(e.message));
+      api<{ items: Any[] }>(`/vendors?${qs}`).then((r) => { setRows(r.items); setErr(null); }).catch((e) => setErr(errMsg(e)));
     }, q ? 250 : 0);
     return () => clearTimeout(t);
   }, [q, archived]);
@@ -154,7 +154,8 @@ function VendorFormModal({ vendor, onClose, onSaved }: { vendor?: Any; onClose: 
   const [err, setErr] = useState<string | null>(null);
   const [fieldErr, setFieldErr] = useState<Record<string, string>>({});
   const set = (k: keyof typeof f) => (e: { target: { value: string } }) => { setF({ ...f, [k]: e.target.value }); setFieldErr({ ...fieldErr, [k]: "" }); };
-  const gstinLocked = editing && !!vendor?.gstin && !isApprover;
+  // Name, GSTIN and address identify the vendor every invoice is matched against, so only approvers change them.
+  const identityLocked = editing && !isApprover;
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -172,8 +173,15 @@ function VendorFormModal({ vendor, onClose, onSaved }: { vendor?: Any; onClose: 
       const gstin = f.gstin.trim().toUpperCase() || undefined;
       let v: Any;
       if (editing) {
-        const changes: Any = { ...base };
-        if (gstin !== (vendor!.gstin ?? undefined) && !gstinLocked) changes.gstin = gstin;
+        // Send only what changed, so an accountant editing notes never touches the approver-only fields.
+        const changes: Any = {};
+        const was = (k: string) => (vendor![k] ?? "") as string;
+        if (!identityLocked && base.name !== was("name")) changes.name = base.name;
+        if (!identityLocked && (gstin ?? "") !== was("gstin")) changes.gstin = gstin;
+        if (!identityLocked && (base.address ?? "") !== was("address")) changes.address = base.address ?? "";
+        if ((base.website ?? "") !== was("website")) changes.website = base.website ?? "";
+        if ((base.notes ?? "") !== was("notes")) changes.notes = base.notes ?? "";
+        if (!Object.keys(changes).length) return onSaved(vendor!);
         v = await patch(`/vendors/${vendor!.id}`, changes);
       } else {
         v = await post("/vendors", { ...base, gstin });
@@ -185,7 +193,7 @@ function VendorFormModal({ vendor, onClose, onSaved }: { vendor?: Any; onClose: 
         const results = await Promise.allSettled(extra);
         const failed = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
         if (failed.length) {
-          setErr(`Vendor created, but ${failed.length} detail${failed.length > 1 ? "s" : ""} could not be added: ${failed.map((r) => r.reason?.message).join("; ")}. Add ${failed.length > 1 ? "them" : "it"} from the vendor page.`);
+          setErr(`Vendor created, but ${failed.length} detail${failed.length > 1 ? "s" : ""} could not be added: ${failed.map((r) => errMsg(r.reason)).join("; ")}. Add ${failed.length > 1 ? "them" : "it"} from the vendor page.`);
           setBusy(false);
           setTimeout(() => onSaved(v), 2500);
           return;
@@ -193,7 +201,7 @@ function VendorFormModal({ vendor, onClose, onSaved }: { vendor?: Any; onClose: 
       }
       onSaved(v);
     } catch (e: any) {
-      setErr(e.message);
+      setErr(errMsg(e));
       setBusy(false);
     }
   };
@@ -202,13 +210,16 @@ function VendorFormModal({ vendor, onClose, onSaved }: { vendor?: Any; onClose: 
     <Modal title={editing ? "Edit vendor" : "Add vendor"} onClose={onClose} wide>
       <form onSubmit={submit} className="flex flex-col gap-4" noValidate>
         <div className="grid gap-4 sm:grid-cols-2">
-          <Field id="v-name" label="Legal name" error={fieldErr.name}><input id="v-name" className="input" value={f.name} onChange={set("name")} autoFocus /></Field>
-          <Field id="v-gstin" label="GSTIN" hint={gstinLocked ? "Changing a GSTIN requires the approver role." : "15 characters, checked against the GSTIN checksum."} error={fieldErr.gstin}>
-            <input id="v-gstin" className="input font-mono uppercase" value={f.gstin} onChange={set("gstin")} disabled={gstinLocked} title={gstinLocked ? "Requires approver role" : ""} maxLength={15} />
+          <Field id="v-name" label="Legal name" error={fieldErr.name}>
+            <input id="v-name" className="input" value={f.name} onChange={set("name")} disabled={identityLocked} title={identityLocked ? "Requires approver role" : ""} autoFocus={!identityLocked} />
+          </Field>
+          <Field id="v-gstin" label="GSTIN" hint={identityLocked ? undefined : "15 characters, checked against the GSTIN checksum."} error={fieldErr.gstin}>
+            <input id="v-gstin" className="input font-mono uppercase" value={f.gstin} onChange={set("gstin")} disabled={identityLocked} title={identityLocked ? "Requires approver role" : ""} maxLength={15} />
           </Field>
           <Field id="v-web" label="Website"><input id="v-web" className="input" value={f.website} onChange={set("website")} placeholder="vendor.com" /></Field>
-          <Field id="v-addr" label="Address"><input id="v-addr" className="input" value={f.address} onChange={set("address")} /></Field>
+          <Field id="v-addr" label="Address"><input id="v-addr" className="input" value={f.address} onChange={set("address")} disabled={identityLocked} title={identityLocked ? "Requires approver role" : ""} /></Field>
         </div>
+        {identityLocked && <p className="-mt-1 text-xs text-muted">Name, GSTIN and address can only be changed by an approver, because every invoice is matched against them.</p>}
         {!editing && (
           <fieldset className="rounded-xl border border-line p-4">
             <legend className="px-1 text-sm font-medium">First details <span className="font-normal text-muted">(optional, added as unverified)</span></legend>
@@ -253,26 +264,35 @@ export function VendorDetail() {
   const isApprover = can(role, "approver");
   const [v, setV] = useState<Any | null>(null);
   const [graph, setGraph] = useState<Any | null>(null);
+  const [graphErr, setGraphErr] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [verify, setVerify] = useState<{ kind: Kind; item: Any } | null>(null);
   const [remove, setRemove] = useState<{ kind: Kind; item: Any } | null>(null);
   const [actionErr, setActionErr] = useState<string | null>(null);
 
-  const load = () => api(`/vendors/${id}`).then((r) => { setV(r); setErr(null); }).catch((e) => setErr(e.message));
+  const load = () => api(`/vendors/${id}`).then((r) => { setV(r); setErr(null); }).catch((e) => setErr(errMsg(e)));
+  const loadGraph = () => api(`/vendors/${id}/graph`).then((r) => { setGraph(r); setGraphErr(null); }).catch((e) => setGraphErr(errMsg(e)));
   useEffect(() => {
     load();
-    api(`/vendors/${id}/graph`).then(setGraph).catch(() => setGraph(null));
+    loadGraph();
   }, [id]);
 
-  if (err) return <div role="alert" className="mx-auto max-w-5xl rounded-lg bg-high-soft p-4 text-sm text-high">{err} <Link to="/vendors" className="underline">Back to vendors</Link></div>;
+  if (err && !v) {
+    return (
+      <div className="mx-auto flex max-w-5xl flex-col gap-3">
+        <Link to="/vendors" className="inline-flex w-fit items-center gap-1.5 rounded-md text-sm text-muted hover:text-ink"><ArrowLeft size={15} aria-hidden />Vendors</Link>
+        <LoadError error={`Could not load this vendor. ${err}`} onRetry={load} />
+      </div>
+    );
+  }
   if (!v) return <div className="mx-auto flex max-w-5xl flex-col gap-4"><Skeleton className="h-20" /><div className="grid gap-4 md:grid-cols-3"><Skeleton className="h-40" /><Skeleton className="h-40" /><Skeleton className="h-40" /></div></div>;
 
   const prices = (v.price_history ?? []).map((h: Any) => ({ date: isoDate(h.date), price: h.items?.[0]?.unit_price_minor ?? 0, n: h.invoice_number }));
   const max = Math.max(...prices.map((p: Any) => p.price), 1);
   const toggleArchive = async () => {
     setActionErr(null);
-    try { await patch(`/vendors/${id}`, { archived: !v.archived }); load(); } catch (e: any) { setActionErr(e.message); }
+    try { await patch(`/vendors/${id}`, { archived: !v.archived }); load(); } catch (e: any) { setActionErr(errMsg(e)); }
   };
 
   return (
@@ -319,6 +339,7 @@ export function VendorDetail() {
         ))}
       </div>
 
+      {graphErr && !graph && <LoadError error={`Could not load this vendor's connections. ${graphErr}`} onRetry={loadGraph} />}
       {graph && (
         <section className="card p-5" aria-labelledby="graph-title">
           <h2 id="graph-title" className="mb-3 text-base font-semibold">Connections</h2>
@@ -329,6 +350,12 @@ export function VendorDetail() {
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <section className="card p-5" aria-labelledby="price-title">
           <h2 id="price-title" className="mb-4 text-base font-semibold">Unit price history</h2>
+          {v.invoices_pending > 0 && (
+            <p className="-mt-2 mb-3 text-xs text-medium">
+              {v.invoices_pending} past invoice{v.invoices_pending === 1 ? " is" : "s are"} waiting for approval and not yet used in price checks.{" "}
+              {isApprover && <Link to="/baseline" className="font-medium underline underline-offset-2">Review</Link>}
+            </p>
+          )}
           {prices.length === 0 ? <p className="text-sm text-muted">No invoice history yet.</p> : (
             <>
               <div className="flex h-36 items-end gap-1.5" role="img" aria-label={`Unit price history, ${prices.length} invoices, latest ${inr(prices.at(-1)?.price)}`}>
@@ -413,7 +440,7 @@ function ItemSection({ kind, vendorId, items, canAdd, isApprover, onVerify, onRe
       reset();
       onChanged();
     } catch (e: any) {
-      setErr(e.message);
+      setErr(errMsg(e));
     } finally {
       setBusy(false);
     }
@@ -493,7 +520,7 @@ function VerifyModal({ kind, item, vendorId, onClose, onDone }: { kind: Kind; it
       await patch(`/vendors/${vendorId}/${KIND[kind].path}/${item.id}`, { verified: true, verification_note: note.trim() });
       onDone();
     } catch (e: any) {
-      setErr(e.message);
+      setErr(errMsg(e));
       setBusy(false);
     }
   };
@@ -523,7 +550,7 @@ function RemoveModal({ kind, item, vendorId, onClose, onDone }: { kind: Kind; it
       await del(`/vendors/${vendorId}/${KIND[kind].path}/${item.id}`);
       onDone();
     } catch (e: any) {
-      setErr(e.message);
+      setErr(errMsg(e));
       setBusy(false);
     }
   };
@@ -577,7 +604,7 @@ function GstSection({ vendor, canEdit, onChanged }: { vendor: Any; canEdit: bool
       setEditing(false);
       onChanged();
     } catch (e: any) {
-      setErr(e.message);
+      setErr(errMsg(e));
     } finally {
       setBusy(false);
     }
@@ -589,7 +616,7 @@ function GstSection({ vendor, canEdit, onChanged }: { vendor: Any; canEdit: bool
       await del(`/vendors/${vendor.id}/gst-manual`);
       onChanged();
     } catch (e: any) {
-      setErr(e.message);
+      setErr(errMsg(e));
     } finally {
       setBusy(false);
     }

@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { AlertTriangle, CheckCircle2, Copy, FileUp, Pencil, Play, XCircle } from "lucide-react";
-import { post, uploadFile } from "../lib/api";
+import { errMsg, post, uploadFile } from "../lib/api";
 import { inr } from "../lib/format";
 import { Spinner } from "../components/ui";
 
@@ -36,7 +36,7 @@ export default function NewCase() {
         setPreview(await post(`/documents/${d.document_id}/preview`));
       }
     } catch (e: any) {
-      setErr(e.message);
+      setErr(errMsg(e));
     } finally {
       setBusy(null);
     }
@@ -50,7 +50,7 @@ export default function NewCase() {
       const c = await post<{ case_id: string }>("/cases", { document_id: doc.document_id, corrections: Object.keys(corrections).length ? corrections : undefined });
       nav(`/cases/${c.case_id}`);
     } catch (e: any) {
-      setErr(e.message);
+      setErr(errMsg(e));
       setBusy(null);
     }
   };

@@ -2,15 +2,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   AlertTriangle, ArrowLeft, ArrowRight, BarChart3, Braces, Brain, Building2, CheckCircle2, ChevronDown, ChevronRight, ClipboardList, Download, FileText, Globe, HelpCircle,
-  History, Landmark, Mail, MailCheck, MessageSquare, MoreHorizontal, PhoneCall, Search, Send, ShieldAlert, ShieldCheck, ThumbsDown, ThumbsUp, UserCheck, Workflow, XCircle,
+  History, Landmark, ListTree, Mail, MailCheck, MessageSquare, MoreHorizontal, OctagonAlert, PhoneCall, RotateCw, Search, Send, ShieldAlert, ShieldCheck, ThumbsDown, ThumbsUp, UserCheck, WifiOff, Workflow, XCircle,
 } from "lucide-react";
-import { api, can, fetchBlob, post, streamEvents, type Role } from "../lib/api";
+import { api, can, errMsg, fetchBlob, post, streamEvents, type Role, type StreamState } from "../lib/api";
 import { useAuth } from "../lib/auth";
-import { evValue, inr, isoDate, relTime, RUNNING, tierColor } from "../lib/format";
+import { evValue, isoDate, money, relTime, RUNNING, tierColor } from "../lib/format";
 import { Gauge } from "../components/Gauge";
 import { RelGraph } from "../components/RelGraph";
 import { ActivityLog, Timeline, type AgentEvent } from "../components/Timeline";
-import { CouldNotVerify, Drawer, FallbackBadge, MenuButton, Modal, Skeleton, Spinner, StatusChip, TierChip, VerifyBadge } from "../components/ui";
+import { CouldNotVerify, Drawer, FallbackBadge, LoadError, MenuButton, Modal, Skeleton, Spinner, StatusChip, TierChip, VerifyBadge } from "../components/ui";
 
 type Any = Record<string, any>;
 
@@ -43,6 +43,13 @@ const peakTier = (c: Any): string =>
 /** "not checked — AI unavailable (…)" notes from the verifier, shown on the claim itself. */
 const aiNote = (claim?: Any): string | null => (typeof claim?.verifier_notes === "string" && claim.verifier_notes.startsWith("not checked — AI unavailable") ? claim.verifier_notes : null);
 
+/** The currency the invoice states. The case API reports "INR" when nothing was stated, so a failed currency check
+ *  means "don't show ₹": the amount is shown bare and labelled instead. Amounts are never converted. */
+const caseCurrency = (c: Any): string | null => {
+  const cur = c.amount?.currency ?? null;
+  return c.validation?.currency?.ok === false && cur === "INR" ? null : cur;
+};
+
 export default function CaseView() {
   const { id = "" } = useParams();
   const { user } = useAuth();
@@ -58,6 +65,7 @@ export default function CaseView() {
   const [showQuiet, setShowQuiet] = useState(false);
   const [fullOnPhone, setFullOnPhone] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [stream, setStream] = useState<StreamState>("live");
   const refetchTimer = useRef<number | undefined>(undefined);
 
   const load = useCallback(async () => {
@@ -65,8 +73,9 @@ export default function CaseView() {
       const [cc, ev] = await Promise.all([api(`/cases/${id}`), api(`/cases/${id}/evidence`)]);
       setC(cc);
       setEvidence(ev.items);
+      setErr(null);
     } catch (e: any) {
-      setErr(e.message);
+      setErr(errMsg(e));
     }
   }, [id]);
 
@@ -81,6 +90,10 @@ export default function CaseView() {
         window.clearTimeout(refetchTimer.current);
         refetchTimer.current = window.setTimeout(load, 250);
       }
+    }, (st) => {
+      // Back after a drop (server restart, sleeping host): events are replayed from the last one seen, and the case is
+      // refetched so its final state shows even if the run ended while we were away.
+      setStream((prev) => { if (prev === "reconnecting" && st === "live") load(); return st; });
     });
     return stop;
   }, [id, load]);
@@ -92,7 +105,14 @@ export default function CaseView() {
   const evById = useMemo(() => Object.fromEntries(evidence.map((e) => [e.id, e])), [evidence]);
   const claimById = useMemo(() => Object.fromEntries((c?.claims ?? []).map((x: Any) => [x.id, x])), [c]);
 
-  if (err) return <div className="rounded-lg bg-high-soft p-4 text-high">{err} <Link to="/dashboard" className="underline">Back</Link></div>;
+  if (err && !c) {
+    return (
+      <div className="mx-auto flex max-w-6xl flex-col gap-3">
+        <Link to="/dashboard" className="inline-flex items-center gap-1.5 self-start rounded-md text-sm text-muted hover:text-ink"><ArrowLeft size={15} aria-hidden />Cases</Link>
+        <LoadError error={`Could not load this case. ${err}`} onRetry={load} />
+      </div>
+    );
+  }
   if (!c) return <div className="mx-auto flex max-w-6xl flex-col gap-3"><Skeleton className="h-16" /><Skeleton className="h-80" /></div>;
 
   const risk = c.risk ?? {};
@@ -149,13 +169,21 @@ export default function CaseView() {
       <header>
         <h1 className="page-title">{c.vendor_name ?? "Unknown vendor"}</h1>
         <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-sm text-muted">
-          <span className="font-medium tabular-nums text-ink">{inr(c.amount?.amount_minor)}</span>
+          <span className="font-medium tabular-nums text-ink">{money(c.amount?.amount_minor, caseCurrency(c))}</span>
           <span>{c.invoice_number ?? c.document?.filename}</span>
           <span>Case #{c.number}</span>
           <StatusChip status={c.status} />
           {c.partial && <span className="text-medium">Some checks didn't finish</span>}
         </div>
       </header>
+
+      {running && stream === "reconnecting" && (
+        <div role="status" className="flex items-center gap-2 rounded-xl border border-line bg-surface px-4 py-2.5 text-sm text-muted">
+          <WifiOff size={15} className="shrink-0" aria-hidden />Reconnecting to live updates… The investigation keeps running on the server.
+        </div>
+      )}
+
+      <CaseBanners c={c} canRetry={can(role, "accountant")} />
 
       {(notice || waitingMsg) && (
         <div role="status" className="fade-in flex items-start gap-3 rounded-xl border border-line bg-surface px-4 py-3 text-sm">
@@ -177,7 +205,7 @@ export default function CaseView() {
           <section className="card p-5" aria-labelledby="anoms">
             <div className="mb-4 flex items-center justify-between gap-2">
               <h2 id="anoms" className="text-base font-semibold">
-                {running ? "Investigating…" : anomalies.length ? `${anomalies.length} ${anomalies.length === 1 ? "anomaly" : "anomalies"} found` : "No anomalies found"}
+                {running ? "Investigating…" : anomalies.length ? `${anomalies.length} ${anomalies.length === 1 ? "anomaly" : "anomalies"} found` : c.status === "FAILED" ? "Investigation didn't finish" : "No anomalies found"}
               </h2>
               {!running && contribs.length > 0 && <button className="btn !py-1 text-xs" onClick={openWhy} aria-expanded={!!why}><HelpCircle size={14} aria-hidden /><span className="hidden sm:inline">Why this score?</span><span className="sm:hidden">Why?</span></button>}
             </div>
@@ -196,11 +224,13 @@ export default function CaseView() {
                 </ul>
               </div>
             )}
-            {!running && anomalies.length === 0 && (
-              <div className="flex items-center gap-2 text-sm text-muted"><CheckCircle2 size={16} className="text-low" aria-hidden />{unverifiedChecks.length ? "Every check that ran came back clean." : "Every check came back clean."}</div>
-            )}
+            {!running && anomalies.length === 0 && (c.status === "FAILED" ? (
+              <div className="flex items-center gap-2 text-sm text-muted"><AlertTriangle size={16} className="text-medium" aria-hidden />The checks are incomplete, so nothing here means the invoice is clean.</div>
+            ) : (
+              <div className="flex items-center gap-2 text-sm text-muted"><CheckCircle2 size={16} className="text-low" aria-hidden />{unverifiedChecks.length || c.partial ? "Every check that finished came back clean." : "Every check came back clean."}</div>
+            ))}
             <div className="flex flex-col gap-2">
-              {anomalies.map((f) => <Finding key={f.signal} f={f} claim={claimById[f.claim_id]} evById={evById} />)}
+              {anomalies.map((f) => <Finding key={f.signal} f={f} claim={claimById[f.claim_id]} evById={evById} currency={caseCurrency(c)} />)}
             </div>
             {risk.diff?.length > 0 && <ScoreDiff risk={risk} />}
             {why && <WhyPanel why={why} />}
@@ -284,6 +314,11 @@ export default function CaseView() {
               <div className="mt-2 flex items-center gap-1.5 text-base font-semibold" style={{ color: risk.tier ? tierColor[risk.tier] : undefined }} title={gate?.reasons?.join("; ")}>
                 <RecIcon size={17} aria-hidden />{rec}
               </div>
+            )}
+            {!running && !decided && gate?.reasons?.length > 0 && c.status !== "FAILED" && (
+              <ul className="mt-3 flex w-full flex-col gap-1 border-t border-line pt-3 text-left text-xs text-muted" aria-label="Why it's held">
+                {gate.reasons.map((r: string) => <li key={r} className="flex gap-1.5"><span aria-hidden>·</span><span>{r}</span></li>)}
+              </ul>
             )}
             {!running && c.summary && (
               <div className="mt-3 w-full border-t border-line pt-3 text-left">
@@ -382,6 +417,79 @@ export default function CaseView() {
   );
 }
 
+/** Prominent notices about how the investigation ended: stopped with an error (and the retry), a retry of an earlier
+ *  case, a usage limit that stopped it early, or a failed sanity check. Each of these holds the case for a person. */
+function CaseBanners({ c, canRetry }: { c: Any; canRetry: boolean }) {
+  const nav = useNavigate();
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const rec = c.recommendation ?? {};
+  const limits: string[] = rec.gate?.limits_reached ?? [];
+  const sanity = rec.sanity;
+  const retry = async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      const r = await post<{ case_id: string }>(`/cases/${c.id}/retry`);
+      nav(`/cases/${r.case_id}`);
+    } catch (e) {
+      setErr(errMsg(e));
+      setBusy(false);
+    }
+  };
+  const box = "flex items-start gap-3 rounded-xl border px-4 py-3 text-sm";
+  return (
+    <>
+      {c.status === "FAILED" && (
+        <div role="alert" className={`${box} border-high/40 bg-high-soft`}>
+          <OctagonAlert size={17} className="mt-0.5 shrink-0 text-high" aria-hidden />
+          <div className="min-w-0 flex-1">
+            <div className="font-semibold text-high">This investigation stopped</div>
+            <p className="mt-0.5">{rec.failure?.message ?? "Something went wrong while checking this invoice. Nothing was decided."}</p>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              {rec.retried_as && rec.retried_as !== "pending" ? (
+                <Link to={`/cases/${rec.retried_as}`} className="btn !py-1 text-xs">Open the retry<ArrowRight size={13} aria-hidden /></Link>
+              ) : rec.retried_as === "pending" ? (
+                <span className="text-xs text-muted">A retry is starting.</span>
+              ) : canRetry ? (
+                <button className="btn !py-1 text-xs" disabled={busy} onClick={retry}>{busy ? <Spinner size={12} /> : <RotateCw size={13} aria-hidden />}Retry from the start</button>
+              ) : <span className="text-xs text-muted">An accountant can retry it.</span>}
+              {!rec.retried_as && <span className="text-xs text-muted">Runs the same document again as a new case and counts toward today's limit.</span>}
+            </div>
+            {err && <p role="alert" className="mt-2 text-xs text-high">{err}</p>}
+          </div>
+        </div>
+      )}
+      {rec.retry_of && (
+        <div className={`${box} border-line bg-surface`}>
+          <RotateCw size={16} className="mt-0.5 shrink-0 text-muted" aria-hidden />
+          <span>This is a retry of an investigation that stopped. <Link to={`/cases/${rec.retry_of}`} className="font-medium underline underline-offset-2">View the original case</Link></span>
+        </div>
+      )}
+      {limits.length > 0 && (
+        <div role="status" className={`${box} border-medium/40 bg-medium-soft`}>
+          <AlertTriangle size={16} className="mt-0.5 shrink-0 text-medium" aria-hidden />
+          <div>
+            <div className="font-semibold text-medium">Stopped early</div>
+            <p className="mt-0.5 text-muted">A usage limit stopped part of this investigation, so it's held for a person to review.</p>
+            <ul className="mt-1 flex flex-col gap-0.5">{limits.map((m) => <li key={m}>{m}</li>)}</ul>
+          </div>
+        </div>
+      )}
+      {sanity && sanity.ok === false && (
+        <div role="alert" className={`${box} border-high/40 bg-high-soft`}>
+          <ShieldAlert size={16} className="mt-0.5 shrink-0 text-high" aria-hidden />
+          <div>
+            <div className="font-semibold text-high">Sanity check failed</div>
+            <p className="mt-0.5 text-muted">The result didn't pass an automatic consistency check, so it's held for a person. Don't rely on the score until someone has looked.</p>
+            <ul className="mt-1 flex flex-col gap-0.5">{(sanity.problems ?? []).map((pr: Any) => <li key={pr.code + pr.message}>{pr.message}</li>)}</ul>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 const ACTION_LABEL: Record<string, string> = {
   PROCEED: "Looks clear",
   REVIEW: "Recommend review",
@@ -400,7 +508,7 @@ function Comments({ caseId, canPost }: { caseId: string; canPost: boolean }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
-  const load = useCallback(() => api<{ items: Any[] }>(`/cases/${caseId}/notes`).then((r) => { setNotes(r.items); setLoadErr(null); }).catch((e) => setLoadErr(e.message)), [caseId]);
+  const load = useCallback(() => api<{ items: Any[] }>(`/cases/${caseId}/notes`).then((r) => { setNotes(r.items); setLoadErr(null); }).catch((e) => setLoadErr(errMsg(e))), [caseId]);
   useEffect(() => { load(); }, [load]);
   const ordered = useMemo(() => [...(notes ?? [])].sort((a, b) => String(a.at).localeCompare(String(b.at))), [notes]);
   const submit = async (e?: React.FormEvent) => {
@@ -413,7 +521,7 @@ function Comments({ caseId, canPost }: { caseId: string; canPost: boolean }) {
       setNotes((prev) => [...(prev ?? []), { author: user?.name, author_role: user?.role, ...n }]);
       setText("");
     } catch (e: any) {
-      setErr(e.message);
+      setErr(errMsg(e));
     } finally {
       setBusy(false);
     }
@@ -471,7 +579,7 @@ function Comments({ caseId, canPost }: { caseId: string; canPost: boolean }) {
   );
 }
 
-function Finding({ f, claim, evById }: { f: Any; claim?: Any; evById: Record<string, Any> }) {
+function Finding({ f, claim, evById, currency }: { f: Any; claim?: Any; evById: Record<string, Any>; currency: string | null }) {
   const [open, setOpen] = useState(false);
   const counted = f.status === "counted" && f.points > 0;
   const color = counted ? (f.points >= 20 ? "var(--high)" : "var(--medium)") : "var(--muted)";
@@ -503,7 +611,7 @@ function Finding({ f, claim, evById }: { f: Any; claim?: Any; evById: Record<str
           <div className="text-sm">{claim.statement}</div>
           <div className={`mt-1 text-xs ${aiNote(claim) ? "font-medium text-medium" : "text-muted"}`}>Verifier: {claim.verifier_notes}</div>
           <div className="mt-2 flex flex-col gap-2">
-            {claim.evidence_ids.map((eid: string) => evById[eid] && <EvidenceCard key={eid} e={evById[eid]} />)}
+            {claim.evidence_ids.map((eid: string) => evById[eid] && <EvidenceCard key={eid} e={evById[eid]} currency={currency} />)}
           </div>
         </div>
       )}
@@ -511,7 +619,8 @@ function Finding({ f, claim, evById }: { f: Any; claim?: Any; evById: Record<str
   );
 }
 
-function EvidenceCard({ e }: { e: Any }) {
+/** `currency` applies to amounts read from this invoice; history, POs and the vendor master are always INR. */
+function EvidenceCard({ e, currency = "INR" }: { e: Any; currency?: string | null }) {
   const Icon = SRC_ICON[e.source] ?? FileText;
   const isUrl = /^https?:\/\//.test(e.source_ref);
   return (
@@ -520,7 +629,7 @@ function EvidenceCard({ e }: { e: Any }) {
         <Icon size={13} className="text-accent" aria-hidden />
         <b>{SRC_LABEL[e.source] ?? e.source}</b>
         {e.field && <span className="text-muted">{e.field}</span>}
-        {e.value !== null && e.value !== undefined && <code className="rounded bg-surface px-1">{evValue(e.field, e.value)}</code>}
+        {e.value !== null && e.value !== undefined && <code className="rounded bg-surface px-1">{evValue(e.field, e.value, e.source === "invoice" ? currency : "INR")}</code>}
         <span className="ml-auto text-muted">Tier {e.tier} · {relTime(e.retrieved_at)}</span>
       </div>
       {e.excerpt && <div className="mt-1 whitespace-pre-wrap break-words border-l-2 border-line pl-2 text-muted">{e.excerpt}</div>}
@@ -562,7 +671,7 @@ function WhyPanel({ why }: { why: Any }) {
 }
 
 function Tabs({ tab, setTab, c, evidence, id }: { tab: string; setTab: (t: string) => void; c: Any; evidence: Any[]; id: string }) {
-  const tabs = [["evidence", `Evidence · ${evidence.length}`], ["document", "Invoice"], ["checks", "Checks"], ["risk", "Invoice risk"], ["graph", "Graph"], ["comms", "Messages"], ["audit", "Audit log"]];
+  const tabs = [["evidence", `Evidence · ${evidence.length}`], ["document", "Invoice"], ["checks", "Checks"], ["risk", "Invoice risk"], ["graph", "Graph"], ["comms", "Messages"], ["trace", "Trace"], ["audit", "Audit log"]];
   return (
     <div className="card">
       <div className="flex gap-1 overflow-x-auto border-b border-line px-2" role="tablist" aria-label="Case details">
@@ -571,12 +680,13 @@ function Tabs({ tab, setTab, c, evidence, id }: { tab: string; setTab: (t: strin
         ))}
       </div>
       <div className="p-4">
-        {tab === "evidence" && <div className="flex flex-col gap-2">{evidence.map((e) => <EvidenceCard key={e.id} e={e} />)}</div>}
+        {tab === "evidence" && <div className="flex flex-col gap-2">{evidence.map((e) => <EvidenceCard key={e.id} e={e} currency={caseCurrency(c)} />)}</div>}
         {tab === "document" && <DocumentTab c={c} />}
         {tab === "checks" && <ChecksTab c={c} />}
         {tab === "risk" && <InvoiceRiskTab id={id} />}
         {tab === "graph" && <GraphTab vendorId={c.vendor_id} />}
         {tab === "comms" && <CommsTab c={c} />}
+        {tab === "trace" && <TraceTab id={id} />}
         {tab === "audit" && <AuditTab id={id} />}
       </div>
     </div>
@@ -585,9 +695,12 @@ function Tabs({ tab, setTab, c, evidence, id }: { tab: string; setTab: (t: strin
 
 function GraphTab({ vendorId }: { vendorId: string | null }) {
   const [g, setG] = useState<Any | null>(null);
-  useEffect(() => { if (vendorId) api(`/vendors/${vendorId}/graph`).then(setG); }, [vendorId]);
+  const [err, setErr] = useState<string | null>(null);
+  const load = useCallback(() => { if (vendorId) api(`/vendors/${vendorId}/graph`).then((r) => { setG(r); setErr(null); }).catch((e) => setErr(errMsg(e))); }, [vendorId]);
+  useEffect(load, [load]);
   if (!vendorId) return <div className="text-sm text-muted">Unknown vendor: no relationship graph.</div>;
-  return g ? <RelGraph nodes={g.nodes} edges={g.edges} /> : <Spinner />;
+  if (err) return <LoadError error={`Could not load the graph. ${err}`} onRetry={load} />;
+  return g ? <RelGraph nodes={g.nodes} edges={g.edges} /> : <Skeleton className="h-64" />;
 }
 
 function DocumentTab({ c }: { c: Any }) {
@@ -624,7 +737,7 @@ function DocumentTab({ c }: { c: Any }) {
                 <tr key={k} className="border-t border-line align-top" title={f.evidence_snippet}>
                   <td className="py-1.5 pr-2 text-muted">{k.replace(/_/g, " ")}</td>
                   <td className="py-1.5 pr-2 font-medium break-all">
-                    {typeof f.value === "number" && /total|subtotal|tax/.test(k) ? inr(f.value, true) : String(f.value ?? "—")}
+                    {typeof f.value === "number" && /total|subtotal|tax/.test(k) ? money(f.value, caseCurrency(c)) : String(f.value ?? "—")}
                     {f.fallback && <div className="mt-1"><FallbackBadge fb={f.fallback} /></div>}
                     {f.via === "human_correction" && (
                       <div className="text-xs font-normal text-medium">Corrected by a person · document said: {f.original ? String(f.original.raw ?? f.original.value ?? "—") : "(not found)"}</div>
@@ -636,7 +749,7 @@ function DocumentTab({ c }: { c: Any }) {
               {(c.invoice?.line_items?.value ?? []).map((li: Any, i: number) => (
                 <tr key={i} className="border-t border-line">
                   <td className="py-1.5 pr-2 text-muted">line {i + 1}</td>
-                  <td className="py-1.5 pr-2 font-medium" colSpan={2}>{li.description} · {li.qty} × {inr(li.unit_price_minor)} = {inr(li.amount_minor ?? li.qty * li.unit_price_minor)}</td>
+                  <td className="py-1.5 pr-2 font-medium" colSpan={2}>{li.description} · {li.qty} × {money(li.unit_price_minor, caseCurrency(c))} = {money(li.amount_minor ?? li.qty * li.unit_price_minor, caseCurrency(c))}</td>
                 </tr>
               ))}
             </tbody>
@@ -714,8 +827,11 @@ function CommsTab({ c }: { c: Any }) {
 
 function AuditTab({ id }: { id: string }) {
   const [a, setA] = useState<Any | null>(null);
-  useEffect(() => { api(`/cases/${id}/audit`).then(setA); }, [id]);
-  if (!a) return <Spinner />;
+  const [err, setErr] = useState<string | null>(null);
+  const load = useCallback(() => { api(`/cases/${id}/audit`).then((r) => { setA(r); setErr(null); }).catch((e) => setErr(errMsg(e))); }, [id]);
+  useEffect(load, [load]);
+  if (err) return <LoadError error={`Could not load the audit log. ${err}`} onRetry={load} />;
+  if (!a) return <div className="flex flex-col gap-2"><Skeleton className="h-4" /><Skeleton className="h-4" /><Skeleton className="h-4" /></div>;
   return (
     <div>
       <div className={`mb-2 text-xs font-semibold ${a.chain_valid ? "text-low" : "text-high"}`}>{a.chain_valid ? "Hash chain verified — log is intact" : `Hash chain broken at entry ${a.first_bad_id}`}</div>
@@ -741,7 +857,7 @@ function DecisionModal({ title, kind, needReason, peak, id, onDone, onClose, hin
       const r = await post<{ status: string }>(`/cases/${id}/decision`, { decision: kind, reason: reason.trim() });
       onDone(r?.status);
     } catch (e: any) {
-      setErr(e.message);
+      setErr(errMsg(e));
       setBusy(false);
     }
   };
@@ -774,17 +890,20 @@ function DraftModal({ draft, id, canSend, onClose, onSent }: { draft: Any; id: s
   const [subject, setSubject] = useState(draft.subject);
   const [body, setBody] = useState(draft.body);
   const [override, setOverride] = useState(false);
+  const [overrideReason, setOverrideReason] = useState("");
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const reasonShort = override && alnum(overrideReason) < REASON_MIN;
   const send = async () => {
+    if (reasonShort) return;
     setBusy(true);
     setErr(null);
     try {
       if (subject !== draft.subject || body !== draft.body) await api(`/cases/${id}/drafts/${draft.id}`, { method: "PATCH", body: JSON.stringify({ subject, body }) });
-      await post(`/cases/${id}/drafts/${draft.id}/send`, { override_unverified_recipient: override });
+      await post(`/cases/${id}/drafts/${draft.id}/send`, override ? { override_unverified_recipient: true, override_reason: overrideReason.trim() } : { override_unverified_recipient: false });
       onSent();
     } catch (e: any) {
-      setErr(e.message);
+      setErr(errMsg(e));
       setBusy(false);
     }
   };
@@ -807,12 +926,24 @@ function DraftModal({ draft, id, canSend, onClose, onSent }: { draft: Any; id: s
       <textarea id="body" className="input mt-1 h-64 font-mono text-xs" value={body} onChange={(e) => setBody(e.target.value)} />
       <div className="mt-2 text-xs text-muted">Neutral wording is enforced: accusatory language is rejected. No risk scores or internal evidence are shared.</div>
       {!draft.recipient_verified && (
-        <label className="mt-3 flex items-center gap-2 text-sm"><input type="checkbox" checked={override} onChange={(e) => setOverride(e.target.checked)} />I confirm this recipient through a separate channel (approver override)</label>
+        <>
+          <label className="mt-3 flex items-center gap-2 text-sm"><input type="checkbox" checked={override} onChange={(e) => setOverride(e.target.checked)} />I confirm this recipient through a separate channel (approver override)</label>
+          {override && (
+            <div className="mt-2">
+              <label className="label" htmlFor="override-reason">How did you confirm this address?</label>
+              <textarea id="override-reason" className="input mt-1 h-16" value={overrideReason} onChange={(e) => setOverrideReason(e.target.value)} aria-describedby="override-hint" />
+              <div id="override-hint" className="mt-1 flex justify-between gap-2 text-xs text-muted">
+                <span>At least {REASON_MIN} letters or digits. Saved to the audit log.</span>
+                <span className="shrink-0 tabular-nums">{Math.min(alnum(overrideReason), REASON_MIN)}/{REASON_MIN}</span>
+              </div>
+            </div>
+          )}
+        </>
       )}
-      {err && <div className="mt-2 text-sm text-high">{err}</div>}
+      {err && <div role="alert" className="mt-2 rounded-lg bg-high-soft p-2.5 text-sm text-high">{err}</div>}
       <div className="mt-4 flex justify-end gap-2">
         <button className="btn" onClick={onClose}>Later</button>
-        <button className="btn btn-primary" disabled={!canSend || busy} title={canSend ? "" : "Requires approver role"} onClick={send}>{busy ? <Spinner /> : <Mail size={15} />}Approve & send</button>
+        <button className="btn btn-primary" disabled={!canSend || busy || reasonShort} title={!canSend ? "Requires approver role" : reasonShort ? `Say how you confirmed the address (at least ${REASON_MIN} letters or digits).` : ""} onClick={send}>{busy ? <Spinner /> : <Mail size={15} />}Approve & send</button>
       </div>
     </Modal>
   );
@@ -851,7 +982,7 @@ function OOBModal({ claims, id, bankLast4, onClose, onDone }: { claims: Any[]; i
       await post(`/cases/${id}/out-of-band-confirmation`, { claim_ids: sel, method, note: note.trim(), known_channel: true, confirmed_account_last4: needsDigits ? digits : undefined });
       onDone();
     } catch (e: any) {
-      setErr(e.message);
+      setErr(errMsg(e));
       setBusy(false);
     }
   };
@@ -933,7 +1064,7 @@ function CloseModal({ id, rejected, onClose, onDone }: { id: string; rejected: b
       await post(`/cases/${id}/close`, { outcome, resolution: resolution.trim() });
       onDone();
     } catch (e: any) {
-      setErr(e.message);
+      setErr(errMsg(e));
       setBusy(false);
     }
   };
@@ -992,7 +1123,7 @@ function RecordReply({ caseId, sent, canPost, onDone }: { caseId: string; sent: 
       setBody("");
       onDone();
     } catch (e: any) {
-      setErr(e.message);
+      setErr(errMsg(e));
     } finally {
       setBusy(false);
     }
@@ -1024,7 +1155,7 @@ function InvoiceRiskTab({ id }: { id: string }) {
   const run = () => {
     setLoading(true);
     setErr(null);
-    api(`/cases/${id}/invoice-risk?narrate=true`).then(setR).catch((e) => setErr(e.message)).finally(() => setLoading(false));
+    api(`/cases/${id}/invoice-risk?narrate=true`).then(setR).catch((e) => setErr(errMsg(e))).finally(() => setLoading(false));
   };
   useEffect(run, [id]);
   if (loading && !r) return <div className="flex flex-col gap-2"><Skeleton className="h-16" /><Skeleton className="h-32" /></div>;
@@ -1057,6 +1188,81 @@ function InvoiceRiskTab({ id }: { id: string }) {
         </tbody>
       </table>
       {(r.warnings ?? []).length > 0 && <ul className="flex flex-col gap-1 text-xs text-medium">{r.warnings.map((w: string) => <li key={w}>{w}</li>)}</ul>}
+    </div>
+  );
+}
+
+const AGENT_NAME: Record<string, string> = {
+  orchestrator: "Planner", document: "Document reader", vendor: "Vendor identity", transaction: "Transaction history", web: "Web research",
+  risk: "Risk engine", verifier: "Verifier", action: "Vendor contact",
+};
+const TRACE_TONE: Record<string, string> = { done: "var(--low)", failed: "var(--high)", running: "var(--accent)", skipped: "var(--muted)", not_run: "var(--muted)" };
+
+/** What each agent did on this case (GET /cases/{id}/trace): timing, checks, what couldn't be verified, rule-based
+ *  fallbacks, errors and AI usage. For reviewers and support; it doesn't change anything. */
+function TraceTab({ id }: { id: string }) {
+  const [t, setT] = useState<Any | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [open, setOpen] = useState<string | null>(null);
+  const load = useCallback(() => { api(`/cases/${id}/trace`).then((r) => { setT(r); setErr(null); }).catch((e) => setErr(errMsg(e))); }, [id]);
+  useEffect(load, [load]);
+  if (err) return <LoadError error={`Could not load the trace. ${err}`} onRetry={load} />;
+  if (!t) return <div className="flex flex-col gap-2"><Skeleton className="h-10" /><Skeleton className="h-10" /><Skeleton className="h-10" /></div>;
+  const tot = t.totals ?? {};
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-muted">
+        <span><ListTree size={13} className="mr-1 inline align-[-2px]" aria-hidden />{(t.agents ?? []).length} agents</span>
+        <span>{tot.ai_calls ?? 0} AI calls{tot.ai_failed ? <b className="text-high"> · {tot.ai_failed} failed</b> : null}</span>
+        {tot.tokens != null && <span>{Number(tot.tokens).toLocaleString("en-IN")} tokens</span>}
+        <span className={tot.could_not_verify ? "text-medium" : ""}>{tot.could_not_verify ?? 0} could not verify</span>
+        <span className={tot.fallbacks ? "text-medium" : ""}>{tot.fallbacks ?? 0} rule-based fallback{tot.fallbacks === 1 ? "" : "s"}</span>
+        {t.sanity && <span className={t.sanity.ok ? "text-low" : "text-high"}>Sanity {t.sanity.ok ? "passed" : "failed"}{t.sanity.checked_at ? ` · ${relTime(t.sanity.checked_at)}` : ""}</span>}
+      </div>
+      <ol className="flex flex-col divide-y divide-line rounded-lg border border-line">
+        {(t.agents ?? []).map((a: Any) => {
+          const isOpen = open === a.agent;
+          const cnv: Any[] = a.could_not_verify ?? [];
+          const fbs: Any[] = a.fallbacks ?? [];
+          const errs: Any[] = a.errors ?? [];
+          return (
+            <li key={a.agent}>
+              <button className="flex w-full items-center gap-3 px-3 py-2.5 text-left text-sm hover:bg-surface-2" aria-expanded={isOpen} onClick={() => setOpen(isOpen ? null : a.agent)}>
+                {isOpen ? <ChevronDown size={15} className="text-muted" aria-hidden /> : <ChevronRight size={15} className="text-muted" aria-hidden />}
+                <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: TRACE_TONE[a.status] ?? "var(--muted)" }} aria-hidden />
+                <span className="min-w-0 flex-1 truncate font-medium">{AGENT_NAME[a.agent] ?? a.agent}</span>
+                <span className="hidden text-xs text-muted sm:inline">{String(a.status).replace("_", " ")}</span>
+                {cnv.length > 0 && <span className="text-xs text-medium">{cnv.length} unverified</span>}
+                {fbs.length > 0 && <span className="text-xs text-medium">{fbs.length} fallback{fbs.length > 1 ? "s" : ""}</span>}
+                {errs.length > 0 && <span className="text-xs text-high">{errs.length} error{errs.length > 1 ? "s" : ""}</span>}
+                <span className="w-14 text-right text-xs tabular-nums text-muted">{a.seconds != null ? `${Number(a.seconds).toFixed(1)}s` : ""}</span>
+              </button>
+              {isOpen && (
+                <div className="flex flex-col gap-3 border-t border-line bg-surface-2/40 px-4 py-3 text-xs">
+                  {(a.steps ?? []).length > 0 && (
+                    <div><div className="label mb-1">Steps</div><ol className="flex list-decimal flex-col gap-0.5 pl-4 text-muted">{a.steps.map((st: Any, i: number) => <li key={i}>{typeof st === "string" ? st : st.message ?? JSON.stringify(st)}</li>)}</ol></div>
+                  )}
+                  {Object.keys(a.checks ?? {}).length > 0 && (
+                    <div><div className="label mb-1">Checks</div>
+                      <ul className="flex flex-col gap-0.5">{Object.entries(a.checks as Record<string, Any>).map(([k, v]) => (
+                        <li key={k} className="flex flex-wrap gap-x-2"><span>{k.replace(/_/g, " ")}</span>{v.status === "could_not_verify" ? <CouldNotVerify reason={v.reason} /> : <span className="text-muted">{v.status}{v.reason ? ` · ${v.reason}` : ""}</span>}</li>
+                      ))}</ul>
+                    </div>
+                  )}
+                  {cnv.some((x) => !(x.check in (a.checks ?? {}))) && <ul className="flex flex-col gap-0.5">{cnv.filter((x) => !(x.check in (a.checks ?? {}))).map((x) => <li key={x.check}><span className="font-medium">{String(x.check).replace(/_/g, " ")}</span> · <CouldNotVerify reason={x.reason} /></li>)}</ul>}
+                  {fbs.length > 0 && <ul className="flex flex-col gap-1">{fbs.map((f, i) => <li key={i} className="flex flex-wrap items-center gap-2"><FallbackBadge fb={{ label: f.label, reason: f.message }} /><span className="text-muted">{f.what}{f.message ? `: ${f.message}` : ""}</span></li>)}</ul>}
+                  {errs.length > 0 && <ul className="flex flex-col gap-0.5 text-high">{errs.map((e, i) => <li key={i}>{typeof e === "string" ? e : e.message ?? JSON.stringify(e)}</li>)}</ul>}
+                  <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-muted">
+                    {a.ai && <span>AI: {a.ai.calls ?? 0} calls{a.ai.failed ? `, ${a.ai.failed} failed` : ""} · {((a.ai.tokens_in ?? 0) + (a.ai.tokens_out ?? 0)).toLocaleString("en-IN")} tokens{a.ai.models?.length ? ` · ${a.ai.models.join(", ")}` : ""}</span>}
+                    {a.claims && <span>Claims: {a.claims.total ?? 0} ({a.claims.verified ?? 0} verified, {a.claims.unverified ?? 0} unverified, {a.claims.refuted ?? 0} refuted{a.claims.dropped ? `, ${a.claims.dropped} dropped` : ""})</span>}
+                    {a.started_at && <span>Started {new Date(a.started_at).toLocaleTimeString()}</span>}
+                  </div>
+                </div>
+              )}
+            </li>
+          );
+        })}
+      </ol>
     </div>
   );
 }

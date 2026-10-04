@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { Mail, ShieldCheck, Trash2, UserPlus, Users } from "lucide-react";
-import { api, can, post, type Role } from "../lib/api";
+import { api, can, errMsg, post, type Role } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { relTime } from "../lib/format";
-import { Spinner } from "../components/ui";
+import { LoadError, Spinner } from "../components/ui";
 
 const ROLES: [Role, string][] = [
   ["viewer", "Read only; account numbers masked"],
@@ -21,10 +21,12 @@ export default function Team() {
   const [role, setRole] = useState<Role>("accountant");
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [loadErr, setLoadErr] = useState<string | null>(null);
+  const [inviteErr, setInviteErr] = useState<string | null>(null);
 
   const load = () => {
-    api("/workspace/members").then((r) => setMembers(r.items));
-    if (owner) api("/workspace/invitations").then((r) => setInvites(r.items)).catch(() => {});
+    api("/workspace/members").then((r) => { setMembers(r.items); setLoadErr(null); }).catch((e) => setLoadErr(errMsg(e)));
+    if (owner) api("/workspace/invitations").then((r) => { setInvites(r.items); setInviteErr(null); }).catch((e) => setInviteErr(errMsg(e)));
   };
   useEffect(load, [owner]);
 
@@ -36,7 +38,7 @@ export default function Team() {
       setMsg({ ok: true, text: typeof ok === "function" ? ok(r) : ok });
       load();
     } catch (e: any) {
-      setMsg({ ok: false, text: e.message });
+      setMsg({ ok: false, text: errMsg(e) });
     } finally {
       setBusy(false);
     }
@@ -68,7 +70,9 @@ export default function Team() {
 
       <div className="card overflow-x-auto">
         <div className="flex items-center gap-2 border-b border-line px-4 py-3 font-semibold"><Users size={16} />Members</div>
-        {!members ? <div className="p-4"><Spinner /></div> : (
+        {!members ? (
+          loadErr ? <LoadError error={`Could not load the team. ${loadErr}`} onRetry={load} className="m-3 !shadow-none" /> : <div className="p-4"><Spinner /></div>
+        ) : (
           <table className="w-full text-sm">
             <tbody>
               {members.map((m) => (
@@ -99,6 +103,7 @@ export default function Team() {
         )}
       </div>
 
+      {owner && inviteErr && <LoadError error={`Could not load pending invitations. ${inviteErr}`} onRetry={load} />}
       {owner && invites.length > 0 && (
         <div className="card p-4">
           <div className="label mb-2">Pending invitations</div>
