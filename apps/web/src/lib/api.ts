@@ -39,6 +39,8 @@ export class ApiError extends Error {
     public code?: string,
     public retryable = false,
     public ref?: string,
+    /** The whole `error` object, for codes that carry extra fields (e.g. `invitation_pending` lists `invitations`). */
+    public details?: Record<string, any>,
   ) {
     super(message);
   }
@@ -76,7 +78,7 @@ export async function api<T = any>(path: string, init: RequestInit = {}): Promis
 }
 
 async function toApiError(res: Response): Promise<ApiError> {
-  let err: { code?: string; message?: string; retryable?: boolean; ref?: string } | undefined;
+  let err: { code?: string; message?: string; retryable?: boolean; ref?: string; [k: string]: any } | undefined;
   try {
     err = (await res.json())?.error;
   } catch {
@@ -93,7 +95,7 @@ async function toApiError(res: Response): Promise<ApiError> {
   }
   if (!msg) msg = res.status >= 500 ? UNAVAILABLE : res.status === 401 ? "Your session has ended. Sign in again." : `Request failed (${res.status}).`;
   if (res.status === 401) onUnauthorized?.();
-  return new ApiError(res.status, msg, err?.code, retryable, ref);
+  return new ApiError(res.status, msg, err?.code, retryable, ref, err);
 }
 
 export const post = <T = any>(path: string, body?: unknown) => api<T>(path, { method: "POST", body: body === undefined ? undefined : JSON.stringify(body) });
