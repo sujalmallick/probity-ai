@@ -45,7 +45,7 @@ export default function Team() {
   return (
     <div className="mx-auto flex max-w-4xl flex-col gap-4">
       <div>
-        <h1 className="text-xl font-bold">Team</h1>
+        <h1 className="page-title">Team</h1>
         <p className="text-sm text-muted">Roles are enforced on the server for every action. Every change is written to the audit log.</p>
       </div>
       {msg && <div className={`rounded-lg p-3 text-sm ${msg.ok ? "bg-low-soft text-low" : "bg-high-soft text-high"}`}>{msg.text}</div>}

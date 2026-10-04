@@ -1,68 +1,84 @@
 @import "tailwindcss";
 @import "@fontsource-variable/inter";
+@import "@fontsource/instrument-serif/400.css";
+@import "@fontsource/instrument-serif/400-italic.css";
 
-/* Calm fintech palette: neutral surfaces, one accent, tier colors reserved for risk. */
+/* Monochrome, matching the landing page: black/white surfaces, the foreground as the
+   single accent, and colour reserved for risk tiers. */
 :root {
-  --bg: #f6f7f9;
+  --bg: #fafafa;
   --surface: #ffffff;
-  --surface-2: #f1f3f6;
-  --border: #e3e6eb;
-  --text: #14171c;
-  --muted: #5d6573;
-  --accent: #3b4bd8;
-  --accent-soft: #eef0fd;
+  --surface-2: #f4f4f4;
+  --border: #e6e6e6;
+  --text: #0a0a0a;
+  --muted: #5e5e5e;
+  --accent: #0a0a0a;
+  --accent-fg: #ffffff;
+  --accent-soft: #efefef;
   --low: #1f8a4c;
   --low-soft: #e7f5ec;
-  --medium: #b26b00;
+  --medium: #a46200;
   --medium-soft: #fdf3e2;
   --high: #c62f2f;
   --high-soft: #fdecec;
   --critical: #8a1020;
   --critical-soft: #f9e3e6;
-  --info-soft: #eef1f5;
+  --info-soft: #f2f2f2;
+  --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
   color-scheme: light;
+
+  /* shadcn semantic aliases over the app palette; .landing overrides them. */
+  --background: var(--bg);
+  --foreground: var(--text);
+  --card: var(--surface);
+  --muted-foreground: var(--muted);
+  --hero-subtitle: var(--text);
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #0f1115;
-    --surface: #171a20;
-    --surface-2: #1e222a;
-    --border: #2a2f39;
-    --text: #e8eaee;
-    --muted: #9aa3b2;
-    --accent: #8792ff;
-    --accent-soft: #23284a;
+    --bg: #050505;
+    --surface: #0d0d0d;
+    --surface-2: #171717;
+    --border: #242424;
+    --text: #fafafa;
+    --muted: #a6a6a6;
+    --accent: #fafafa;
+    --accent-fg: #0a0a0a;
+    --accent-soft: #1d1d1d;
     --low: #4cc27e;
-    --low-soft: #15291e;
+    --low-soft: #0f2318;
     --medium: #f0a83a;
-    --medium-soft: #2e2413;
+    --medium-soft: #291f0e;
     --high: #ff6b6b;
-    --high-soft: #331a1c;
+    --high-soft: #2c1213;
     --critical: #ff8597;
-    --critical-soft: #3a1820;
-    --info-soft: #20252e;
+    --critical-soft: #331219;
+    --info-soft: #1a1a1a;
+    --card-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
     color-scheme: dark;
   }
 }
 :root[data-theme="dark"] {
-  --bg: #0f1115;
-  --surface: #171a20;
-  --surface-2: #1e222a;
-  --border: #2a2f39;
-  --text: #e8eaee;
-  --muted: #9aa3b2;
-  --accent: #8792ff;
-  --accent-soft: #23284a;
+  --bg: #050505;
+  --surface: #0d0d0d;
+  --surface-2: #171717;
+  --border: #242424;
+  --text: #fafafa;
+  --muted: #a6a6a6;
+  --accent: #fafafa;
+  --accent-fg: #0a0a0a;
+  --accent-soft: #1d1d1d;
   --low: #4cc27e;
-  --low-soft: #15291e;
+  --low-soft: #0f2318;
   --medium: #f0a83a;
-  --medium-soft: #2e2413;
+  --medium-soft: #291f0e;
   --high: #ff6b6b;
-  --high-soft: #331a1c;
+  --high-soft: #2c1213;
   --critical: #ff8597;
-  --critical-soft: #3a1820;
-  --info-soft: #20252e;
+  --critical-soft: #331219;
+  --info-soft: #1a1a1a;
+  --card-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
   color-scheme: dark;
 }
 
@@ -74,6 +90,7 @@
   --color-ink: var(--text);
   --color-muted: var(--muted);
   --color-accent: var(--accent);
+  --color-accent-fg: var(--accent-fg);
   --color-accent-soft: var(--accent-soft);
   --color-low: var(--low);
   --color-low-soft: var(--low-soft);
@@ -84,6 +101,13 @@
   --color-critical: var(--critical);
   --color-critical-soft: var(--critical-soft);
   --color-info-soft: var(--info-soft);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-border: var(--border);
+  --color-hero-subtitle: var(--hero-subtitle);
+  --font-serif: "Instrument Serif", ui-serif, Georgia, serif;
   --font-sans: "Inter Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
@@ -96,10 +120,55 @@ body {
   font-feature-settings: "tnum" 1, "cv11" 1;
 }
 
+/* Public landing page: always dark, independent of the app theme toggle. */
+.landing {
+  --background: hsl(0 0% 0%);
+  --foreground: hsl(0 0% 100%);
+  --muted-foreground: hsl(0 0% 65%);
+  --card: hsl(0 0% 5%);
+  --border: hsl(0 0% 20%);
+  --hero-subtitle: hsl(210 17% 95%);
+  background: var(--background);
+  color: var(--foreground);
+  color-scheme: dark;
+  font-feature-settings: normal;
+}
+html:has(.landing),
+html:has(.landing) body { background: hsl(0 0% 0%); }
+
+.liquid-glass {
+  background: rgba(255, 255, 255, 0.01);
+  background-blend-mode: luminosity;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  border: none;
+  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.1);
+  position: relative;
+  overflow: hidden;
+}
+.liquid-glass::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1.4px;
+  background: linear-gradient(180deg,
+    rgba(255, 255, 255, 0.45) 0%, rgba(255, 255, 255, 0.15) 20%,
+    rgba(255, 255, 255, 0) 40%, rgba(255, 255, 255, 0) 60%,
+    rgba(255, 255, 255, 0.15) 80%, rgba(255, 255, 255, 0.45) 100%);
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+/* Component classes live in the components layer so Tailwind utilities (md:hidden, lg:flex…) can override them. */
+@layer components {
 .card {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: 14px;
+  box-shadow: var(--card-shadow);
 }
 
 .btn {
@@ -107,20 +176,21 @@ body {
   align-items: center;
   justify-content: center;
   gap: 0.4rem;
-  border-radius: 8px;
+  border-radius: 9px;
   padding: 0.5rem 0.85rem;
   font-size: 0.875rem;
-  font-weight: 550;
+  font-weight: 500;
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text);
-  transition: background 0.15s, border-color 0.15s, opacity 0.15s;
+  cursor: pointer;
+  transition: background 0.18s, border-color 0.18s, opacity 0.18s;
 }
 .btn:hover:not(:disabled) { background: var(--surface-2); }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
-.btn:focus-visible, .tab:focus-visible, a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.btn-primary { background: var(--accent); border-color: var(--accent); color: white; }
-.btn-primary:hover:not(:disabled) { background: var(--accent); opacity: 0.9; }
+.btn:focus-visible, .tab:focus-visible, a:focus-visible, button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); font-weight: 600; }
+.btn-primary:hover:not(:disabled) { background: var(--accent); opacity: 0.88; }
 .btn-danger { color: var(--high); border-color: color-mix(in srgb, var(--high) 40%, var(--border)); }
 
 .input {
@@ -128,13 +198,20 @@ body {
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text);
-  border-radius: 8px;
+  border-radius: 9px;
   padding: 0.5rem 0.7rem;
   font-size: 0.875rem;
+  transition: border-color 0.18s;
 }
+.input:hover { border-color: color-mix(in srgb, var(--text) 25%, var(--border)); }
 .input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 
+.page-title { font-size: 1.75rem; line-height: 1.15; font-weight: 500; letter-spacing: -0.03em; }
+.page-title em { font-family: var(--font-serif); font-weight: 400; }
+.kpi-value { font-size: 1.5rem; line-height: 1.2; font-weight: 500; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+
 .label { font-size: 0.72rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+}
 
 @keyframes pulse-dot { 0%, 100% { opacity: 1 } 50% { opacity: 0.35 } }
 .pulse { animation: pulse-dot 1.2s ease-in-out infinite; }
@@ -145,3 +222,12 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .pulse, .spin, .fade-in { animation: none; }
 }
+
+.page-title + p { margin-top: 0.375rem; }
+.card table thead th { font-size: 0.6875rem; font-weight: 500; letter-spacing: 0.05em; text-transform: uppercase; }
+
+input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
+
+@keyframes drawer-in { from { transform: translateX(24px); opacity: 0 } to { transform: none; opacity: 1 } }
+.drawer-in { animation: drawer-in 0.22s ease-out both; }
+@media (prefers-reduced-motion: reduce) { .drawer-in { animation: none; } }

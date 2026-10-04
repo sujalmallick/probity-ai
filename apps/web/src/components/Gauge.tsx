@@ -40,7 +40,7 @@ export function Gauge({ score, tier, provisional, size = 148 }: { score: number 
         />
       </svg>
       <div className="absolute inset-0 flex flex-col items-center justify-center">
-        <div className="text-4xl font-bold tabular-nums leading-none" style={{ color: score === null ? "var(--muted)" : color }}>{score === null ? "—" : shown}</div>
+        <div className="text-4xl font-semibold tracking-tight tabular-nums leading-none" style={{ color: score === null ? "var(--muted)" : color }}>{score === null ? "—" : shown}</div>
         <div className="mt-1 text-[11px] font-semibold tracking-wider text-muted">/ 100</div>
         {score !== null && <div className="mt-1 text-xs font-bold tracking-wide" style={{ color }}>{tier && shown === score ? tier : shownTier}</div>}
         {provisional && <div className="mt-0.5 text-[10px] text-muted">Provisional</div>}

@@ -15,7 +15,7 @@ export default function Memory() {
   return (
     <div className="mx-auto flex max-w-4xl flex-col gap-4">
       <div>
-        <h1 className="text-xl font-bold">Case memory</h1>
+        <h1 className="page-title">Case memory</h1>
         <p className="text-sm text-muted">Human-confirmed outcomes only. Reused when the same vendor, bank account or domain appears again. Never shared across workspaces.</p>
       </div>
       <label className="relative">

@@ -1,16 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
-  ArrowLeft, ArrowRight, Brain, Building2, CheckCircle2, ChevronDown, ChevronRight, ClipboardList, Download, FileText, Globe, HelpCircle,
-  History, Landmark, Mail, MailCheck, PhoneCall, Search, ShieldAlert, ShieldCheck, ThumbsDown, ThumbsUp, UserCheck, XCircle,
+  AlertTriangle, ArrowLeft, ArrowRight, Braces, Brain, Building2, CheckCircle2, ChevronDown, ChevronRight, ClipboardList, Download, FileText, Globe, HelpCircle,
+  History, Landmark, Mail, MailCheck, MessageSquare, MoreHorizontal, PhoneCall, Search, Send, ShieldAlert, ShieldCheck, ThumbsDown, ThumbsUp, UserCheck, Workflow, XCircle,
 } from "lucide-react";
 import { api, can, fetchBlob, post, streamEvents, type Role } from "../lib/api";
 import { useAuth } from "../lib/auth";
+import { useAppConfig } from "../lib/config";
 import { evValue, inr, isoDate, relTime, RUNNING, tierColor } from "../lib/format";
 import { Gauge } from "../components/Gauge";
 import { RelGraph } from "../components/RelGraph";
 import { ActivityLog, Timeline, type AgentEvent } from "../components/Timeline";
-import { Modal, Skeleton, Spinner, StatusChip, TierChip, VerifyBadge } from "../components/ui";
+import { Drawer, MenuButton, Modal, Skeleton, Spinner, StatusChip, VerifyBadge } from "../components/ui";
 
 type Any = Record<string, any>;
 
@@ -36,6 +37,7 @@ const SRC_LABEL: Record<string, string> = {
 export default function CaseView() {
   const { id = "" } = useParams();
   const { user } = useAuth();
+  const cfg = useAppConfig();
   const nav = useNavigate();
   const [c, setC] = useState<Any | null>(null);
   const [events, setEvents] = useState<AgentEvent[]>([]);
@@ -44,6 +46,9 @@ export default function CaseView() {
   const [tab, setTab] = useState("evidence");
   const [why, setWhy] = useState<Any | null>(null);
   const [modal, setModal] = useState<null | "approve" | "reject" | "verify" | "draft" | "oob" | "close" | "investigate">(null);
+  const [pipeline, setPipeline] = useState(false);
+  const [showQuiet, setShowQuiet] = useState(false);
+  const [fullOnPhone, setFullOnPhone] = useState(false);
   const refetchTimer = useRef<number | undefined>(undefined);
 
   const load = useCallback(async () => {
@@ -96,170 +101,324 @@ export default function CaseView() {
   const dis = (needApprover = true) => (!awaiting ? `Case is ${c.status.toLowerCase().replace("_", " ")}` : needApprover && !isApprover ? "Requires approver role" : "");
 
   const openWhy = async () => setWhy(why ? null : await api(`/cases/${id}/explain`));
+  const anomalies = scored.filter((x) => x.points > 0);
+  const quiet = [...scored.filter((x) => !(x.points > 0)).map((x) => ({ id: x.signal, statement: x.label, status: claimById[x.claim_id]?.status ?? "verified" })), ...otherInfo, ...unconfirmedInfo];
+  const lastEvent = [...events].reverse().find((e) => e.message);
+  const rec = c.status === "AUTO_CLEARED" ? "Auto-cleared" : ACTION_LABEL[c.recommendation?.action] ?? "Pending";
+  const RecIcon = risk.tier === "LOW" || c.status === "AUTO_CLEARED" ? ShieldCheck : risk.tier === "MEDIUM" ? AlertTriangle : ShieldAlert;
+  const decided = ["APPROVED", "REJECTED", "AUTO_CLEARED"].includes(c.status);
+  const latestReply = (c.messages ?? []).filter((m: Any) => m.direction === "in").slice(-1)[0];
 
   return (
-    <div className="mx-auto flex max-w-7xl flex-col gap-4">
-      {/* Header */}
-      <div className="card flex flex-wrap items-center justify-between gap-4 px-5 py-4">
-        <div className="min-w-0">
-          <button className="mb-1 inline-flex items-center gap-1 text-xs text-muted hover:text-ink" onClick={() => nav("/dashboard")}><ArrowLeft size={13} />Queue</button>
-          <h1 className="text-lg font-bold">
-            Case #{c.number} · {c.invoice_number ?? c.document?.filename} · {c.vendor_name ?? "Unknown vendor"} · <span className="tabular-nums">{inr(c.amount?.amount_minor)}</span>
-          </h1>
-          <div className="mt-1 flex flex-wrap items-center gap-3 text-xs text-muted">
-            <StatusChip status={c.status} />
-            {c.partial && <span className="font-medium text-medium">Some checks did not complete — confidence reduced</span>}
-            {c.sources_checked > 0 && <span>{c.sources_checked + 2} sources checked</span>}
-            {c.duration_ms && <span>{(c.duration_ms / 1000).toFixed(1)}s investigation</span>}
-            {c.depth > 0 && <span>Investigated further ×{c.depth}</span>}
-          </div>
-        </div>
+    <div className="mx-auto flex max-w-6xl flex-col gap-5 pb-24 lg:pb-0">
+      {/* Top bar */}
+      <div className="flex items-center justify-between gap-3">
+        <Link to="/dashboard" className="inline-flex items-center gap-1.5 rounded-md text-sm text-muted transition-colors hover:text-ink"><ArrowLeft size={15} aria-hidden />Cases</Link>
         <div className="flex items-center gap-2">
-          {risk.tier && !running && <TierChip tier={risk.tier} score={risk.score} />}
-          <button className="btn !py-1.5 text-xs" onClick={() => download(`/api/v1/cases/${id}/export?format=pdf`, `probity-case-${c.number}.pdf`)}><Download size={13} />PDF report</button>
-          <button className="btn !py-1.5 text-xs" onClick={() => download(`/api/v1/cases/${id}/export?format=json`, `probity-case-${c.number}.json`)}>JSON</button>
+          <button className="btn !py-1.5 text-sm" onClick={() => setPipeline(true)} aria-haspopup="dialog">
+            {running ? <Spinner size={14} /> : <Workflow size={15} aria-hidden />}Agent pipeline
+          </button>
+          <MenuButton
+            label={<span className="hidden sm:inline">Export</span>}
+            icon={<Download size={15} aria-hidden />}
+            items={[
+              { label: "PDF report", hint: "For your records or auditors", icon: <FileText size={15} />, onSelect: () => download(`/api/v1/cases/${id}/export?format=pdf`, `probity-case-${c.number}.pdf`) },
+              { label: "JSON data", hint: "Every claim, evidence item and score", icon: <Braces size={15} />, onSelect: () => download(`/api/v1/cases/${id}/export?format=json`, `probity-case-${c.number}.json`) },
+            ]}
+          />
         </div>
       </div>
 
+      {/* Title */}
+      <header>
+        <h1 className="page-title">{c.vendor_name ?? "Unknown vendor"}</h1>
+        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-sm text-muted">
+          <span className="font-medium tabular-nums text-ink">{inr(c.amount?.amount_minor)}</span>
+          <span>{c.invoice_number ?? c.document?.filename}</span>
+          <span>Case #{c.number}</span>
+          <StatusChip status={c.status} />
+          {c.partial && <span className="text-medium">Some checks didn't finish</span>}
+        </div>
+      </header>
+
       {memoryClaims.map((m) => (
-        <div key={m.id} className="fade-in flex items-start gap-3 rounded-xl border border-line bg-accent-soft px-4 py-3 text-sm">
-          <Brain size={18} className="mt-0.5 shrink-0 text-accent" />
-          <div><div className="font-semibold text-accent">From case memory</div><div>{m.statement}</div></div>
+        <div key={m.id} className="fade-in flex items-start gap-3 rounded-xl border border-line bg-surface px-4 py-3 text-sm">
+          <Brain size={17} className="mt-0.5 shrink-0" aria-hidden />
+          <div><span className="font-medium">From case memory: </span><span className="text-muted">{m.statement}</span></div>
         </div>
       ))}
 
-      <div className="grid gap-4 lg:grid-cols-[250px_minmax(0,1fr)_300px]">
-        {/* Timeline */}
-        <div className="card h-fit p-3">
-          <div className="label mb-2 px-2">Agent timeline</div>
-          <Timeline events={events} running={running} />
-        </div>
-
-        {/* Findings */}
-        <div className="flex min-w-0 flex-col gap-4">
-          <div className="card p-4">
-            <div className="mb-3 flex items-center justify-between">
-              <div className="font-semibold">
-                {running ? "Findings (streaming…)" : scored.filter((x) => x.points > 0).length ? `${scored.filter((x) => x.points > 0).length} verified anomal${scored.filter((x) => x.points > 0).length === 1 ? "y" : "ies"}` : "Findings"}
-              </div>
-              {!running && contribs.length > 0 && <button className="btn !py-1 text-xs" onClick={openWhy} aria-expanded={!!why}><HelpCircle size={14} />Why?</button>}
+      <div className="grid grid-cols-1 items-start gap-5 lg:grid-cols-[minmax(0,1fr)_300px]">
+        <div className="flex min-w-0 flex-col gap-5">
+          {/* Anomalies */}
+          <section className="card p-5" aria-labelledby="anoms">
+            <div className="mb-4 flex items-center justify-between gap-2">
+              <h2 id="anoms" className="text-base font-semibold">
+                {running ? "Investigating…" : anomalies.length ? `${anomalies.length} ${anomalies.length === 1 ? "anomaly" : "anomalies"} found` : "No anomalies found"}
+              </h2>
+              {!running && contribs.length > 0 && <button className="btn !py-1 text-xs" onClick={openWhy} aria-expanded={!!why}><HelpCircle size={14} aria-hidden /><span className="hidden sm:inline">Why this score?</span><span className="sm:hidden">Why?</span></button>}
             </div>
-            {running && scored.length === 0 && <div className="flex items-center gap-2 py-6 text-sm text-muted"><Spinner />Agents are investigating — findings appear once verified.</div>}
-            {!running && scored.length === 0 && <div className="py-4 text-sm text-muted">No risk indicators fired across the checks that ran.</div>}
+            {running && (
+              <button className="flex w-full items-center gap-3 rounded-lg bg-surface-2 px-3 py-3 text-left text-sm" onClick={() => setPipeline(true)}>
+                <Spinner />
+                <span className="min-w-0 flex-1 truncate text-muted">{lastEvent?.message ?? "Starting agents…"}</span>
+                <span className="shrink-0 text-xs font-medium">View pipeline</span>
+              </button>
+            )}
+            {!running && anomalies.length === 0 && (
+              <div className="flex items-center gap-2 text-sm text-muted"><CheckCircle2 size={16} className="text-low" aria-hidden />Every check that ran came back clean.</div>
+            )}
             <div className="flex flex-col gap-2">
-              {scored.map((f) => <Finding key={f.signal} f={f} claim={claimById[f.claim_id]} evById={evById} />)}
+              {anomalies.map((f) => <Finding key={f.signal} f={f} claim={claimById[f.claim_id]} evById={evById} />)}
             </div>
             {risk.diff?.length > 0 && <ScoreDiff risk={risk} />}
             {why && <WhyPanel why={why} />}
-          </div>
-
-          {(pendingReply.length > 0 || replyClaims.length > 0) && (
-            <div className="card fade-in p-4">
-              <div className="mb-2 flex items-center justify-between">
-                <div className="flex items-center gap-2 font-semibold"><Mail size={16} />Vendor reply</div>
-                {pendingReply.length > 0 && <span className="text-xs text-medium">Unverified — awaiting approver</span>}
+            {!running && quiet.length > 0 && (
+              <div className="mt-4 border-t border-line pt-3">
+                <button className="flex w-full items-center gap-1.5 text-sm text-muted hover:text-ink" onClick={() => setShowQuiet(!showQuiet)} aria-expanded={showQuiet}>
+                  {showQuiet ? <ChevronDown size={15} aria-hidden /> : <ChevronRight size={15} aria-hidden />}
+                  {quiet.length} other {quiet.length === 1 ? "finding" : "findings"} with no score impact
+                </button>
+                {showQuiet && (
+                  <ul className="mt-2 flex flex-col gap-1.5 pl-5">
+                    {quiet.map((x: Any) => (
+                      <li key={x.id} className="flex items-start justify-between gap-3 text-sm">
+                        <span className="text-muted">{x.statement}</span>
+                        {x.status !== "verified" && <VerifyBadge status={x.status} />}
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </div>
-              {(c.messages ?? []).filter((m: Any) => m.direction === "in").slice(-1).map((m: Any) => (
-                <div key={m.id} className="mb-3 rounded-lg bg-surface-2 p-3 text-sm">
-                  <div className="mb-1 text-xs text-muted">From <b>{m.from}</b> · {relTime(m.at)}</div>
-                  <div className="whitespace-pre-wrap">{m.body}</div>
-                  {m.indicators?.length > 0 && (
-                    <ul className="mt-2 flex flex-col gap-1">
-                      {m.indicators.map((i: string) => <li key={i} className="flex items-center gap-1.5 text-xs font-medium text-high"><ShieldAlert size={13} />{i}</li>)}
-                    </ul>
-                  )}
-                </div>
-              ))}
-              <ul className="flex flex-col gap-1.5">
-                {replyClaims.map((r) => <li key={r.id} className="flex items-start justify-between gap-2 text-sm"><span>{r.statement}</span><VerifyBadge status={r.status} /></li>)}
+            )}
+          </section>
+
+          {/* Vendor reply */}
+          {replyClaims.length > 0 && (
+            <section className="card fade-in p-5" aria-labelledby="reply">
+              <div className="mb-3 flex items-center justify-between gap-2">
+                <h2 id="reply" className="flex items-center gap-2 text-base font-semibold"><Mail size={16} aria-hidden />Vendor reply</h2>
+                {pendingReply.length > 0 && <span className="text-xs font-medium text-medium">Awaiting approver</span>}
+              </div>
+              {latestReply && (
+                <details className="mb-3 rounded-lg bg-surface-2 p-3 text-sm">
+                  <summary className="cursor-pointer text-xs text-muted">From <b className="text-ink">{latestReply.from}</b> · {relTime(latestReply.at)} · show message</summary>
+                  <div className="mt-2 whitespace-pre-wrap">{latestReply.body}</div>
+                </details>
+              )}
+              {latestReply?.indicators?.length > 0 && (
+                <ul className="mb-3 flex flex-col gap-1">
+                  {latestReply.indicators.map((i: string) => <li key={i} className="flex items-center gap-1.5 text-xs font-medium text-high"><ShieldAlert size={13} aria-hidden />{i}</li>)}
+                </ul>
+              )}
+              <ul className="flex flex-col gap-2">
+                {replyClaims.map((r) => <li key={r.id} className="flex items-start justify-between gap-3 text-sm"><span>{r.statement.split(" (unverified")[0]}</span><VerifyBadge status={r.status} /></li>)}
               </ul>
               {pendingReply.length > 0 && (
-                <div className="mt-3 flex flex-wrap items-center gap-2">
-                  <button className="btn btn-primary" disabled={!!dis()} title={dis()} onClick={() => setModal("oob")}><PhoneCall size={15} />Confirm out-of-band</button>
-                  <span className="text-xs text-muted">The score changes only after an approver confirms through a known channel.</span>
+                <div className="mt-4 flex flex-wrap items-center gap-3">
+                  <button className="btn btn-primary" disabled={!!dis()} title={dis() || "Confirm through a channel already on file"} onClick={() => setModal("oob")}><PhoneCall size={15} aria-hidden />Confirm out-of-band</button>
+                  <span className="text-xs text-muted">A reply alone never lowers the score.</span>
                 </div>
               )}
-            </div>
+            </section>
           )}
 
-          {(otherInfo.length > 0 || unconfirmedInfo.length > 0) && (
-            <div className="card p-4">
-              <div className="label mb-2">Other findings</div>
-              <ul className="flex flex-col gap-1.5">
-                {[...otherInfo, ...unconfirmedInfo].map((x) => (
-                  <li key={x.id} className="flex items-start justify-between gap-3 text-sm">
-                    <span>{x.statement}</span>
-                    {x.status === "verified" ? <span className="text-[11px] text-muted">0 pts</span> : <VerifyBadge status={x.status} />}
-                  </li>
-                ))}
-              </ul>
-            </div>
+          {!fullOnPhone && (
+            <button className="btn md:hidden" onClick={() => setFullOnPhone(true)}><ChevronDown size={15} aria-hidden />Show evidence, invoice and comments</button>
           )}
-
-          <Tabs tab={tab} setTab={setTab} c={c} evidence={evidence} events={events} id={id} />
+          <div className={`flex min-w-0 flex-col gap-5 ${fullOnPhone ? "" : "hidden md:flex"}`}>
+            <Comments caseId={id} canPost={can(role, "accountant")} />
+            <Tabs tab={tab} setTab={setTab} c={c} evidence={evidence} id={id} />
+          </div>
         </div>
 
-        {/* Recommendation + decision bar */}
-        <div className="flex flex-col gap-4 lg:sticky lg:top-4 lg:h-fit">
-          <div className="card flex flex-col items-center p-4">
-            <Gauge score={running && !risk.score && risk.score !== 0 ? null : risk.score ?? null} tier={risk.tier} provisional={running} />
-            {risk.weights_version && <div className="mt-1 text-[11px] text-muted">Computed by code · weights {risk.weights_version}</div>}
-          </div>
-          <div className="card p-4">
-            <div className="label mb-1">Recommendation</div>
-            {running ? <div className="flex items-center gap-2 text-sm text-muted"><Spinner />Pending</div> : (
-              <>
-                <div className="text-lg font-bold" style={{ color: risk.tier ? tierColor[risk.tier] : undefined }}>
-                  {c.status === "AUTO_CLEARED" ? "AUTO-CLEARED" : (c.recommendation?.action ?? "—").replace("_", " ")}
-                </div>
-                <p className="mt-1 text-sm text-muted">{c.summary}</p>
-                {gate && !gate.auto_cleared && gate.reasons?.length > 0 && c.status === "AWAITING_HUMAN" && (
-                  <div className="mt-2 text-xs text-muted">Held: {gate.reasons.join("; ")}</div>
-                )}
-                {gate?.dual_approval && awaiting && <div className="mt-2 rounded-md bg-high-soft px-2 py-1 text-xs font-medium text-high">Two approvers required{c.recommendation?.approvals?.length ? ` · ${c.recommendation.approvals.length} of 2 received` : ""}</div>}
-              </>
-            )}
-          </div>
-
-          <div className="card flex flex-col gap-2 p-4" role="group" aria-label="Decision">
-            <div className="label">Human decision</div>
-            <button className="btn btn-primary" disabled={!!dis()} title={dis()} onClick={() => setModal("verify")}><MailCheck size={15} />Request vendor verification</button>
-            <div className="grid grid-cols-2 gap-2">
-              <button className="btn" disabled={!!dis()} title={dis()} onClick={() => setModal("approve")}><ThumbsUp size={15} />Approve</button>
-              <button className="btn btn-danger" disabled={!!dis()} title={dis()} onClick={() => setModal("reject")}><ThumbsDown size={15} />Reject</button>
+        {/* Score + decision (sticky on desktop) */}
+        <aside className="order-first flex flex-col gap-4 lg:order-none lg:sticky lg:top-6" aria-label="Score and decision">
+          <section className="card flex flex-col items-center px-5 pt-5 pb-4 text-center">
+            <div title={risk.weights_version ? `Computed by code · weights ${risk.weights_version}` : undefined}>
+              <Gauge score={running && !risk.score && risk.score !== 0 ? null : risk.score ?? null} tier={risk.tier} provisional={running} size={136} />
             </div>
-            <button className="btn" disabled={!!dis() || c.depth >= 2} title={c.depth >= 2 ? "Depth limit reached (2)" : dis()} onClick={() => setModal("investigate")}><Search size={15} />Investigate further</button>
-            {["APPROVED", "REJECTED", "AUTO_CLEARED"].includes(c.status) && (
-              <button className="btn" disabled={!can(role, c.status === "AUTO_CLEARED" ? "accountant" : "approver")} onClick={() => setModal("close")}><CheckCircle2 size={15} />Close case & save to memory</button>
+            {!running && (
+              <div className="mt-2 flex items-center gap-1.5 text-base font-semibold" style={{ color: risk.tier ? tierColor[risk.tier] : undefined }} title={gate?.reasons?.join("; ")}>
+                <RecIcon size={17} aria-hidden />{rec}
+              </div>
             )}
-            {!isApprover && <div className="text-xs text-muted">Signed in as {role}. Decisions require an approver.</div>}
-            <div className="text-[11px] text-muted">Probity never executes payments.</div>
-          </div>
+            {gate?.dual_approval && awaiting && (
+              <div className="mt-2 rounded-md bg-high-soft px-2 py-1 text-xs font-medium text-high">Two approvers needed{c.recommendation?.approvals?.length ? ` · ${c.recommendation.approvals.length}/2` : ""}</div>
+            )}
+          </section>
+
+          <section className="card hidden flex-col gap-2 p-4 lg:flex" role="group" aria-label="Decision">
+            <h2 className="mb-1 text-sm font-semibold">Your decision</h2>
+            <button className="btn btn-primary" disabled={!!dis()} title={dis()} onClick={() => setModal("verify")}><MailCheck size={15} aria-hidden />Request verification</button>
+            <div className="grid grid-cols-2 gap-2">
+              <button className="btn" disabled={!!dis()} title={dis()} onClick={() => setModal("approve")}><ThumbsUp size={15} aria-hidden />Approve</button>
+              <button className="btn btn-danger" disabled={!!dis()} title={dis()} onClick={() => setModal("reject")}><ThumbsDown size={15} aria-hidden />Reject</button>
+            </div>
+            <button className="btn" disabled={!!dis() || c.depth >= 2} title={c.depth >= 2 ? "Depth limit reached (2)" : dis()} onClick={() => setModal("investigate")}><Search size={15} aria-hidden />Investigate further</button>
+            {decided && (
+              <button
+                className="btn"
+                disabled={!can(role, c.status === "AUTO_CLEARED" ? "accountant" : "approver")}
+                title={!can(role, c.status === "AUTO_CLEARED" ? "accountant" : "approver") ? `Requires ${c.status === "AUTO_CLEARED" ? "accountant" : "approver"} role` : ""}
+                onClick={() => setModal("close")}
+              >
+                <CheckCircle2 size={15} aria-hidden />Close case
+              </button>
+            )}
+            {!isApprover && <p className="mt-1 text-xs text-muted">View only. Approvers make decisions.</p>}
+          </section>
 
           {c.status === "AWAITING_VENDOR" && sent && (
-            <div className="card fade-in flex flex-col gap-2 p-4">
-              <div className="flex items-center gap-2 text-sm font-semibold"><MailCheck size={16} className="text-accent" />Verification email sent</div>
-              <div className="text-xs text-muted">To {sent.to_email} · follow-up {isoDate(sent.followup_at)}</div>
-              <div className="label mt-2">Simulated vendor inbox</div>
-              <button className="btn" onClick={() => post(`/demo/vendor-reply/${id}?kind=legit`).then(load)}>Deliver vendor reply</button>
-              <button className="btn !text-xs text-muted" onClick={() => post(`/demo/vendor-reply/${id}?kind=spoof`).then(load)}>Deliver spoofed reply (lookalike domain)</button>
-            </div>
+            <section className="card fade-in flex flex-col gap-2 p-4">
+              <div className="flex items-center gap-2 text-sm font-semibold"><MailCheck size={16} aria-hidden />Email sent</div>
+              <div className="text-xs text-muted">To {sent.to_email} · follow up {isoDate(sent.followup_at)}</div>
+              {cfg.features.simulated_inbox ? (
+                <>
+                  <div className="label mt-2">Simulated inbox</div>
+                  <button className="btn" onClick={() => post(`/demo/vendor-reply/${id}?kind=legit`).then(load)}>Deliver vendor reply</button>
+                  <button className="btn !text-xs text-muted" onClick={() => post(`/demo/vendor-reply/${id}?kind=spoof`).then(load)}>Deliver spoofed reply</button>
+                </>
+              ) : (
+                <div className="text-xs text-muted">Waiting for the vendor's reply.</div>
+              )}
+            </section>
           )}
-        </div>
+        </aside>
       </div>
+
+      {/* Phone / tablet decision bar */}
+      <div className="fixed inset-x-0 bottom-0 z-30 border-t border-line bg-bg/95 px-3 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] backdrop-blur lg:hidden" role="group" aria-label="Decision">
+        <div className="mx-auto flex max-w-3xl items-center gap-2">
+          <button className="btn btn-primary flex-1 !px-2" disabled={!!dis()} title={dis()} onClick={() => setModal("verify")}><MailCheck size={15} aria-hidden />Verify</button>
+          <button className="btn flex-1 !px-2" disabled={!!dis()} title={dis()} onClick={() => setModal("approve")}><ThumbsUp size={15} aria-hidden />Approve</button>
+          <button className="btn btn-danger flex-1 !px-2" disabled={!!dis()} title={dis()} onClick={() => setModal("reject")}><ThumbsDown size={15} aria-hidden />Reject</button>
+          <MenuButton
+            label={<span className="sr-only">More actions</span>}
+            icon={<MoreHorizontal size={16} aria-hidden />}
+            items={[
+              ...(!dis() && c.depth < 2 ? [{ label: "Investigate further", icon: <Search size={15} />, onSelect: () => setModal("investigate") }] : []),
+              ...(decided && can(role, c.status === "AUTO_CLEARED" ? "accountant" : "approver") ? [{ label: "Close case", icon: <CheckCircle2 size={15} />, onSelect: () => setModal("close") }] : []),
+              { label: "Agent pipeline", icon: <Workflow size={15} />, onSelect: () => setPipeline(true) },
+            ]}
+            up
+          />
+        </div>
+        {!isApprover && <p className="mt-1.5 text-center text-[11px] text-muted">View only. Approvers make decisions.</p>}
+      </div>
+
+      {pipeline && (
+        <Drawer title="Agent pipeline" onClose={() => setPipeline(false)}>
+          <Timeline events={events} running={running} />
+          <details className="mt-4 rounded-lg border border-line p-3">
+            <summary className="cursor-pointer text-sm font-medium">Activity log</summary>
+            <div className="mt-3"><ActivityLog events={events} /></div>
+          </details>
+          <p className="mt-4 text-xs text-muted">{c.sources_checked > 0 ? `${c.sources_checked + 2} sources checked` : ""}{c.duration_ms ? ` · ${(c.duration_ms / 1000).toFixed(1)}s` : ""}{c.depth > 0 ? ` · investigated further ×${c.depth}` : ""}</p>
+        </Drawer>
+      )}
 
       {modal === "approve" && <DecisionModal title="Approve payment" kind="APPROVE" needReason={["HIGH", "CRITICAL"].includes(risk.tier)} id={id} onDone={() => { setModal(null); load(); }} onClose={() => setModal(null)} />}
       {modal === "reject" && <DecisionModal title="Reject invoice" kind="REJECT" needReason id={id} onDone={() => { setModal(null); load(); }} onClose={() => setModal(null)} />}
       {modal === "investigate" && <DecisionModal title="Investigate further" kind="INVESTIGATE_FURTHER" needReason={false} id={id} onDone={() => { setModal(null); setEvents([]); load(); }} onClose={() => setModal(null)} />}
       {modal === "verify" && <DecisionModal title="Request vendor verification" kind="REQUEST_VERIFICATION" needReason={false} id={id} onDone={async () => { await load(); setModal("draft"); }} onClose={() => setModal(null)}
-        hint="The Action agent drafts a neutral email to the vendor's verified contact. Nothing is sent until you approve the draft." />}
+        hint="Probity drafts a neutral email to the vendor's verified contact. Nothing is sent until you approve it." />}
       {modal === "draft" && draft && <DraftModal draft={draft} id={id} canSend={isApprover} onClose={() => setModal(null)} onSent={() => { setModal(null); load(); }} />}
       {modal === "oob" && <OOBModal claims={pendingReply} id={id} onClose={() => setModal(null)} onDone={() => { setModal(null); load(); }} />}
       {modal === "close" && <CloseModal id={id} onClose={() => setModal(null)} onDone={() => { setModal(null); load(); }} />}
       {draft && modal === null && awaiting && (
-        <button className="btn btn-primary fixed bottom-5 right-5 shadow-lg" onClick={() => setModal("draft")}><Mail size={15} />Review draft email</button>
+        <button className="btn btn-primary fixed right-5 bottom-24 z-30 shadow-lg lg:bottom-5" onClick={() => setModal("draft")}><Mail size={15} aria-hidden />Review draft email</button>
       )}
     </div>
+  );
+}
+
+const ACTION_LABEL: Record<string, string> = {
+  PROCEED: "Looks clear",
+  REVIEW: "Recommend review",
+  HOLD_PAYMENT: "Recommend hold",
+  REQUEST_VERIFICATION: "Recommend vendor check",
+};
+
+
+const ROLE_NAME: Record<string, string> = { owner: "Owner", approver: "Approver", accountant: "Accountant", viewer: "Viewer" };
+
+/** Case comment thread: oldest first, newest at the bottom next to the input. Every comment is audited server-side. */
+function Comments({ caseId, canPost }: { caseId: string; canPost: boolean }) {
+  const { user } = useAuth();
+  const [notes, setNotes] = useState<Any[] | null>(null);
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [loadErr, setLoadErr] = useState<string | null>(null);
+  const load = useCallback(() => api<{ items: Any[] }>(`/cases/${caseId}/notes`).then((r) => { setNotes(r.items); setLoadErr(null); }).catch((e) => setLoadErr(e.message)), [caseId]);
+  useEffect(() => { load(); }, [load]);
+  const ordered = useMemo(() => [...(notes ?? [])].sort((a, b) => String(a.at).localeCompare(String(b.at))), [notes]);
+  const submit = async (e?: React.FormEvent) => {
+    e?.preventDefault();
+    if (!text.trim()) return setErr("Write a comment first.");
+    setBusy(true);
+    setErr(null);
+    try {
+      const n = await post(`/cases/${caseId}/notes`, { text: text.trim() });
+      setNotes((prev) => [...(prev ?? []), { author: user?.name, author_role: user?.role, ...n }]);
+      setText("");
+    } catch (e: any) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <section className="card p-5" aria-labelledby="comments-title">
+      <h2 id="comments-title" className="mb-4 flex items-center gap-2 text-base font-semibold">
+        <MessageSquare size={16} aria-hidden />Comments{notes && notes.length > 0 && <span className="text-sm font-normal text-muted tabular-nums">{notes.length}</span>}
+      </h2>
+      {loadErr && <div role="alert" className="mb-3 rounded-lg bg-high-soft p-2.5 text-sm text-high">Couldn't load comments: {loadErr}</div>}
+      {!notes && !loadErr && <div className="flex flex-col gap-3"><Skeleton className="h-12" /><Skeleton className="h-12" /></div>}
+      {notes && ordered.length === 0 && <p className="mb-4 text-sm text-muted">No comments yet.{canPost ? " Add context for the next reviewer." : ""}</p>}
+      {ordered.length > 0 && (
+        <ol className="mb-4 flex flex-col gap-4">
+          {ordered.map((n) => (
+            <li key={n.id} className="flex gap-3">
+              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-2 text-[11px] font-semibold" aria-hidden>
+                {(n.author ?? "?").split(" ").map((p: string) => p[0]).slice(0, 2).join("").toUpperCase()}
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-baseline gap-x-2 text-sm">
+                  <span className="font-medium">{n.author ?? "Unknown"}</span>
+                  {n.author_role && <span className="rounded border border-line px-1.5 text-[11px] text-muted">{ROLE_NAME[n.author_role] ?? n.author_role}</span>}
+                  <time className="text-xs text-muted" dateTime={n.at} title={n.at ? new Date(n.at).toLocaleString() : undefined}>{n.at ? relTime(n.at) : ""}</time>
+                </div>
+                <p className="mt-0.5 text-sm whitespace-pre-wrap break-words">{n.text}</p>
+              </div>
+            </li>
+          ))}
+        </ol>
+      )}
+      {canPost ? (
+        <form onSubmit={submit} className="flex flex-col gap-2">
+          <label htmlFor="comment" className="sr-only">Add a comment</label>
+          <textarea
+            id="comment"
+            className="input min-h-[72px] resize-y"
+            placeholder="Add a comment…"
+            value={text}
+            maxLength={4000}
+            onChange={(e) => { setText(e.target.value); setErr(null); }}
+            onKeyDown={(e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) submit(); }}
+            aria-describedby="comment-hint"
+          />
+          {err && <p role="alert" className="text-xs text-high">{err}</p>}
+          <div className="flex items-center justify-between gap-2">
+            <span id="comment-hint" className="text-xs text-muted">Ctrl + Enter to post · saved to the audit log</span>
+            <button type="submit" className="btn btn-primary !py-1.5 text-sm" disabled={busy}>{busy ? <Spinner /> : <Send size={14} aria-hidden />}Post</button>
+          </div>
+        </form>
+      ) : (
+        <p className="rounded-lg bg-surface-2 px-3 py-2 text-xs text-muted" title="Requires accountant role">Viewers can read comments but not post.</p>
+      )}
+    </section>
   );
 }
 
@@ -352,13 +511,13 @@ function WhyPanel({ why }: { why: Any }) {
   );
 }
 
-function Tabs({ tab, setTab, c, evidence, events, id }: { tab: string; setTab: (t: string) => void; c: Any; evidence: Any[]; events: AgentEvent[]; id: string }) {
-  const tabs = [["evidence", `Evidence (${evidence.length})`], ["document", "Document"], ["checks", "Plan & checks"], ["graph", "Graph"], ["comms", "Communications"], ["audit", "Audit"], ["activity", "Activity"]];
+function Tabs({ tab, setTab, c, evidence, id }: { tab: string; setTab: (t: string) => void; c: Any; evidence: Any[]; id: string }) {
+  const tabs = [["evidence", `Evidence · ${evidence.length}`], ["document", "Invoice"], ["checks", "Checks"], ["graph", "Graph"], ["comms", "Messages"], ["audit", "Audit log"]];
   return (
     <div className="card">
-      <div className="flex gap-1 overflow-x-auto border-b border-line px-2" role="tablist">
+      <div className="flex gap-1 overflow-x-auto border-b border-line px-2" role="tablist" aria-label="Case details">
         {tabs.map(([k, l]) => (
-          <button key={k} role="tab" aria-selected={tab === k} className={`tab whitespace-nowrap px-3 py-2.5 text-sm ${tab === k ? "border-b-2 border-accent font-semibold text-accent" : "text-muted"}`} onClick={() => setTab(k)}>{l}</button>
+          <button key={k} role="tab" aria-selected={tab === k} className={`tab -mb-px shrink-0 whitespace-nowrap border-b-2 px-3 py-3 text-sm transition-colors duration-150 ${tab === k ? "border-accent font-medium text-ink" : "border-transparent text-muted hover:text-ink"}`} onClick={() => setTab(k)}>{l}</button>
         ))}
       </div>
       <div className="p-4">
@@ -368,7 +527,6 @@ function Tabs({ tab, setTab, c, evidence, events, id }: { tab: string; setTab: (
         {tab === "graph" && <GraphTab vendorId={c.vendor_id} />}
         {tab === "comms" && <CommsTab c={c} />}
         {tab === "audit" && <AuditTab id={id} />}
-        {tab === "activity" && <ActivityLog events={events} />}
       </div>
     </div>
   );
@@ -563,16 +721,34 @@ function DraftModal({ draft, id, canSend, onClose, onSent }: { draft: Any; id: s
   );
 }
 
+// Same minimum as the server (services.OOB_NOTE_MIN_CHARS).
+const OOB_NOTE_MIN = 20;
+const OOB_EXAMPLE = "Called R. Kulkarni on the number on file (+91 20 4000 1000); confirmed the new HDFC account and billing domain.";
+
 function OOBModal({ claims, id, onClose, onDone }: { claims: Any[]; id: string; onClose: () => void; onDone: () => void }) {
+  const cfg = useAppConfig();
   const [sel, setSel] = useState<string[]>(claims.map((c) => c.id));
   const [method, setMethod] = useState("phone_known_contact");
-  const [note, setNote] = useState("Called R. Kulkarni on the number on file (+91 20 4000 1000); confirmed new HDFC account and billing domain.");
+  const [knownChannel, setKnownChannel] = useState(false);
+  const [note, setNote] = useState("");
+  const [touched, setTouched] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const len = note.trim().length;
+  const noteShort = len < OOB_NOTE_MIN;
+  const blocker = !sel.length
+    ? "Select at least one statement you verified."
+    : !knownChannel
+      ? "Confirm you used a channel already on file."
+      : noteShort
+        ? `Describe what you verified in at least ${OOB_NOTE_MIN} characters.`
+        : "";
   const submit = async () => {
+    if (blocker) return;
     setBusy(true);
+    setErr(null);
     try {
-      await post(`/cases/${id}/out-of-band-confirmation`, { claim_ids: sel, method, note });
+      await post(`/cases/${id}/out-of-band-confirmation`, { claim_ids: sel, method, note: note.trim(), known_channel: true });
       onDone();
     } catch (e: any) {
       setErr(e.message);
@@ -581,33 +757,88 @@ function OOBModal({ claims, id, onClose, onDone }: { claims: Any[]; id: string; 
   };
   return (
     <Modal title="Confirm out-of-band" onClose={onClose} wide>
-      <p className="mb-3 text-sm text-muted">A vendor's email can't lower the score on its own: whoever sent the suspicious invoice could also control that inbox. Confirm only what you verified through a channel you already trust.</p>
-      <ul className="mb-3 flex flex-col gap-1.5">
-        {claims.map((c) => (
-          <li key={c.id}><label className="flex items-start gap-2 text-sm"><input type="checkbox" className="mt-1" checked={sel.includes(c.id)} onChange={(e) => setSel(e.target.checked ? [...sel, c.id] : sel.filter((x) => x !== c.id))} />{c.statement}</label></li>
-        ))}
-      </ul>
+      <p className="mb-4 text-sm text-muted">A vendor's email can't lower the score on its own: whoever sent the invoice could also control that inbox. Confirm only what you verified yourself through a channel you already trust.</p>
+
+      <fieldset className="mb-4">
+        <legend className="label mb-1.5">Statements you verified</legend>
+        <ul className="flex flex-col gap-1.5">
+          {claims.map((c) => (
+            <li key={c.id}><label className="flex items-start gap-2 text-sm"><input type="checkbox" className="mt-1" checked={sel.includes(c.id)} onChange={(e) => setSel(e.target.checked ? [...sel, c.id] : sel.filter((x) => x !== c.id))} />{c.statement}</label></li>
+          ))}
+        </ul>
+      </fieldset>
+
       <label className="label" htmlFor="method">Method</label>
-      <select id="method" className="input mb-3 mt-1" value={method} onChange={(e) => setMethod(e.target.value)}>
+      <select id="method" className="input mb-4 mt-1" value={method} onChange={(e) => setMethod(e.target.value)}>
         <option value="phone_known_contact">Phone call to known contact (number on file)</option>
         <option value="bank_letter">Bank letter verified with the bank</option>
         <option value="in_person">In person</option>
       </select>
-      <label className="label" htmlFor="note">What did you verify?</label>
-      <textarea id="note" className="input mt-1 h-20" value={note} onChange={(e) => setNote(e.target.value)} />
-      {err && <div className="mt-2 text-sm text-high">{err}</div>}
-      <div className="mt-4 flex justify-end gap-2">
+
+      <div className="mb-4 rounded-lg border border-line bg-surface-2 p-3">
+        <div className="label mb-2">Before you confirm</div>
+        <label className="flex items-start gap-2 text-sm">
+          <input type="checkbox" className="mt-1" checked={knownChannel} onChange={(e) => setKnownChannel(e.target.checked)} />
+          <span>I used a phone number or channel <b>already on file</b>, not one from the invoice or the reply.</span>
+        </label>
+      </div>
+
+      <div className="flex items-end justify-between gap-2">
+        <label className="label" htmlFor="note">What did you verify, and with whom?</label>
+        {cfg.features.demo && (
+          <button type="button" className="text-xs text-muted underline-offset-2 hover:text-ink hover:underline" onClick={() => { setNote(OOB_EXAMPLE); setTouched(true); }}>
+            Demo: fill example
+          </button>
+        )}
+      </div>
+      <textarea
+        id="note"
+        className="input mt-1 h-24 placeholder:text-muted/60"
+        value={note}
+        placeholder={`e.g. ${OOB_EXAMPLE}`}
+        aria-invalid={touched && noteShort}
+        aria-describedby="note-hint"
+        onChange={(e) => setNote(e.target.value)}
+        onBlur={() => setTouched(true)}
+      />
+      <div id="note-hint" className={`mt-1 flex justify-between gap-2 text-xs ${touched && noteShort ? "text-high" : "text-muted"}`}>
+        <span>{touched && noteShort ? "Too short: say who you contacted, on which number on file, and what they confirmed." : "Name the person, the channel on file, and what they confirmed. This goes into the audit log."}</span>
+        <span className="shrink-0 tabular-nums">{len}/{OOB_NOTE_MIN}</span>
+      </div>
+      {err && <div role="alert" className="mt-2 rounded-lg bg-high-soft p-2.5 text-sm text-high">{err}</div>}
+
+      <div className="mt-5 flex flex-wrap items-center justify-end gap-2">
+        {blocker && <span id="oob-blocker" className="mr-auto text-xs text-muted">{blocker}</span>}
         <button className="btn" onClick={onClose}>Cancel</button>
-        <button className="btn btn-primary" disabled={busy || !sel.length || note.trim().length < 5} onClick={submit}>{busy ? <Spinner /> : <PhoneCall size={15} />}Confirm & re-score</button>
+        <button className="btn btn-primary" disabled={busy || !!blocker} title={blocker} aria-describedby={blocker ? "oob-blocker" : undefined} onClick={submit}>
+          {busy ? <Spinner /> : <PhoneCall size={15} />}Confirm & re-score
+        </button>
       </div>
     </Modal>
   );
 }
 
+const CLOSE_MIN = 10;
+const CLOSE_EXAMPLE = "Bank-account change verified out-of-band with the known contact on file.";
+
 function CloseModal({ id, onClose, onDone }: { id: string; onClose: () => void; onDone: () => void }) {
+  const cfg = useAppConfig();
   const [outcome, setOutcome] = useState("CLEARED");
-  const [resolution, setResolution] = useState("Bank-account change verified out-of-band with known contact.");
+  const [resolution, setResolution] = useState("");
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const short = resolution.trim().length < CLOSE_MIN;
+  const submit = async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      await post(`/cases/${id}/close`, { outcome, resolution: resolution.trim() });
+      onDone();
+    } catch (e: any) {
+      setErr(e.message);
+      setBusy(false);
+    }
+  };
   return (
     <Modal title="Close case" onClose={onClose}>
       <p className="mb-3 text-sm text-muted">Only human-confirmed outcomes become case memory. The next invoice from this vendor will reference it.</p>
@@ -617,11 +848,16 @@ function CloseModal({ id, onClose, onDone }: { id: string; onClose: () => void; 
         <option value="CONFIRMED_ISSUE">Confirmed issue — weight on future invoices</option>
         <option value="INCONCLUSIVE">Inconclusive</option>
       </select>
-      <label className="label" htmlFor="res">Resolution</label>
-      <textarea id="res" className="input mt-1 h-20" value={resolution} onChange={(e) => setResolution(e.target.value)} />
+      <div className="flex items-end justify-between gap-2">
+        <label className="label" htmlFor="res">Resolution</label>
+        {cfg.features.demo && <button type="button" className="text-xs text-muted underline-offset-2 hover:text-ink hover:underline" onClick={() => setResolution(CLOSE_EXAMPLE)}>Demo: fill example</button>}
+      </div>
+      <textarea id="res" className="input mt-1 h-20 placeholder:text-muted/60" value={resolution} placeholder={`e.g. ${CLOSE_EXAMPLE}`} aria-describedby="res-hint" onChange={(e) => setResolution(e.target.value)} />
+      <div id="res-hint" className="mt-1 text-xs text-muted">What was established, and how. At least {CLOSE_MIN} characters.</div>
+      {err && <div role="alert" className="mt-2 rounded-lg bg-high-soft p-2.5 text-sm text-high">{err}</div>}
       <div className="mt-4 flex justify-end gap-2">
         <button className="btn" onClick={onClose}>Cancel</button>
-        <button className="btn btn-primary" disabled={busy} onClick={async () => { setBusy(true); await post(`/cases/${id}/close`, { outcome, resolution }); onDone(); }}>{busy && <Spinner />}Close & save to memory</button>
+        <button className="btn btn-primary" disabled={busy || short} title={short ? `Write a resolution of at least ${CLOSE_MIN} characters.` : ""} onClick={submit}>{busy && <Spinner />}Close & save to memory</button>
       </div>
     </Modal>
   );
