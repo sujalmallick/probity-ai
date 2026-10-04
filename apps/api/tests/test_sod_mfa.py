@@ -114,6 +114,8 @@ def test_mfa_required_everywhere_it_matters(client, world, fake_lookups):
         ("post", "/imports/vendors?dry_run=false", {"files": {"file": ("v.csv", csv_body, "text/csv")}}),
         ("patch", f"/vendors/{vid}", {"json": {"address": "Somewhere else"}}),
         ("delete", f"/vendors/{vid}/contacts/{contact_id}", {}),
+        ("put", "/workspace/invoice-risk-policy", {"json": {}}),
+        ("delete", "/workspace/invoice-risk-policy", {}),
     ]
     for method, path, kw in calls:
         assert getattr(client, method)(f"{API}{path}", headers=owner, **kw).status_code == 403, path

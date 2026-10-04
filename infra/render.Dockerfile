@@ -26,7 +26,9 @@ COPY --from=web /web/dist apps/web/dist
 USER probity
 WORKDIR /app/apps/api
 # Fewer glibc malloc arenas: keeps a threaded Python process well inside the 512 MB free instance.
-ENV MALLOC_ARENA_MAX=2
+# One document parser helper capped at 320 MB: API (~110 MB) + helper stays under 512 MB (config.py parse_*).
+ENV MALLOC_ARENA_MAX=2 PARSE_HELPERS=1 PARSE_MEMORY_MB=320
 # Render sets PORT (10000 by default) and is the only thing that can reach the container, so trusting its
 # X-Forwarded-* headers is safe. Run exactly one process: inline investigations live in it.
-CMD ["sh", "-c", "python -m probity.bootstrap && exec uvicorn probity.api.main:app --host 0.0.0.0 --port ${PORT:-10000} --proxy-headers --forwarded-allow-ips '*'"]
+# Only the migration step gets the schema owner's URL; the API runs without it (as probity_app, row-level security on).
+CMD ["sh", "-c", "python -m probity.bootstrap && exec env -u DATABASE_MIGRATE_URL uvicorn probity.api.main:app --host 0.0.0.0 --port ${PORT:-10000} --proxy-headers --forwarded-allow-ips '*'"]

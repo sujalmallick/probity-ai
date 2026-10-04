@@ -127,6 +127,11 @@ class Settings(BaseSettings):
     case_token_limit: int = 200_000  # AI tokens (input + output) per case
     case_web_search_limit: int = 10  # web searches per case
     max_upload_mb: int = 10  # invoice upload size
+    # Document parser helper processes (ingestion/isolate.py): how many run at once, and each one's address-space cap.
+    # A helper uses ~235 MB reading a 30-page invoice and needs a cap of at least ~288 MB. Keep helpers × cap plus
+    # the API's ~110 MB inside the machine (Render free, 512 MB: PARSE_HELPERS=1, PARSE_MEMORY_MB=320).
+    parse_helpers: int = 2
+    parse_memory_mb: int = 1536
     # --- hard per-case budgets (Guardrails G7)
     max_depth: int = 2
     max_retries: int = 2

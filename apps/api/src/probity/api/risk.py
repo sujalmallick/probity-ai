@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
 
 from probity import services as svc
-from probity.api.deps import current_user, db
+from probity.api.deps import current_user, db, require_mfa_for_approvals
 from probity.db.audit import audit
 from probity.db.models import User, Workspace
 from probity.risk import case_scoring
@@ -39,7 +39,7 @@ def get_invoice_risk_policy(user: User = Depends(current_user), s: Session = Dep
 
 
 @router.put("/workspace/invoice-risk-policy")
-def put_invoice_risk_policy(body: dict[str, Any], request: Request, user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
+def put_invoice_risk_policy(body: dict[str, Any], request: Request, user: User = Depends(require_mfa_for_approvals), s: Session = Depends(db)) -> dict:
     svc.require_role(user, "owner")
     problems = validate_policy(body)
     if problems:
@@ -53,7 +53,7 @@ def put_invoice_risk_policy(body: dict[str, Any], request: Request, user: User =
 
 
 @router.delete("/workspace/invoice-risk-policy")
-def reset_invoice_risk_policy(request: Request, user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
+def reset_invoice_risk_policy(request: Request, user: User = Depends(require_mfa_for_approvals), s: Session = Depends(db)) -> dict:
     svc.require_role(user, "owner")
     ws = s.get(Workspace, user.workspace_id)
     assert ws

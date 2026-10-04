@@ -309,6 +309,7 @@ def clerk(monkeypatch):
         return CLERK_PROFILES[user_id]
 
     monkeypatch.setattr(auth, "clerk_profile", profile)
+    monkeypatch.setattr(auth, "clerk_user_exists", lambda user_id: user_id in CLERK_PROFILES)
     CLERK_PROFILES.clear()
     return CLERK_PROFILES
 

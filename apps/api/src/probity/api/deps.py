@@ -29,12 +29,16 @@ def db() -> Iterator[Session]:
 
 
 
-def principal(request: Request, s: Session = Depends(db), authorization: str | None = Header(default=None)) -> Principal:
+def bearer_token(authorization: str | None) -> str:
     """Bearer token from the Authorization header only (never from the URL)."""
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(401, "missing bearer token")
+    return authorization.split(" ", 1)[1].strip()
+
+
+def principal(request: Request, s: Session = Depends(db), authorization: str | None = Header(default=None)) -> Principal:
     try:
-        p = authenticate(authorization.split(" ", 1)[1].strip(), s)
+        p = authenticate(bearer_token(authorization), s)
     except AuthError as e:
         raise HTTPException(401, str(e)) from e
     request.state.principal = p
@@ -47,7 +51,7 @@ def current_user(p: Principal = Depends(principal)) -> User:
     return p.user
 
 
-def require_mfa_for_approvals(p: Principal = Depends(principal), s: Session = Depends(db)) -> User:
+def ensure_mfa(p: Principal, s: Session) -> None:
     """Approver actions (decisions, sends, out-of-band confirmations) require a second factor when the
     workspace policy says so (Security.md §2). Clerk reports factor verification in the session token."""
     from probity.db.models import Workspace
@@ -55,6 +59,10 @@ def require_mfa_for_approvals(p: Principal = Depends(principal), s: Session = De
 
     if get_policy(s.get(Workspace, p.user.workspace_id)).get("require_mfa_for_approvals") and not p.mfa_verified:
         raise HTTPException(403, "this action requires multi-factor authentication — enable MFA in your account and sign in again")
+
+
+def require_mfa_for_approvals(p: Principal = Depends(principal), s: Session = Depends(db)) -> User:
+    ensure_mfa(p, s)
     return p.user
 
 
