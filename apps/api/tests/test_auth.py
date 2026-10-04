@@ -106,14 +106,82 @@ def test_first_sign_in_creates_own_workspace_as_owner(client, db, clerk):
         assert s.scalars(select(Workspace)).all().__len__() == 1
 
 
-def test_invited_user_joins_with_invited_role(client, world, clerk):
+def test_invited_user_accepts_and_joins_with_invited_role(client, world, clerk):
     owner = login(client, "owner")
     r = client.post(f"{API}/workspace/invitations", headers=owner, json={"email": "invitee@company.test", "role": "approver"})
     assert r.status_code == 201, r.text
     assert r.json()["email_sent"] is False  # not on the email allowlist → blocked, invitation still stored
     clerk["user_invitee"] = ("invitee@company.test", "Invited Person")
+    pending = client.get(f"{API}/me", headers=bearer("user_invitee"))
+    assert pending.status_code == 409 and pending.json()["error"]["code"] == "invitation_pending"
+    [inv] = pending.json()["error"]["invitations"]
+    assert inv["role"] == "approver" and inv["workspace"] and inv["invited_by"]["email"] == world.user("owner").email
+    joined = client.post(f"{API}/me/join", headers=bearer("user_invitee"), json={"invitation_id": inv["id"]})
+    assert joined.status_code == 200, joined.text
     me = client.get(f"{API}/me", headers=bearer("user_invitee")).json()
     assert me["role"] == "approver" and me["workspace"]["id"] == world.workspace_id
+    assert client.post(f"{API}/me/join", headers=bearer("user_invitee"), json={"own_workspace": True}).status_code == 409
+
+
+def test_a_strangers_invitation_is_never_joined_automatically(client, world, clerk):
+    """Anyone can sign up and invite any email: the invitee sees who invited them and chooses (no auto-join)."""
+    clerk["user_attacker"] = ("attacker@evil.test", "Acme Finance")
+    attacker = bearer("user_attacker")
+    assert client.get(f"{API}/me", headers=attacker).status_code == 200
+    assert client.post(f"{API}/workspace/invitations", headers=attacker, json={"email": "ap@company.test", "role": "owner"}).status_code == 201
+    assert client.post(f"{API}/workspace/invitations", headers=login(client, "owner"), json={"email": "ap@company.test", "role": "accountant"}).status_code == 201
+    clerk["user_ap"] = ("ap@company.test", "AP Clerk")
+    r = client.get(f"{API}/me", headers=bearer("user_ap"))
+    assert r.status_code == 409
+    inviters = {i["invited_by"]["email"] for i in r.json()["error"]["invitations"]}
+    assert inviters == {"attacker@evil.test", world.user("owner").email}
+    with owner_session() as s:
+        assert s.scalars(select(User).where(User.email == "ap@company.test")).first() is None  # nothing created yet
+    me = client.post(f"{API}/me/join", headers=bearer("user_ap"), json={"own_workspace": True}).json()
+    assert me["role"] == "owner" and me["workspace"]["id"] != world.workspace_id
+
+
+def test_join_only_accepts_your_own_invitations(client, world, clerk):
+    owner = login(client, "owner")
+    inv = client.post(f"{API}/workspace/invitations", headers=owner, json={"email": "someone@company.test", "role": "owner"}).json()
+    clerk["user_other"] = ("other@company.test", "Other Person")
+    r = client.post(f"{API}/me/join", headers=bearer("user_other"), json={"invitation_id": inv["id"]})
+    assert r.status_code == 404
+    assert client.post(f"{API}/me/join", headers=bearer("user_other"), json={}).status_code == 400
+    assert client.post(f"{API}/me/join", json={"own_workspace": True}).status_code == 401
+
+
+def test_invite_does_not_reveal_who_uses_probity(client, world, clerk):
+    clerk["user_elsewhere"] = ("elsewhere@company.test", "Elsewhere")
+    assert client.get(f"{API}/me", headers=bearer("user_elsewhere")).status_code == 200  # owns another workspace
+    owner = login(client, "owner")
+    assert client.post(f"{API}/workspace/invitations", headers=owner, json={"email": "elsewhere@company.test", "role": "viewer"}).status_code == 201
+    member = world.user("viewer").email
+    assert client.post(f"{API}/workspace/invitations", headers=owner, json={"email": member, "role": "viewer"}).status_code == 409
+
+
+def test_new_identity_cannot_take_over_an_existing_account(client, world, clerk):
+    victim = world.user("approver")
+    clerk[victim.external_id] = (victim.email, victim.name)  # the original Clerk identity still exists
+    clerk["user_new_identity"] = (victim.email, "Someone Else")
+    assert client.get(f"{API}/me", headers=bearer("user_new_identity")).status_code == 401
+    with owner_session() as s:
+        assert s.get(User, victim.id).external_id == victim.external_id
+        assert s.scalars(select(AuditLog).where(AuditLog.action == "auth.relink_refused")).first() is not None
+
+
+def test_deleted_and_recreated_clerk_account_is_relinked(client, world, clerk):
+    person = world.user("approver")  # their old Clerk identity is gone (not in the fake Clerk directory)
+    clerk["user_recreated"] = (person.email, person.name)
+    me = client.get(f"{API}/me", headers=bearer("user_recreated")).json()
+    assert me["id"] == person.id and me["role"] == "approver"
+    with owner_session() as s:
+        assert s.scalars(select(AuditLog).where(AuditLog.action == "user.relinked")).first() is not None
+
+
+def test_rejected_token_does_not_echo_library_details(client, world):
+    r = client.get(f"{API}/me", headers={"Authorization": "Bearer not-a-token"})
+    assert r.status_code == 401 and r.json()["error"]["message"] == "invalid session token"
 
 
 def test_unverified_email_cannot_sign_in(client, db, clerk, monkeypatch):

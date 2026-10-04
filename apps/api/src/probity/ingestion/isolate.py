@@ -3,9 +3,12 @@
 A few kilobytes of crafted PDF can keep pdfminer busy for minutes or make a page render allocate gigabytes, and a
 thread cannot be stopped. A helper process can: on timeout it is killed, replaced, and the upload is refused.
 
-Helpers are plain subprocesses (`python -m probity.ingestion.isolate --serve`), kept warm and reused. Unlike a
-multiprocessing pool they never re-import the caller's __main__ and work inside daemonic Celery workers. Requests
-and results cross the pipe as a JSON header line plus raw document bytes / a JSON result line.
+Helpers are plain subprocesses (`python -m probity.ingestion.isolate --serve <memory MB>`), kept warm and reused.
+Unlike a multiprocessing pool they never re-import the caller's __main__ and work inside daemonic Celery workers.
+Requests and results cross the pipe as a JSON header line plus raw document bytes / a JSON result line.
+
+Helpers start with a bare environment (no database URLs, API keys or app secrets): code execution through a parser
+bug must not hand over the credentials the API holds. PARSE_HELPERS and PARSE_MEMORY_MB size them to the machine.
 """
 
 from __future__ import annotations
@@ -23,15 +26,22 @@ from concurrent.futures import TimeoutError as FutureTimeout
 from typing import IO, Any
 
 PARSE_TIMEOUT_S = 30
-HELPERS = 2
-MEMORY_LIMIT_BYTES = 1536 * 1024 * 1024
 _TIMEOUT_MESSAGE = "the document took too long to read; re-export it as a simple PDF"
+# What a helper needs to start Python and import the parsers, and nothing else.
+_HELPER_ENV_KEYS = ("PATH", "PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV", "HOME", "LANG", "LC_ALL", "TMPDIR", "TEMP", "TMP",
+                    "SYSTEMROOT", "MALLOC_ARENA_MAX")
+
+
+def helper_env() -> dict[str, str]:
+    return {k: os.environ[k] for k in _HELPER_ENV_KEYS if k in os.environ}
 
 
 class _Helper:
     def __init__(self) -> None:
-        self.proc = subprocess.Popen([sys.executable, "-m", "probity.ingestion.isolate", "--serve"], stdin=subprocess.PIPE,
-                                     stdout=subprocess.PIPE, env=os.environ.copy())
+        from probity.config import get_settings
+
+        self.proc = subprocess.Popen([sys.executable, "-m", "probity.ingestion.isolate", "--serve", str(get_settings().parse_memory_mb)],
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=helper_env())
 
     def alive(self) -> bool:
         return self.proc.poll() is None
@@ -54,12 +64,23 @@ class _Helper:
 
 
 _idle: queue.Queue[_Helper] = queue.Queue()
-_slots = threading.BoundedSemaphore(HELPERS)
-_waiter = ThreadPoolExecutor(max_workers=HELPERS, thread_name_prefix="parse-wait")
+_waiter = ThreadPoolExecutor(max_workers=8, thread_name_prefix="parse-wait")  # bounded by the slots below
+_slots: threading.BoundedSemaphore | None = None
+_slots_lock = threading.Lock()
+
+
+def _slot_semaphore() -> threading.BoundedSemaphore:
+    global _slots
+    with _slots_lock:
+        if _slots is None:
+            from probity.config import get_settings
+
+            _slots = threading.BoundedSemaphore(max(1, min(get_settings().parse_helpers, 8)))
+        return _slots
 
 
 def _checkout() -> _Helper:
-    _slots.acquire()
+    _slot_semaphore().acquire()
     try:
         while True:
             h = _idle.get_nowait()
@@ -87,7 +108,7 @@ def run(target: str, data: bytes, mime: str, timeout: float = PARSE_TIMEOUT_S) -
             _idle.put(h)
         else:
             h.kill()  # stuck or crashed: never reuse it
-        _slots.release()
+        _slot_semaphore().release()
     if "error" in out:
         raise UnsupportedDocument(out["error"])
     return out["result"]
@@ -104,12 +125,18 @@ def _shutdown() -> None:
 
 # ---------------------------------------------------------------- helper side
 
-def _limit_memory() -> None:
+def _limit_memory(megabytes: int) -> None:
     try:
         import resource  # POSIX only
 
-        resource.setrlimit(resource.RLIMIT_AS, (MEMORY_LIMIT_BYTES, MEMORY_LIMIT_BYTES))
+        limit = megabytes * 1024 * 1024
+        resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
     except (ImportError, ValueError, OSError):
+        pass
+    try:  # Linux: if the machine still runs out of memory, the kernel kills this helper, never the API
+        with open("/proc/self/oom_score_adj", "w") as f:
+            f.write("1000")
+    except OSError:
         pass
 
 
@@ -133,8 +160,8 @@ def _serve(inp: IO[bytes], out: IO[bytes]) -> None:
         out.flush()
 
 
-if __name__ == "__main__" and sys.argv[1:] == ["--serve"]:
-    _limit_memory()
+if __name__ == "__main__" and sys.argv[1:2] == ["--serve"]:
+    _limit_memory(int(sys.argv[2]) if len(sys.argv) > 2 else 1536)
     protocol_out = os.fdopen(os.dup(sys.stdout.fileno()), "wb")
     sys.stdout = sys.stderr  # library prints must never corrupt the result stream
     _serve(sys.stdin.buffer, protocol_out)

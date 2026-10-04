@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import base64
 import re
 import socket
 import struct
@@ -135,7 +136,21 @@ def clean_pdf(data: bytes) -> tuple[bytes, list[str]]:
 
 def check_upload(data: bytes, mime: str) -> tuple[bytes, list[str]]:
     """What gets stored for an upload: a cleaned PDF, or an email whose PDF attachment passed the same structural
-    check (the email itself is never rendered, only read as text and offered as a download)."""
+    check (the email itself is never rendered, only read as text and offered as a download). The work runs in an
+    isolated parser process with the same time and memory limits as text extraction (isolate.py): a hostile PDF
+    can't stall or exhaust the API process."""
+    from probity.ingestion import isolate
+
+    out = isolate.run("probity.ingestion.scan._check_upload_local", data, mime)
+    return base64.b64decode(out["data"]), out["removed"]
+
+
+def _check_upload_local(data: bytes, mime: str) -> dict:
+    stored, removed = _check_upload(data, mime)
+    return {"data": base64.b64encode(stored).decode(), "removed": removed}
+
+
+def _check_upload(data: bytes, mime: str) -> tuple[bytes, list[str]]:
     if mime == "application/pdf":
         return clean_pdf(data)
     if mime == "message/rfc822":

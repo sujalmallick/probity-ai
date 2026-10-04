@@ -145,6 +145,19 @@ These are listed in the full report (L1–L19). Examples:
 | M16 | Usage limits, all configurable in `.env` (user's defaults): 25 investigations per workspace per day (429 `limit_reached`), 3,000,000 AI tokens per workspace per day, 200,000 AI tokens per case (input **and** output tokens counted), 10 web searches per case, `MAX_SECONDS` per run, and a 10 MB upload cap (`MAX_UPLOAD_MB`; the request-body cap is upload + 1 MB, and `infra/nginx.conf` uses 11m). Reaching a per-case limit stops the investigation cleanly with "Limit reached: <limit> (<SETTING>)". | `test_currency_and_limits.py`, `test_body_limit.py`, `test_platform.py` |
 | M23 (part) | Exact-version lock files, CI `permissions: contents: read`, `pip-audit` and `npm audit` in CI, a root `.dockerignore`. | CI |
 
+### Post-deploy review (October 2026)
+| ID | Fix | Guarded by |
+|---|---|---|
+| D1 (High) | Invitations are never joined automatically: anyone can sign up and invite any email, so a first sign-in with pending invitations gets 409 `invitation_pending` (workspace, role, inviter) and the person accepts one or starts their own workspace (`POST /me/join`). Inviting an email that's in another workspace no longer answers 409, so it can't reveal who uses Probity. | `test_auth.py` |
+| D2 | A new Clerk identity with an existing user's email is re-linked only when Clerk confirms the old identity no longer exists; otherwise the sign-in is refused and audited (`auth.relink_refused`). | `test_auth.py` |
+| D3 | Uploads check the role before any parsing; PDF cleaning runs in the isolated helper (time and memory limits) and off the event loop. `PARSE_HELPERS` / `PARSE_MEMORY_MB` size helpers to the machine (Render: 1 × 320 MB), and the kernel's OOM killer picks a helper before the API. | `test_deploy_hardening.py`, `test_ingestion_hardening.py` |
+| D4 | Parser helpers start with a bare environment (no database URLs, keys or app secrets). The API and workers run without `DATABASE_MIGRATE_URL`; only the migration step gets the owner URL (Render CMD, compose `migrate`). Cross-tenant `/metrics` aggregates therefore read through the app role and RLS, and show no rows. | `test_deploy_hardening.py` |
+| D5 | MFA (when the policy requires it) also covers the invoice-risk policy and deleting approved history or POs. | `test_sod_mfa.py` |
+| D6 | Production serves no `/docs`, `/redoc` or `/openapi.json`; a rejected token says only "invalid session token". | `test_deploy_hardening.py`, `test_auth.py` |
+| D7 | Download filenames are header-safe (ASCII fallback plus RFC 5987 `filename*`), so non-Latin or quoted names no longer break the file route. | `test_deploy_hardening.py` |
+
+Still open from that review (low): `--forwarded-allow-ips '*'` lets a client spoof the logged IP (only logs use it); MFA has no freshness window (`fva` age); set `CLERK_FRONTEND_API` in production so the web CSP names one Clerk host.
+
 ### Not part of the code
 - **Repo hygiene:** `.gitignore` covers env files, keys, logs, local databases and real invoices.
 - **Commit email:** local commits use the GitHub noreply address, and the repo's git config uses it by default.

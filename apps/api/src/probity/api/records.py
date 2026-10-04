@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from probity import baseline
 from probity import services as svc
-from probity.api.deps import current_user, db, require_mfa_for_approvals
+from probity.api.deps import current_user, db, ensure_mfa, require_mfa_for_approvals
 from probity.db.audit import audit
 from probity.db.models import HistoricalInvoice, PurchaseOrder, User, Vendor, VendorBankAccount, iso
 from probity.guardrails import crypto
@@ -209,6 +209,7 @@ def delete_history(vendor_id: str, hid: str, request: Request, user: User = Depe
     h = _history_row(s, user, vendor_id, hid)
     if baseline.is_approved(h):
         svc.require_role(user, "approver")  # removing approved baseline changes what invoices are compared against
+        ensure_mfa(request.state.principal, s)  # as strict as approving it
     audit(s, user.workspace_id, user.id, "history.deleted", h.id, history_public(h, {}), request.state.request_id)
     s.delete(h)
 
@@ -284,6 +285,7 @@ def delete_po(po_id: str, request: Request, user: User = Depends(current_user), 
     p = _po_row(s, user, po_id)
     if baseline.is_approved(p):
         svc.require_role(user, "approver")
+        ensure_mfa(request.state.principal, s)
     audit(s, user.workspace_id, user.id, "po.deleted", p.id, po_public(p, {}), request.state.request_id)
     s.delete(p)
 

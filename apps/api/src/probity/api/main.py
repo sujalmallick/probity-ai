@@ -19,7 +19,8 @@ from sqlalchemy import func, or_, select  # noqa: F401
 from sqlalchemy.orm import Session
 
 from probity import services as svc
-from probity.api.deps import current_user, db, require_mfa_for_approvals, upload_limit
+from probity.api.deps import bearer_token, current_user, db, require_mfa_for_approvals, upload_limit
+from probity.auth import AuthError, InvitationPending, authenticate, verify_clerk_token
 from probity.config import REPO_ROOT, ConfigError, get_settings
 from probity.db.audit import audit, verify_chain
 from probity.db.models import iso, AuditLog, Invitation, Case, CaseMemory, Document, User, Vendor, Workspace
@@ -34,8 +35,15 @@ from probity.risk.engine import WEIGHTS
 
 configure_logging()
 log = get_logger("api")
-app = FastAPI(title="Probity API", version="1.0.0", description="Evidence before payment.")
+
+
+def docs_routes(env: str) -> dict:
+    """The interactive API docs and schema are for development; production doesn't publish its API surface."""
+    return {"docs_url": None, "redoc_url": None, "openapi_url": None} if env == "prod" else {}
+
+
 settings = get_settings()
+app = FastAPI(title="Probity API", version="1.0.0", description="Evidence before payment.", **docs_routes(settings.env))
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[o.strip() for o in settings.cors_origins.split(",") if o.strip()],
@@ -165,6 +173,13 @@ async def _http(request: Request, e: HTTPException):  # type: ignore[no-untyped-
     return _err(e.status_code, "http_error", str(e.detail), request)
 
 
+@app.exception_handler(InvitationPending)
+async def _invitation_pending(request: Request, e: InvitationPending):  # type: ignore[no-untyped-def]
+    """First sign-in with pending invitations: the usual error shape plus the invitations to choose from."""
+    return JSONResponse({"error": {"code": "invitation_pending", "message": str(e), "retryable": False,
+                                   "ref": getattr(request.state, "request_id", None), "invitations": e.invitations}}, status_code=409)
+
+
 API = "/api/v1"
 
 from probity.api import risk as _risk_api  # noqa: E402
@@ -223,6 +238,28 @@ def metrics(authorization: str | None = Header(default=None)) -> Response:
 def me(user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
     ws = s.get(Workspace, user.workspace_id)
     return {"id": user.id, "name": user.name, "email": user.email, "role": user.role, "workspace": {"id": ws.id, "name": ws.name} if ws else None}
+
+
+class JoinIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    invitation_id: str | None = Field(default=None, max_length=40)
+    own_workspace: bool = False
+
+
+@app.post(f"{API}/me/join")
+def join(body: JoinIn, request: Request, s: Session = Depends(db), authorization: str | None = Header(default=None)) -> dict:
+    """First sign-in with pending invitations (409 invitation_pending): accept one of them, or start your own
+    workspace. Only the invitee can accept, and only invitations addressed to their verified email."""
+    if bool(body.invitation_id) == body.own_workspace:
+        raise svc.BadRequest("send exactly one of invitation_id or own_workspace: true")
+    token = bearer_token(authorization)
+    try:
+        if s.scalars(select(User).where(User.external_id == verify_clerk_token(token)["sub"])).first():
+            raise svc.Conflict("you already belong to a workspace")
+        p = authenticate(token, s, join=body.invitation_id or "own")
+    except AuthError as e:
+        raise HTTPException(401, str(e)) from e
+    return me(p.user, s)
 
 
 @app.get(f"{API}/workspace/policy")
@@ -302,8 +339,9 @@ def invitations(user: User = Depends(current_user), s: Session = Depends(db)) ->
 def invite(body: InviteIn, request: Request, user: User = Depends(require_mfa_for_approvals), s: Session = Depends(db)) -> dict:
     svc.require_role(user, "owner")
     email = body.email.strip().lower()
-    if s.scalars(select(User).where(User.email == email)).first():
-        raise svc.Conflict("a user with this email already exists")
+    # Only this workspace's members: an answer about other workspaces would tell any owner who uses Probity.
+    if s.scalars(select(User).where(User.email == email, User.workspace_id == user.workspace_id)).first():
+        raise svc.Conflict("this person is already a member of your workspace")
     inv = Invitation(workspace_id=user.workspace_id, email=email, role=body.role, invited_by=user.id)
     s.add(inv)
     s.flush()
@@ -357,6 +395,7 @@ def update_member(member_id: str, body: MemberPatch, request: Request, user: Use
 async def upload(request: Request, file: UploadFile = File(...), user: User = Depends(upload_limit), s: Session = Depends(db)) -> dict:
     from probity.ingestion.parse import extract_text, max_upload_bytes, sniff_mime
 
+    svc.require_role(user, "accountant")  # before any parsing: viewers can't make the server read documents
     cap = max_upload_bytes()
     data = await file.read(cap + 1)
     if len(data) > cap:
@@ -364,7 +403,8 @@ async def upload(request: Request, file: UploadFile = File(...), user: User = De
     # Reject what can't be read before anything is stored: images and scans (no text layer) raise
     # UnsupportedDocument → 415 with a clear message. Probity has no OCR.
     await asyncio.to_thread(extract_text, data, sniff_mime(data, file.filename or "upload"))
-    doc, duplicate_of = svc.upload_document(s, user, file.filename or "upload", data)
+    # Cleaning, scanning and storing take seconds: off the event loop, so other requests and live streams keep moving.
+    doc, duplicate_of = await asyncio.to_thread(svc.upload_document, s, user, file.filename or "upload", data)
     return {"document_id": doc.id, "sha256": doc.sha256, "filename": doc.filename, "mime": doc.mime, "duplicate_of": duplicate_of}
 
 
@@ -384,7 +424,16 @@ def get_document_file(doc_id: str, user: User = Depends(current_user), s: Sessio
     from probity import storage
 
     return Response(storage.get(d.storage_path), media_type=d.mime, headers={
-        "Content-Disposition": f'inline; filename="{d.filename}"', "Content-Security-Policy": "sandbox", "X-Content-Type-Options": "nosniff"})
+        "Content-Disposition": content_disposition("inline", d.filename), "Content-Security-Policy": "sandbox", "X-Content-Type-Options": "nosniff"})
+
+
+def content_disposition(kind: str, filename: str) -> str:
+    """Header-safe for any uploaded name: an ASCII fallback (no quotes, semicolons or control characters) plus the
+    exact name in RFC 5987 form. Headers are latin-1, so a raw Devanagari or curly-quote name would fail the request."""
+    from urllib.parse import quote
+
+    fallback = "".join(ch if 32 <= ord(ch) < 127 and ch not in '"\\;' else "_" for ch in filename).strip() or "document"
+    return f"{kind}; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename, safe='')}"
 
 
 @app.post(f"{API}/documents/{{doc_id}}/preview")

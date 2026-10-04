@@ -20,7 +20,7 @@ x-app: &app
   environment: &app-env
     ENV: prod
     DATABASE_URL: postgresql+psycopg://probity_app:${PROBITY_APP_PASSWORD:?set PROBITY_APP_PASSWORD}@postgres:5432/probity
-    DATABASE_MIGRATE_URL: postgresql+psycopg://probity:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/probity
+    # The schema owner's URL is given to `migrate` only: the API and workers parse untrusted documents and never hold it.
     REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379/0
     TASK_BACKEND: celery
     STORAGE_BACKEND: s3
@@ -55,6 +55,9 @@ services:
     # One-off: prints the settings checklist and creates/upgrades the schema, then exits. Runs before api/worker so
     # several replicas never race each other on migrations.
     <<: *app
+    environment:
+      <<: *app-env
+      DATABASE_MIGRATE_URL: postgresql+psycopg://probity:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/probity
     command: ["python", "-m", "probity.bootstrap"]
     restart: "no"
     depends_on: { postgres: { condition: service_healthy } }
