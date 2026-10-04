@@ -51,10 +51,15 @@ Plan:
 3. Keep personal data in an erasable side table and put only pseudonymous IDs in the hash chain.
 4. Document the legal retention basis (GST: 8 years).
 
-### 2. Stronger PDF active-content check — Phase 5
-Today `ingestion/scan.py` decodes hex-escaped PDF names and checks PDFs attached to emails. It cannot see inside compressed object streams (`/ObjStm`).
-
-Fix: parse and normalise uploads with pikepdf or qpdf (a new dependency), or flatten or re-render them before storing. Add a test with a compressed object stream that contains `/JavaScript`.
+### 2. Stronger PDF active-content check — fixed (user decision: no resident virus scanner)
+Every uploaded PDF is now parsed with pikepdf (qpdf) and rewritten before it is stored (`ingestion/scan.clean_pdf`):
+active content anywhere in the object graph, including inside compressed object streams (`/ObjStm`), is refused with 415
+(JavaScript, Launch, embedded files, rich media, XFA, auto-actions); fill-in forms, link and open actions, and encryption
+are removed; the result has no object streams and passes the byte-level check a second time. Only the clean copy is
+stored and served. PDFs needing a password, and files that don't parse, are refused. An emailed invoice's PDF
+attachment gets the same structural check. ClamAV is now **optional** (used only if `CLAMAV_HOST` is set; no longer
+required for `ENV=prod`), because a resident scanner needs 1–3 GB of RAM. Remaining gap: without ClamAV, a *known*
+malware sample that is a valid, inert PDF is stored (cleaned) rather than named as malware.
 
 ### 3. Per-workspace cost quotas (M16) — fixed; see section 2
 Remaining gaps (not requested by the user): no separate daily caps on previews or re-scores, and `MAX_SECONDS` is
@@ -114,7 +119,7 @@ These are listed in the full report (L1–L19). Examples:
 | H4 | When the workspace requires MFA, it also covers policy, invitations, workspace rename, imports, vendor edits, domain/contact removal and case close. Verified rows in an import need a `verification_note` and are audited row by row. | `test_sod_mfa.py`, `test_onboarding.py` |
 | H5 | An accountant editing a verified contact's name or phone un-verifies it; an approver must give a note to keep it verified. | `test_sod_mfa.py` |
 | H6 | Account numbers are masked as XXXX + last 4 in extraction snippets, claim text, vendor messages, evidence excerpts and exports, for every role. The full number is available only through the audited reveal endpoint. | `test_masking.py`, `test_ingestion_hardening.py`, `test_case_flow.py` |
-| H7 | Uploads (max 10 MB, `MAX_UPLOAD_MB`) are parsed in a killable helper process (30 s limit, plus a memory cap on POSIX) with a cheap page count. The scan and email regexes are linear. A request-body cap (`api/limits.py`) applies before auth. | `test_ingestion_hardening.py`, `test_body_limit.py` |
+| H7 | Uploads (max 10 MB, `MAX_UPLOAD_MB`; PDFs rewritten without active content) are parsed in a killable helper process (30 s limit, plus a memory cap on POSIX) with a cheap page count. The scan and email regexes are linear. A request-body cap (`api/limits.py`) applies before auth. | `test_ingestion_hardening.py`, `test_body_limit.py` |
 | H8 | Amount parsing never reads low (it takes the largest well-formed amount; lakh/crore and grouped formats are understood). An unknown, zero or low-confidence total holds the case and requires dual approval. | `test_ingestion_hardening.py`, `test_autoclear_gate.py` |
 | H9 | The audit chain is an HMAC keyed from HMAC_KEY and covers every column. A per-workspace advisory lock prevents forks. Each head is logged as an out-of-database witness, and `verify_chain(anchor=)` detects truncation. Rotating HMAC_KEY invalidates verification of older rows. | `test_audit_chain.py`, `test_platform.py` |
 | H10 | `Settings` repr hides secrets. Sentry runs with no frame locals and no request bodies. Tracebacks are scrubbed. | `test_secret_leaks.py` |

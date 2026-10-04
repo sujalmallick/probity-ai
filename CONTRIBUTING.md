@@ -9,7 +9,7 @@ privately.
 
 ## 1. Get set up
 
-Follow [docs/SETUP.md](docs/SETUP.md) and [docs/API_KEYS.md](docs/API_KEYS.md). Use **your own** Anthropic key and **your own** Clerk
+Follow [docs/SETUP.md](docs/SETUP.md) and [docs/API_KEYS.md](docs/API_KEYS.md). Use **your own** AI key (Anthropic or Gemini) and **your own** Clerk
 development app. Never borrow someone else's.
 
 You don't need any keys to run the backend tests; they only need the PostgreSQL container.

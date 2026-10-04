@@ -19,8 +19,8 @@ Probity identifies **anomalies** and **recommends a hold**. It never makes accus
 | Upload a **plain-text** invoice | Working | |
 | **Scanned PDFs and photos (PNG/JPG)** | Planned | Refused with a clear message. There is no OCR. An email whose attachment is an image (or has a logo image before the PDF) is refused too. |
 | File type checked by content, not by extension | Working | A renamed file can't sneak through. |
-| Dangerous PDF content refused | Working | PDFs with JavaScript, launch actions, embedded files and similar are refused. |
-| Virus scan | Partial | Runs only when a ClamAV server is configured (`CLAMAV_HOST`). Without it, the scan is skipped and the audit log says so. |
+| Dangerous PDF content refused | Working | Every PDF is parsed and rewritten before it's stored. JavaScript, launch actions, embedded files and similar are refused, even inside compressed parts; forms, link actions and encryption are stripped. Password-protected PDFs are refused. |
+| Virus scan | Optional | Only when a ClamAV server is configured (`CLAMAV_HOST`, needs 1–3 GB RAM). Without it the scan is skipped and the audit log says so; PDF cleaning still applies. |
 | Duplicate upload detection | Working | The same file uploaded twice links to the existing case. |
 | Preview before investigating | Working | Shows the extracted fields, which ones are low-confidence, and whether instruction-like text was found. |
 | Correct extracted fields by hand | Working | Allowed for vendor name, GSTIN, invoice number, dates, PO number, IFSC, vendor email and address. **Not** allowed for bank account, amounts, line items or sender domain. Corrections are labelled, audited, and stop auto-clear. |
@@ -46,6 +46,7 @@ Each case runs through these steps in order. Code does the checks. The AI only h
 | "Investigate further" re-run | Working | An approver can re-run the investigation one level deeper (up to 2 levels). |
 | Self-check before the gate | Working | Before deciding, the case is checked for consistency: the score equals the sum of its points, no points without verified evidence, AI fallbacks are labelled, and so on. Any problem holds the case. Also available as `python -m probity.sanity`. |
 | Per-case trace | Partial | `GET /api/v1/cases/{id}/trace` shows timing, checks and AI calls. No screen yet. |
+| Choice of AI provider | Working | Anthropic Claude (default) or Google Gemini, set by `LLM_PROVIDER`. The steps and safety rules are the same. |
 | AI unavailable | Working | Every AI step has a rule-based fallback that is labelled "rule-based fallback, AI unavailable". Nothing is made up. |
 
 ## 3. The risk score
@@ -201,7 +202,8 @@ Roles from least to most access: **viewer < accountant < approver < owner**. Eac
 | Neutral language | Working | Words like "fraud" or "scam" are rewritten to neutral wording ("anomaly", "risk indicator"). |
 | Upload safety | Working | Size limits, content-type sniffing, active-content check, parsing in an isolated helper process with a time limit. |
 | Two-factor for approvers | Working | Optional owner setting. |
-| Production start-up rules | Working | With `ENV=prod` the API refuses to start without cloud storage, virus scanning, a metrics token and TLS database connections. |
+| Production start-up rules | Working | With `ENV=prod` the API refuses to start without cloud storage, a metrics token, a Redis password, and TLS for remote database connections. |
+| Production Docker stack | Working | `infra/docker-compose.yml`: PostgreSQL, password-protected Redis, migrations, API, worker, scheduler, web and a Cloudflare Tunnel (about 2 GB RAM). See `infra/cloudflare/README.md`. |
 | Data retention and deletion | Planned | Open item, see [SECURITY_HANDOVER.md](SECURITY_HANDOVER.md). |
 
 ---
@@ -211,7 +213,7 @@ Roles from least to most access: **viewer < accountant < approver < owner**. Eac
 Pick one, open an issue saying you're on it, and see [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 **Reading documents**
-- Read scanned PDFs and photos (planned: Claude's PDF/image reading).
+- Read scanned PDFs and photos (planned: the AI provider's PDF/image reading).
 - Accept an email whose logo image comes before the PDF attachment.
 - Handle password-protected PDFs with a clear message.
 

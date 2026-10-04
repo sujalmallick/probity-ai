@@ -80,7 +80,7 @@ def main(argv: list[str] | None = None) -> int:
 
     problems = st.required_problems()
     if problems:
-        print(f"\nThe API will not start until the {len(problems)} required setting(s) above are fixed in {ENV_FILE}.")
+        print(f"\nThe API will not start until the {len(problems)} required setting(s) above are set (in the environment or {ENV_FILE}).")
         return 1
     print("\nAll required settings are present. Start the API: python -m uvicorn probity.api.main:app --port 8010")
     return 0

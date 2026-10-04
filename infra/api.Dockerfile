@@ -7,6 +7,8 @@ RUN pip install --no-cache-dir -r apps/api/requirements-full.lock
 COPY apps/api/pyproject.toml apps/api/pyproject.toml
 COPY apps/api/src apps/api/src
 RUN pip install --no-cache-dir --no-deps ./apps/api
+# Writable folder for uploads when STORAGE_BACKEND=local (production uses S3/R2).
+RUN mkdir -p /app/apps/api/data/uploads && chown -R probity /app/apps/api/data
 USER probity
 WORKDIR /app/apps/api
 EXPOSE 8000

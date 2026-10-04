@@ -29,7 +29,7 @@ Expect about 30 to 45 minutes the first time, most of it waiting for downloads a
 - **macOS:** `brew install python@3.12 node@22 git`, plus Docker Desktop from docker.com.
 - **Linux:** use your package manager for Python 3.12+, Node 22 and Git, and install Docker Engine with the Compose plugin.
 
-Before you start, also create the accounts you'll need. See [API_KEYS.md](API_KEYS.md); the minimum is **Anthropic** and **Clerk**.
+Before you start, also create the accounts you'll need. See [API_KEYS.md](API_KEYS.md); the minimum is **one AI key (Anthropic or Google Gemini)** and **Clerk**.
 
 ## 2. Get the code
 
@@ -42,7 +42,8 @@ If you plan to contribute, fork the repo on GitHub first and clone your fork (se
 
 > **Fastest path on Windows:** `powershell -ExecutionPolicy Bypass -File scripts\dev.ps1` does steps 3 to 7 for you. On the first run it
 > stops and tells you which keys are missing. Fill them in (steps 4 and 5) and run it again. The manual steps below explain what it does,
-> and are what you follow on macOS/Linux.
+> and are what you follow on macOS/Linux. On its very first run you may see a red `password authentication failed` traceback just
+> before it writes the database settings. The script then fills them in and carries on, so read the checklist it prints after that.
 
 ## 3. Start PostgreSQL
 
@@ -91,6 +92,9 @@ python3 -m venv .venv
 
 (`make install` does the same on macOS/Linux.)
 
+The Python install downloads a lot of packages (LangGraph, Anthropic, Celery and others). On a fresh machine it can take **10 to 15
+minutes**. That's normal.
+
 **Activate the environment** so `python` means the project's Python. Do this in every new terminal:
 
 ```powershell
@@ -108,17 +112,18 @@ VITE_CLERK_PUBLISHABLE_KEY=pk_test_xxxxxxxx
 
 Without it the web app still opens, but sign-in shows as unavailable.
 
-## 5. Generate the app secrets and fill in your keys
+## 5. Create `apps/api/.env`, fill in your keys, and generate the app secrets
+
+First copy the example file (from the repo root):
 
 ```powershell
-cd apps/api
-python -m probity.bootstrap --generate-secrets
+Copy-Item apps/api/.env.example apps/api/.env
 ```
 
-This creates `apps/api/.env` from `apps/api/.env.example` and fills `FIELD_KEY_B64` and `HMAC_KEY` with random values. **It never prints
-them**, and it never overwrites values that are already set.
+macOS/Linux: `cp apps/api/.env.example apps/api/.env`
 
-Now open `apps/api/.env` in your editor and set:
+Open `apps/api/.env` in your editor and set these lines. **Do the database lines first**: the next command connects to the database,
+and fails with "password authentication failed" if they still contain the `<...-password>` placeholders.
 
 ```dotenv
 # Database: the local Docker defaults from step 3
@@ -126,33 +131,51 @@ DATABASE_URL=postgresql+psycopg://probity_app:probity_app@127.0.0.1:5434/probity
 DATABASE_MIGRATE_URL=postgresql+psycopg://probity:probity@127.0.0.1:5434/probity
 
 # Your own keys (see docs/API_KEYS.md)
+LLM_PROVIDER=anthropic              # or: gemini (then set GEMINI_API_KEY instead)
 ANTHROPIC_API_KEY=sk-ant-xxxxxxxx
 CLERK_ISSUER=https://your-app-name.clerk.accounts.dev
 CLERK_SECRET_KEY=sk_test_xxxxxxxx
 CLERK_AUTHORIZED_PARTIES=http://localhost:5180
 ```
 
-Leave the rest as they are for now. Tavily and email are optional.
+Leave the rest as they are for now. Tavily and email are optional. If you don't have the AI or Clerk keys yet, fill in the
+database lines anyway and add the keys later.
+
+Now generate the two app secrets. This also creates the database schema (step 6):
+
+```powershell
+cd apps/api
+python -m probity.bootstrap --generate-secrets
+```
+
+This fills `FIELD_KEY_B64` and `HMAC_KEY` in `apps/api/.env` with random values. **It never prints them**, and it never overwrites a
+value that's already set. (If `apps/api/.env` doesn't exist, it creates it from the example first.)
 
 ## 6. Create the database schema
 
-Still in `apps/api`:
+The command in step 5 already did this. Later, run the plain version from `apps/api` to check your configuration and apply new
+migrations:
 
 ```powershell
 python -m probity.bootstrap
 ```
 
-It prints a checklist of what's configured, then creates the tables. Expect output like this:
+It prints a checklist of what's configured, then creates or upgrades the tables. Expect output like this:
 
 ```
 Probity configuration (apps/api/.env):
-  OK  database ...
-  OK  ai ...
-  -- web_search ...
+  OK database        live          ...
+  OK app_secrets     live          FIELD_KEY_B64, HMAC_KEY
+  -- web_search      missing       Tavily - without it, web research reports 'could not verify'
+  -- gst_registry    unavailable   No GST registry provider - checksum only; status 'could not verify'
   ...
-database schema created (revision 00xx)
-All required settings are present. Start the API: ...
+database schema created (revision 0010)
+
+All required settings are present. Start the API: python -m uvicorn probity.api.main:app --port 8010
 ```
+
+If keys are still missing, you'll see `Missing required settings:` with `!!` lines, and "The API will not start until the N required
+setting(s) above are fixed". The schema is still created. Add the keys and run it again.
 
 - `--` lines are **optional** things that aren't set up. That's fine.
 - `!!` lines under "Missing required settings" must be fixed before the API will start.
@@ -226,7 +249,7 @@ Run a single file, a single test, or tests matching a word:
 
 ```powershell
 python -m pytest tests/test_could_not_verify.py -q
-python -m pytest tests/test_auth.py::<test_name> -q
+python -m pytest tests/test_could_not_verify.py::test_search_not_configured_is_could_not_verify -q
 python -m pytest -k "allowlist" -q
 ```
 
@@ -251,13 +274,14 @@ On macOS/Linux, `make test` runs the backend tests and the frontend type check.
 | Port already in use | `address already in use` / `bind: Only one usage of each socket address` for 5434, 8010 or 5180 | Something else uses that port. Find it: `netstat -ano \| findstr :8010` (macOS/Linux: `lsof -i :8010`), then stop that program or the old Probity window. |
 | API won't start | `Probity cannot start - fix these in apps/api/.env:` followed by a list | Fix each listed item (see the table below), then restart the API. |
 | Database not migrated | `The database schema is not up to date (empty database). Run: python -m probity.bootstrap` | Run `python -m probity.bootstrap` from `apps/api`. Also after every `git pull` that adds migrations. |
+| Wrong database password | `password authentication failed for user "probity"` (a long traceback) | `DATABASE_URL` / `DATABASE_MIGRATE_URL` in `apps/api/.env` still contain the `<...-password>` placeholders. Set them as in step 5 and run the command again. |
 | Can't reach PostgreSQL | `connection refused` / `could not connect to server` on 5434 | Start the container (step 3). Use `127.0.0.1`, not `localhost`, in the database URLs. |
 | `python` not found or wrong version | `'python' is not recognized` or a 3.11 version | Install Python 3.12+, open a new terminal, use `.\.venv\Scripts\python.exe` directly or activate the venv. |
 | `No module named probity` | When running `python -m probity...` | Activate the venv (step 4) and run from `apps/api`. Re-run `pip install -e "apps/api[dev,worker]"` from the repo root if needed. |
 | Sign-in page says sign-in is unavailable | Web shows a "sign-in unavailable" page | `apps/web/.env.local` is missing or has no `VITE_CLERK_PUBLISHABLE_KEY`. Add it and **restart** `npm run dev`. |
 | Signed in, but every request fails with 401 | "token issued for an unauthorized origin" in the API log | Add the exact web address you're using (e.g. `http://localhost:5180`) to `CLERK_AUTHORIZED_PARTIES`, restart the API. `localhost` and `127.0.0.1` count as different addresses. |
 | Clerk keys from different apps | Sign-in works in the browser but the API rejects it | The publishable key, secret key and issuer must all come from the **same** Clerk application. |
-| Bad or empty Anthropic key | `python -m probity.check ai` fails; case timelines show "rule-based fallback, AI unavailable" | Create a new key, check billing and the spend limit in the Anthropic Console, update `ANTHROPIC_API_KEY`, restart the API. |
+| Bad or empty AI key | `python -m probity.check ai` fails; case timelines show "rule-based fallback, AI unavailable" | Create a new key, check billing or quota with your provider (Anthropic Console or Google AI Studio), update `ANTHROPIC_API_KEY` or `GEMINI_API_KEY`, and make sure `LLM_PROVIDER` matches. Restart the API. |
 | Upload refused | "This looks like a scanned or image-only invoice. Probity can't read scans yet…" or a size error | Use a PDF with selectable text, under 10 MB. Scans and photos aren't supported yet. |
 | Tests stop immediately | `Tests need PostgreSQL. Start it (docker compose -f infra/docker-compose.dev.yml up -d) or set TEST_POSTGRES_ADMIN_URL.` | Start the container (step 3). |
 | PowerShell won't run scripts | `running scripts is disabled on this system` | `Set-ExecutionPolicy -Scope Process Bypass`, or run dev.ps1 with `powershell -ExecutionPolicy Bypass -File scripts\dev.ps1`. |
@@ -271,7 +295,9 @@ and lists the problems:
 |---|---|
 | `DATABASE_URL is not set (PostgreSQL connection string)` | Add `DATABASE_URL` (step 5). |
 | `DATABASE_URL must be a PostgreSQL URL (postgresql://...)` | Only PostgreSQL is supported. Use the `postgresql+psycopg://...` form. |
-| `ANTHROPIC_API_KEY is not set` | Add your key ([API_KEYS.md](API_KEYS.md#anthropic--claude-required)). |
+| `ANTHROPIC_API_KEY is not set` | `LLM_PROVIDER` is `anthropic` (the default) and the key is empty. Add it, or switch to Gemini ([API_KEYS.md](API_KEYS.md#ai-provider-choose-anthropic-or-gemini-one-is-required)). |
+| `GEMINI_API_KEY is not set (LLM_PROVIDER=gemini)` | Add your Google AI Studio key, or set `LLM_PROVIDER=anthropic`. |
+| `LLM_MODEL_FAST=... is not a <provider> model (LLM_PROVIDER=<provider>)` (or `LLM_MODEL_REASONING`) | The model override doesn't match the provider. Clear it to use the default, or pick a model from that provider. |
 | `CLERK_ISSUER is not set (...)` / `CLERK_ISSUER must start with https://` | Add your Clerk Frontend API URL, including `https://`. |
 | `CLERK_SECRET_KEY is not set` | Add your Clerk secret key (`sk_test_...`). |
 | `CLERK_AUTHORIZED_PARTIES is not set (...)` | Set it to `http://localhost:5180`. |
@@ -282,13 +308,20 @@ and lists the problems:
 | `RESEND_API_KEY is set but EMAIL_FROM is not` | Add `EMAIL_FROM`, or remove the Resend key. |
 | `EMAIL_REPLY_DOMAIN is set but INBOUND_EMAIL_SECRET is not` | Add the secret, or remove `EMAIL_REPLY_DOMAIN`. |
 | `The database schema is not up to date (...). Run: python -m probity.bootstrap` | Run it from `apps/api`. |
-| `ENV=prod needs ...` | Production-only rules (cloud storage, ClamAV, metrics token, TLS database). Use `ENV=dev` on your computer. |
+| `ENV=prod needs ...` | Production-only rules: cloud storage and a metrics token. A remote database also needs TLS (`sslmode=require`); a local or container database doesn't. Use `ENV=dev` on your computer. |
 
 The checklist also prints `--` lines for optional integrations that aren't configured (web search, email, storage, antivirus). Those
 never block start-up. The GST registry always shows as unavailable (see [API_KEYS.md](API_KEYS.md#gst-registry-not-available)).
 
 ---
 
-**Running everything in Docker** (`make up`, or `docker compose -f infra/docker-compose.yml up --build`) builds the API and web images.
-It isn't the recommended development path yet: the web image is built without a Clerk publishable key, so sign-in shows as unavailable.
-Use the steps above.
+**Running everything in Docker.** `infra/docker-compose.yml` is the **production** stack:
+- PostgreSQL and Redis
+- a migration step
+- the API, a Celery worker and a scheduler
+- the web app
+- a Cloudflare Tunnel
+
+It reads its settings from `infra/.env.prod` (copy `infra/env.prod.example`) and is started with
+`docker compose --env-file infra/.env.prod -f infra/docker-compose.yml up -d --build` (or `make up`). You don't need it for development.
+See [infra/cloudflare/README.md](../infra/cloudflare/README.md) and [API_KEYS.md](API_KEYS.md#production-stack-docker--cloudflare).

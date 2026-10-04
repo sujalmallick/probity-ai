@@ -297,15 +297,18 @@ def upload_document(s: Session, user: User, filename: str, data: bytes) -> tuple
         prior = s.scalars(select(Case).where(Case.document_id == existing.id).order_by(Case.created_at.desc())).first()
         return existing, prior.id if prior else existing.id
     from probity import storage
-    from probity.ingestion.scan import clamav_scan, reject_active_content
+    from probity.ingestion.scan import check_upload, clamav_scan
 
-    reject_active_content(data, mime)
-    av = clamav_scan(data)
-    ref = storage.put(user.workspace_id, digest, data, mime)
-    doc = Document(workspace_id=user.workspace_id, sha256=digest, filename=filename[:300], mime=mime, size=len(data), storage_path=ref, uploaded_by=user.id)
+    # PDFs are rewritten without active content and only the clean copy is stored and served; the hash stays the
+    # upload's own so a re-upload of the same file is still recognised. A virus scanner is used only if configured.
+    stored, removed = check_upload(data, mime)
+    av = clamav_scan(stored)
+    ref = storage.put(user.workspace_id, digest, stored, mime)
+    doc = Document(workspace_id=user.workspace_id, sha256=digest, filename=filename[:300], mime=mime, size=len(stored), storage_path=ref, uploaded_by=user.id)
     s.add(doc)
     s.flush()
-    audit(s, user.workspace_id, user.id, "document.uploaded", doc.id, {"sha256": digest, "filename": filename, "mime": mime, "antivirus": av})
+    audit(s, user.workspace_id, user.id, "document.uploaded", doc.id, {"sha256": digest, "filename": filename, "mime": mime, "antivirus": av,
+                                                                        "cleaned": removed})
     return doc, None
 
 

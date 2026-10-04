@@ -87,16 +87,19 @@ def test_case_workspace_function_is_locked_down(db):
 
 def test_prod_requires_metrics_token_tls_database_and_authenticated_redis():
     base = config.get_settings()
-    bad = base.model_copy(update={"env": "prod", "metrics_token": None, "database_url": "postgresql+psycopg://u:p@db/x",
+    bad = base.model_copy(update={"env": "prod", "metrics_token": None, "database_url": "postgresql+psycopg://u:p@db.internal.example/x",
                                   "redis_url": "redis://cache:6379/0", "inbound_email_secret": "short"})
     problems = " | ".join(bad.required_problems())
     for needle in ("METRICS_TOKEN", "DATABASE_URL with sslmode", "REDIS_URL with a password", "INBOUND_EMAIL_SECRET"):
         assert needle in problems, needle
-    good = bad.model_copy(update={"metrics_token": "m" * 40, "database_url": "postgresql+psycopg://u:p@db/x?sslmode=require",
+    good = bad.model_copy(update={"metrics_token": "m" * 40, "database_url": "postgresql+psycopg://u:p@db.internal.example/x?sslmode=require",
                                   "database_migrate_url": None, "redis_url": "rediss://:pw@cache:6380/0", "inbound_email_secret": "s" * 40})
     problems = " | ".join(good.required_problems())
     for needle in ("METRICS_TOKEN", "sslmode", "REDIS_URL", "INBOUND_EMAIL_SECRET"):
         assert needle not in problems, needle
+    # A database on the same private container network (bare service name) or this machine doesn't need TLS.
+    for local in ("postgresql+psycopg://u:p@postgres:5432/x", "postgresql+psycopg://u:p@localhost/x"):
+        assert "sslmode" not in " | ".join(good.model_copy(update={"database_url": local}).required_problems()), local
 
 
 # ---------------------------------------------------------------- M20

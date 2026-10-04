@@ -14,6 +14,7 @@ dependencies = [
   "anthropic>=0.60",
   "pdfplumber>=0.11",
   "pypdfium2>=4.30",
+  "pikepdf>=9.0",  # rewrites every uploaded PDF without active content (replaces a resident virus scanner)
   "reportlab>=4.0",
   "rapidfuzz>=3.9",
   "langgraph>=0.2",

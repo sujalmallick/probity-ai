@@ -5,7 +5,8 @@ synthetic data here and no stored accuracy number: every figure in a report come
 
 ## Set up (once)
 
-1. Start Probity normally (`scripts\dev.ps1`), sign in, and in the workspace you'll test with:
+1. Probity must be set up with its required keys in `apps/api/.env` (the harness uses the same AI, search and database as the app).
+   Start it normally (`scripts\dev.ps1`), sign in, and in the workspace you'll test with:
    add your vendors, verify their bank accounts / domains / contacts, import or enter past invoices and POs, and have
    an approver approve them (only approved records are compared against).
 2. Find the workspace id: open `http://127.0.0.1:8010/api/v1/me` while signed in, or Settings → Workspace.

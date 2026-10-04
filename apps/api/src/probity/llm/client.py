@@ -1,4 +1,4 @@
-"""LLM gateway (AI_Infrastructure.md §1): Anthropic Messages API with structured output.
+"""LLM gateway (AI_Infrastructure.md §1): structured output from Anthropic (default) or Google Gemini.
 
     generate(schema=..., system=..., user=..., tier="fast"|"reasoning", tags=..., budget=...)
 
@@ -10,7 +10,12 @@
 - LLM output never reaches the risk engine directly: it only produces claims, which still need evidence and
   verification.
 
-`transport` is the single function that talks to the network. The test suite replaces it; app code never does.
+Providers: LLM_PROVIDER=anthropic|gemini picks the API; everything above this paragraph is provider-neutral.
+`transport` is the single function that talks to the network. It dispatches to one small adapter per provider
+(`_anthropic_transport`, `_gemini_transport`), each of which turns (schema, system, content, model) into one API call
+and returns (parsed object, input tokens, output tokens), mapping that provider's errors to LLMFailed. Adding a
+provider = one adapter + one entry in _TRANSPORTS + its defaults in config.DEFAULT_MODELS. The test suite replaces
+`transport`; app code never does.
 """
 
 from __future__ import annotations
@@ -74,12 +79,19 @@ def workspace_tokens_today(workspace_id: str) -> int:
 
 
 def transport(schema: type[T], system: str, content: str | list[dict[str, Any]], model: str) -> tuple[T, int, int]:
-    """One Messages API call with structured output. Returns (parsed, input_tokens, output_tokens)."""
+    """One structured-output call to the configured provider. Returns (parsed, input_tokens, output_tokens)."""
+    st = get_settings()
+    if not st.llm_api_key:
+        raise LLMFailed(f"AI is not configured ({st.llm_key_name} missing)")
+    return _TRANSPORTS[st.llm_provider](schema, system, content, model)
+
+
+# ---------------------------------------------------------------- Anthropic
+
+def _anthropic_transport(schema: type[T], system: str, content: str | list[dict[str, Any]], model: str) -> tuple[T, int, int]:
     import anthropic
 
     st = get_settings()
-    if not st.anthropic_api_key:
-        raise LLMFailed("AI is not configured (ANTHROPIC_API_KEY missing)")
     client = anthropic.Anthropic(api_key=st.anthropic_api_key, max_retries=2, timeout=st.llm_timeout_seconds)
     try:
         resp = client.messages.parse(
@@ -109,6 +121,110 @@ def transport(schema: type[T], system: str, content: str | list[dict[str, Any]],
     return schema.model_validate(resp.parsed_output.model_dump()), resp.usage.input_tokens, resp.usage.output_tokens
 
 
+# ---------------------------------------------------------------- Google Gemini (REST generateContent, via httpx)
+
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+_sleep = time.sleep  # replaced in tests
+
+
+def gemini_schema(schema: type[BaseModel]) -> dict[str, Any]:
+    """Pydantic JSON Schema with local $refs inlined, for generationConfig.responseJsonSchema. Inlining keeps the
+    schema self-contained (no $defs), which every Gemini model version accepts."""
+    raw = schema.model_json_schema()
+    defs = raw.pop("$defs", {})
+
+    def inline(node: Any, depth: int = 0) -> Any:
+        if depth > 20:
+            raise ValueError("schema nests too deeply to inline")
+        if isinstance(node, dict):
+            ref = node.get("$ref")
+            if isinstance(ref, str) and ref.startswith("#/$defs/"):
+                target = inline(defs[ref.split("/")[-1]], depth + 1)
+                return {**target, **{k: inline(v, depth + 1) for k, v in node.items() if k != "$ref"}}
+            return {k: inline(v, depth + 1) for k, v in node.items()}
+        if isinstance(node, list):
+            return [inline(v, depth + 1) for v in node]
+        return node
+
+    return inline(raw)
+
+
+def _gemini_parts(content: str | list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Our content blocks (Anthropic shape: text / base64 image or document) → Gemini parts."""
+    if isinstance(content, str):
+        return [{"text": content}]
+    parts: list[dict[str, Any]] = []
+    for block in content:
+        if block.get("type") == "text":
+            parts.append({"text": block.get("text", "")})
+        elif block.get("type") in ("image", "document") and (block.get("source") or {}).get("type") == "base64":
+            src = block["source"]
+            parts.append({"inlineData": {"mimeType": src.get("media_type", "application/octet-stream"), "data": src.get("data", "")}})
+        else:
+            raise _InvalidOutput(f"content block type {block.get('type')!r} is not supported for Gemini")
+    return parts
+
+
+def _gemini_transport(schema: type[T], system: str, content: str | list[dict[str, Any]], model: str) -> tuple[T, int, int]:
+    import json
+
+    import httpx
+
+    st = get_settings()
+    body = {
+        "systemInstruction": {"parts": [{"text": system}]},
+        "contents": [{"role": "user", "parts": _gemini_parts(content)}],
+        "generationConfig": {"responseMimeType": "application/json", "responseJsonSchema": gemini_schema(schema),
+                             "maxOutputTokens": st.llm_max_output_tokens},
+    }
+    for attempt in range(3):  # like the Anthropic SDK's max_retries=2: retry rate limits, 5xx and timeouts
+        try:
+            r = httpx.post(GEMINI_URL.format(model=model), json=body, timeout=st.llm_timeout_seconds,
+                           headers={"x-goog-api-key": st.gemini_api_key or ""})
+        except httpx.TimeoutException as e:
+            if attempt < 2:
+                _sleep(2 ** attempt)
+                continue
+            raise LLMFailed("AI request timed out") from e
+        except httpx.HTTPError as e:
+            raise LLMFailed("could not reach the AI service (network)") from e
+        if r.status_code in (429, 500, 502, 503, 504) and attempt < 2:
+            _sleep(2 ** attempt)
+            continue
+        break
+    if r.status_code in (401, 403):
+        raise LLMFailed("AI key was rejected or lacks permission for this model (check GEMINI_API_KEY)")
+    if r.status_code == 429:
+        raise LLMFailed("AI rate limit reached — try again shortly")
+    if r.status_code == 404:
+        raise LLMFailed(f"AI model not found ({model})")
+    if r.status_code >= 400:
+        raise LLMFailed(f"AI {'request was rejected' if r.status_code < 500 else 'service error'} ({r.status_code})")
+    data = r.json()
+    if (data.get("promptFeedback") or {}).get("blockReason"):
+        raise LLMFailed("the model declined this request")
+    cand = (data.get("candidates") or [{}])[0]
+    finish = cand.get("finishReason", "")
+    if finish in ("SAFETY", "RECITATION", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII"):
+        raise LLMFailed("the model declined this request")
+    if finish == "MAX_TOKENS":
+        raise _InvalidOutput("output was cut off at the token limit")
+    text = "".join(part.get("text", "") for part in (cand.get("content") or {}).get("parts", []) if not part.get("thought"))
+    if not text.strip():
+        raise _InvalidOutput("no structured output returned")
+    usage = data.get("usageMetadata") or {}
+    tin = int(usage.get("promptTokenCount") or 0)
+    tout = int(usage.get("candidatesTokenCount") or 0) + int(usage.get("thoughtsTokenCount") or 0)  # thinking is billed as output
+    try:
+        parsed = json.loads(text)
+    except ValueError as e:
+        raise _InvalidOutput(f"output was not valid JSON ({e})") from e
+    return schema.model_validate(parsed), tin, tout
+
+
+_TRANSPORTS = {"anthropic": _anthropic_transport, "gemini": _gemini_transport}
+
+
 def generate(
     *,
     schema: type[T],
@@ -122,7 +238,7 @@ def generate(
     """Ask the model for an object matching `schema`. Raises LLMFailed if it can't (never returns a guess)."""
     st = get_settings()
     started = time.monotonic()
-    model = st.llm_model_reasoning if tier == "reasoning" else st.llm_model_fast
+    model = st.llm_model(tier)
     if redact_input and isinstance(user, str):
         user = redact(user).text
     ws = tags.get("workspace_id")

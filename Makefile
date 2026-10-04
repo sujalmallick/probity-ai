@@ -33,8 +33,8 @@ test:               ## backend tests (throwaway Postgres DB; needs `make db`), f
 build:              ## production web build (served by the API at /)
 	cd apps/web && npm run build
 
-up:                 ## docker compose: postgres, api, web (settings from apps/api/.env)
-	docker compose -f infra/docker-compose.yml up --build
+up:                 ## production stack in Docker (postgres, redis, clamav, migrate, api, worker, scheduler, web, Cloudflare tunnel); settings from infra/.env.prod
+	docker compose --env-file infra/.env.prod -f infra/docker-compose.yml up -d --build
 
 down:
-	docker compose -f infra/docker-compose.yml down
+	docker compose --env-file infra/.env.prod -f infra/docker-compose.yml down

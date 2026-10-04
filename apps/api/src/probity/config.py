@@ -17,17 +17,37 @@ from typing import Literal
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-API_ROOT = Path(__file__).resolve().parents[2]  # apps/api
-REPO_ROOT = API_ROOT.parents[1]
+_SOURCE_ROOT = Path(__file__).resolve().parents[2]  # apps/api in a source checkout
+# Installed as a package (e.g. the Docker image), the code lives in site-packages: settings, the .env file and local
+# uploads then belong to the working directory (/app/apps/api in the image), never to the Python installation.
+API_ROOT = _SOURCE_ROOT if (_SOURCE_ROOT / "pyproject.toml").exists() else Path.cwd()
+REPO_ROOT = API_ROOT.parents[1] if len(API_ROOT.parents) > 1 else API_ROOT
 ENV_FILE = API_ROOT / ".env"
 
 # Never shown by repr()/str(): error reporters serialise local variables with repr.
 _SECRET_FIELDS = frozenset({
-    "field_key_b64", "hmac_key", "anthropic_api_key", "tavily_api_key", "clerk_secret_key", "resend_api_key",
+    "field_key_b64", "hmac_key", "anthropic_api_key", "gemini_api_key", "tavily_api_key", "clerk_secret_key", "resend_api_key",
     "s3_secret_access_key", "inbound_email_secret", "metrics_token", "sentry_dsn",
 })
 _URL_FIELDS = frozenset({"database_url", "database_migrate_url", "redis_url"})  # may embed a password
 _URL_PASSWORD = re.compile(r"(://[^:/@\s]*:)[^@\s]*@")
+
+
+# Default models per provider and tier. LLM_MODEL_REASONING / LLM_MODEL_FAST override them.
+DEFAULT_MODELS: dict[str, dict[str, str]] = {
+    "anthropic": {"reasoning": "claude-opus-5-5", "fast": "claude-sonnet-5-5"},
+    "gemini": {"reasoning": "gemini-3.8-flash", "fast": "gemini-3.5-flash-lite"},
+}
+_MODEL_PREFIX = {"anthropic": "claude", "gemini": "gemini"}
+_KEY_NAME = {"anthropic": "ANTHROPIC_API_KEY", "gemini": "GEMINI_API_KEY"}
+
+
+def _db_host_is_local(url: str) -> bool:
+    """True for a database on this machine or on the same private container network (a bare service name such as
+    `postgres`): that traffic never crosses a real network, so TLS is not required for it."""
+    m = re.match(r"[a-z+]+://(?:[^@/]*@)?(\[[^\]]+\]|[^:/?]+)", url)
+    host = (m.group(1) if m else "").strip("[]").lower()
+    return host in ("localhost", "127.0.0.1", "::1") or ("." not in host and ":" not in host and host != "")
 
 
 class ConfigError(RuntimeError):
@@ -46,10 +66,12 @@ class Settings(BaseSettings):
     db_pool_size: int = 10
     db_pool_overflow: int = 10
 
-    # --- required: AI (Anthropic)
+    # --- required: AI. LLM_PROVIDER picks the API; set that provider's key. Models default per provider.
+    llm_provider: Literal["anthropic", "gemini"] = "anthropic"
     anthropic_api_key: str | None = None
-    llm_model_reasoning: str = "claude-opus-5-5"
-    llm_model_fast: str = "claude-sonnet-5-5"
+    gemini_api_key: str | None = None
+    llm_model_reasoning: str | None = None  # default: DEFAULT_MODELS[llm_provider]["reasoning"]
+    llm_model_fast: str | None = None  # default: DEFAULT_MODELS[llm_provider]["fast"]
     llm_timeout_seconds: float = 90.0
     llm_max_output_tokens: int = 8000
 
@@ -142,6 +164,18 @@ class Settings(BaseSettings):
     def email_allowlist_set(self) -> set[str]:
         return {a.strip().lower() for a in self.email_allowlist.split(",") if a.strip()}
 
+    def llm_model(self, tier: str) -> str:
+        """The model for a tier ("fast" | "reasoning") with the provider's default when not overridden."""
+        return (self.llm_model_reasoning if tier == "reasoning" else self.llm_model_fast) or DEFAULT_MODELS[self.llm_provider][tier]
+
+    @property
+    def llm_api_key(self) -> str | None:
+        return self.gemini_api_key if self.llm_provider == "gemini" else self.anthropic_api_key
+
+    @property
+    def llm_key_name(self) -> str:
+        return _KEY_NAME[self.llm_provider]
+
     def required_problems(self) -> list[str]:
         """Missing or invalid required settings. Messages name the variable, never its value."""
         p: list[str] = []
@@ -149,8 +183,11 @@ class Settings(BaseSettings):
             p.append("DATABASE_URL is not set (PostgreSQL connection string)")
         elif not self.database_url.startswith("postgresql"):
             p.append("DATABASE_URL must be a PostgreSQL URL (postgresql://...)")
-        if not self.anthropic_api_key:
-            p.append("ANTHROPIC_API_KEY is not set")
+        if not self.llm_api_key:
+            p.append(f"{self.llm_key_name} is not set" + (f" (LLM_PROVIDER={self.llm_provider})" if self.llm_provider != "anthropic" else ""))
+        for env_name, tier in (("LLM_MODEL_FAST", "fast"), ("LLM_MODEL_REASONING", "reasoning")):
+            if not self.llm_model(tier).startswith(_MODEL_PREFIX[self.llm_provider]):
+                p.append(f"{env_name}={self.llm_model(tier)} is not a {self.llm_provider} model (LLM_PROVIDER={self.llm_provider})")
         if not self.clerk_issuer:
             p.append("CLERK_ISSUER is not set (https://<your-app>.clerk.accounts.dev)")
         elif not self.clerk_issuer.startswith("https://"):
@@ -182,12 +219,11 @@ class Settings(BaseSettings):
         if self.env == "prod":
             if self.storage_backend != "s3":
                 p.append("ENV=prod needs STORAGE_BACKEND=s3")
-            if not self.clamav_host:
-                p.append("ENV=prod needs CLAMAV_HOST (uploads are virus-scanned)")
             if not self.metrics_token or len(self.metrics_token) < 32:
                 p.append("ENV=prod needs METRICS_TOKEN (at least 32 random characters): /metrics aggregates every workspace")
             for name, url in (("DATABASE_URL", self.database_url), ("DATABASE_MIGRATE_URL", self.database_migrate_url)):
-                if url and url.startswith("postgresql") and not re.search(r"[?&]sslmode=(require|verify-ca|verify-full)\b", url):
+                if (url and url.startswith("postgresql") and not _db_host_is_local(url)
+                        and not re.search(r"[?&]sslmode=(require|verify-ca|verify-full)\b", url)):
                     p.append(f"ENV=prod needs {name} with sslmode=require (or verify-full): invoice data must not cross the network in clear")
             if self.redis_url and not (self.redis_url.startswith("rediss://") or re.match(r"redis://[^@/]*:[^@/]+@", self.redis_url)):
                 p.append("ENV=prod needs REDIS_URL with a password (redis://:password@host) or TLS (rediss://)")
@@ -202,7 +238,8 @@ class Settings(BaseSettings):
             email = "live (any recipient)" if self.email_send_to_any else f"live (allowlist: {len(self.email_allowlist_set)} address(es))"
         return [
             ("database", "live" if self.database_url else "missing", "PostgreSQL"),
-            ("ai", "live" if self.anthropic_api_key else "missing", f"Anthropic ({self.llm_model_fast} / {self.llm_model_reasoning})"),
+            ("ai", "live" if self.llm_api_key else "missing",
+             f"{'Gemini' if self.llm_provider == 'gemini' else 'Anthropic'} ({self.llm_model('fast')} / {self.llm_model('reasoning')})"),
             ("sign_in", "live" if (self.clerk_issuer and self.clerk_secret_key) else "missing", "Clerk"),
             ("app_secrets", "live" if (self.field_key_b64 and self.hmac_key) else "missing", "FIELD_KEY_B64, HMAC_KEY"),
             ("web_search", "live" if self.tavily_api_key else "missing", "Tavily - without it, web research reports 'could not verify'"),
@@ -212,7 +249,7 @@ class Settings(BaseSettings):
             ("background_jobs", self.task_backend if self.task_backend == "inline" else ("worker" if self.redis_url else "missing"),
              "inline = inside the API process"),
             ("storage", "cloud" if self.storage_backend == "s3" else "local", str(self.storage_dir) if self.storage_backend == "local" else "S3"),
-            ("antivirus", "on" if self.clamav_host else "off", "ClamAV"),
+            ("antivirus", "on" if self.clamav_host else "off", "ClamAV (optional; every PDF is cleaned of active content on upload)"),
         ]
 
     def checklist_text(self) -> str:
@@ -229,7 +266,7 @@ class Settings(BaseSettings):
     def validate_required(self) -> None:
         problems = self.required_problems()
         if problems:
-            raise ConfigError("Probity cannot start - fix these in apps/api/.env:\n  - " + "\n  - ".join(problems))
+            raise ConfigError("Probity cannot start - set these in the environment or apps/api/.env:\n  - " + "\n  - ".join(problems))
 
 
 @lru_cache

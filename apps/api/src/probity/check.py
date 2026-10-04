@@ -127,10 +127,10 @@ def check_ai() -> Result:
     from probity.llm import client as llm
 
     st = get_settings()
-    if not st.anthropic_api_key:
-        return Result("ai", "missing", "ANTHROPIC_API_KEY is not set")
+    if not st.llm_api_key:
+        return Result("ai", "missing", f"{st.llm_key_name} is not set (LLM_PROVIDER={st.llm_provider})")
     out = []
-    for tier, model in (("fast", st.llm_model_fast), ("reasoning", st.llm_model_reasoning)):
+    for tier, model in (("fast", st.llm_model("fast")), ("reasoning", st.llm_model("reasoning"))):
         try:
             r = llm.generate(schema=_Ping, system="This is a connectivity check. Reply with ok=true and word='ready'.",
                              user="ping", tier=tier, tags={"agent": "integration_check", "prompt_version": "check"})  # type: ignore[arg-type]
@@ -139,7 +139,7 @@ def check_ai() -> Result:
         if not r.ok:
             return Result("ai", "failed", f"{model}: answered but not with the expected structured output")
         out.append(model)
-    return Result("ai", "ok", "structured output works with " + " and ".join(out))
+    return Result("ai", "ok", f"{st.llm_provider}: structured output works with " + " and ".join(out))
 
 
 # ---------------------------------------------------------------- sign-in (Clerk)
@@ -269,8 +269,7 @@ def check_antivirus() -> Result:
 
     st = get_settings()
     if not st.clamav_host:
-        state = "required in production" if st.env == "prod" else "uploads are not virus-scanned"
-        return Result("antivirus", "skipped" if st.env != "prod" else "missing", f"CLAMAV_HOST is not set; {state}")
+        return Result("antivirus", "skipped", "optional, not configured (CLAMAV_HOST); every uploaded PDF is cleaned of active content instead")
     if clamav_scan(b"clean probity check") != "OK":
         return Result("antivirus", "failed", "clean test data was not reported OK")
     try:

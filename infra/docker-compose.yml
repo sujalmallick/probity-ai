@@ -1,24 +1,120 @@
-# Full local stack (Postgres + API + web). Settings come from apps/api/.env (git-ignored); the database URLs are
-# overridden here to point at the postgres service. Nothing is seeded: sign in with Clerk and add your own data.
+# Production stack: everything Probity needs on one host, published through a Cloudflare Tunnel (no open inbound ports).
+#
+#   cp infra/env.prod.example infra/.env.prod      # fill it in (git-ignored)
+#   docker compose --env-file infra/.env.prod -f infra/docker-compose.yml up -d --build
+#
+# Cloudflare provides what can't (or shouldn't) run here: the tunnel ingress (Zero Trust, free), R2 object storage for
+# invoices (STORAGE_BACKEND=s3), DNS/TLS/WAF, and optionally Pages for the web app and Email Routing for vendor replies.
+# Postgres, Redis and the Python services run in this stack (Cloudflare has no managed Postgres/Redis, and
+# Cloudflare Containers needs the paid Workers plan). See infra/cloudflare/README.md.
+#
+# Services: postgres · redis · migrate (one-off) · api · worker · scheduler · web · tunnel
+# Uploads: every PDF is parsed and rewritten without active content before it is stored (no resident virus scanner,
+# which would need 1-3 GB of RAM). To add ClamAV anyway, run a clamav/clamav container and set CLAMAV_HOST.
+# Only `tunnel` talks to the outside world; nothing publishes a host port except the optional localhost debug ports.
+
+x-app: &app
+  build: { context: .., dockerfile: infra/api.Dockerfile }
+  image: probity-api:latest
+  env_file: [.env.prod]
+  environment: &app-env
+    ENV: prod
+    DATABASE_URL: postgresql+psycopg://probity_app:${PROBITY_APP_PASSWORD:?set PROBITY_APP_PASSWORD}@postgres:5432/probity
+    DATABASE_MIGRATE_URL: postgresql+psycopg://probity:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/probity
+    REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379/0
+    TASK_BACKEND: celery
+    STORAGE_BACKEND: s3
+    LOG_JSON: "true"
+  restart: unless-stopped
+  networks: [backend]
+
 services:
   postgres:
     image: postgres:16-alpine
-    environment: { POSTGRES_USER: probity, POSTGRES_PASSWORD: probity, POSTGRES_DB: probity }
-    ports: ["127.0.0.1:5432:5432"]  # backing services are never exposed beyond this machine
-    volumes: [pgdata:/var/lib/postgresql/data, ./postgres:/docker-entrypoint-initdb.d:ro]
-    healthcheck: { test: ["CMD-SHELL", "pg_isready -U probity"], interval: 5s, retries: 10 }
-  api:
-    build: { context: .., dockerfile: infra/api.Dockerfile }
-    env_file: [../apps/api/.env]
     environment:
-      DATABASE_URL: postgresql+psycopg://probity_app:probity_app@postgres:5432/probity
-      DATABASE_MIGRATE_URL: postgresql+psycopg://probity:probity@postgres:5432/probity
-      TASK_BACKEND: inline
-    ports: ["8010:8000"]
+      POSTGRES_USER: probity
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: probity
+      PROBITY_APP_PASSWORD: ${PROBITY_APP_PASSWORD:?set PROBITY_APP_PASSWORD}  # read once by postgres/01-app-role.sh
+    volumes: [pgdata:/var/lib/postgresql/data, ./postgres:/docker-entrypoint-initdb.d:ro]
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U probity -d probity"], interval: 5s, timeout: 5s, retries: 20 }
+    restart: unless-stopped
+    networks: [backend]
+
+  redis:
+    image: redis:7-alpine
+    # Password required (the app refuses ENV=prod without one); AOF so queued jobs survive a restart.
+    command: ["sh", "-c", "exec redis-server --requirepass \"$$REDIS_PASSWORD\" --appendonly yes --maxmemory-policy noeviction"]
+    environment: { REDIS_PASSWORD: "${REDIS_PASSWORD:?set REDIS_PASSWORD}" }
+    volumes: [redisdata:/data]
+    healthcheck: { test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"], interval: 5s, timeout: 5s, retries: 20 }
+    restart: unless-stopped
+    networks: [backend]
+
+  migrate:
+    # One-off: prints the settings checklist and creates/upgrades the schema, then exits. Runs before api/worker so
+    # several replicas never race each other on migrations.
+    <<: *app
+    command: ["python", "-m", "probity.bootstrap"]
+    restart: "no"
     depends_on: { postgres: { condition: service_healthy } }
+
+  api:
+    <<: *app
+    command: ["uvicorn", "probity.api.main:app", "--host", "0.0.0.0", "--port", "8000",
+              "--proxy-headers", "--forwarded-allow-ips", "*"]  # only reachable inside the stack (web/tunnel), so trusting XFF is safe
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=3).status == 200 else 1)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+
+  worker:
+    # Runs investigations (TASK_BACKEND=celery). Scale with: docker compose ... up -d --scale worker=2
+    <<: *app
+    command: ["celery", "-A", "probity.worker", "worker", "--loglevel=INFO", "--concurrency=2"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+
+  scheduler:
+    # Celery beat: follow-up reminders and the stuck-case watchdog. Exactly ONE scheduler per deployment.
+    <<: *app
+    command: ["celery", "-A", "probity.worker", "beat", "--loglevel=INFO", "--schedule", "/tmp/celerybeat-schedule"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+
   web:
-    build: { context: .., dockerfile: infra/web.Dockerfile }
-    ports: ["5180:80"]
-    depends_on: [api]
+    build:
+      context: ..
+      dockerfile: infra/web.Dockerfile
+      args:
+        VITE_CLERK_PUBLISHABLE_KEY: ${VITE_CLERK_PUBLISHABLE_KEY:?set VITE_CLERK_PUBLISHABLE_KEY}
+    image: probity-web:latest
+    ports: ["127.0.0.1:${WEB_DEBUG_PORT:-5180}:80"]  # localhost only, for checking the stack before the tunnel is set up
+    depends_on: { api: { condition: service_healthy } }
+    restart: unless-stopped
+    networks: [backend, edge]
+
+  tunnel:
+    # Cloudflare Tunnel: outbound-only connection to Cloudflare; route your public hostname to http://web:80 in the
+    # Zero Trust dashboard (Networks → Tunnels → Public hostname). Pin the tag (or digest) you have tested.
+    image: cloudflare/cloudflared:latest
+    command: ["tunnel", "--no-autoupdate", "run"]
+    environment: { TUNNEL_TOKEN: "${CLOUDFLARE_TUNNEL_TOKEN:?set CLOUDFLARE_TUNNEL_TOKEN}" }
+    depends_on: [web]
+    restart: unless-stopped
+    networks: [edge]
+
+networks:
+  backend: {}   # postgres, redis, api, workers: never reachable from the tunnel network
+  edge: {}      # web + tunnel only
+
 volumes:
   pgdata:
+  redisdata:

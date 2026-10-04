@@ -14,7 +14,7 @@ flowchart LR
     A --> DB[(PostgreSQL<br/>row-level security)]
     G --> DB
     A -. sign-in tokens .-> C[Clerk]
-    G -. reading, queries, summaries .-> L[Anthropic Claude]
+    G -. reading, queries, summaries .-> L[AI provider<br/>Claude or Gemini]
     G -. web search .-> T[Tavily]
     G -. domain age .-> RD[RDAP]
     A -. email .-> E[Resend]
@@ -37,15 +37,15 @@ A *human* decides about the payment. Probity never pays anything.
 | `apps/api/src/probity/risk/` (other files) | The policy-driven second view (`invoice_scoring.py`, `case_scoring.py`, `narrate.py`, `invoice_policy.example.json`). |
 | `apps/api/src/probity/signals/detectors.py` | The deterministic checks (bank change, duplicate, price anomaly, PO, dates, …) as pure functions. |
 | `apps/api/src/probity/evidence/` | The claim/evidence model and the verifier (cite-or-drop, recomputing numbers, quote checks). |
-| `apps/api/src/probity/ingestion/` | Reading uploads: file-type sniffing, PDF/email/text extraction, field parser, validators, active-content and virus checks, isolated parsing. |
+| `apps/api/src/probity/ingestion/` | Reading uploads: file-type sniffing, PDF/email/text extraction, field parser, validators, PDF cleaning (rewrite without active content), optional virus scan, isolated parsing. |
 | `apps/api/src/probity/guardrails/` | Encryption and masking of account numbers (`crypto.py`); prompt-injection detection, redaction and neutral-language rules (`text.py`). |
-| `apps/api/src/probity/llm/` | The single gateway to Claude (`client.py`) and the versioned prompts (`prompts/`). |
+| `apps/api/src/probity/llm/` | The single gateway to the AI provider (`client.py`): Anthropic or Gemini, chosen by `LLM_PROVIDER`. Also the versioned prompts (`prompts/`). |
 | `apps/api/src/probity/tools/` | Outside lookups: safe web fetch (SSRF protection), Tavily search, RDAP domain age, usage budgets. |
 | `apps/api/src/probity/db/` | Database models, sessions (sets the workspace for row-level security), the audit hash chain, migrations. |
 | `apps/api/src/probity/` (top-level files) | `config.py` (settings and start-up checklist), `bootstrap.py` (create/upgrade the schema), `check.py` (live integration checks), `services.py` (case lifecycle, decisions, emails), `auth.py` (Clerk), `mailer.py`, `notify.py`, `importer.py` (CSV), `baseline.py`, `sanity.py`, `trace.py`, `report.py` (PDF export), `worker.py` (Celery), `observability.py`, `storage.py`. |
 | `apps/api/tests/` | The backend test suite. Test data is built by `tests/factories/`. |
 | `apps/web/` | The frontend: React 18, Vite, TypeScript, Tailwind, Clerk. Pages in `src/pages/`, shared pieces in `src/components/`, API client and helpers in `src/lib/`. |
-| `infra/` | Docker: `docker-compose.dev.yml` (PostgreSQL for development, plus optional Redis), `docker-compose.yml` (full stack), Dockerfiles, nginx config, `postgres/` (creates the `probity_app` database user). |
+| `infra/` | Docker: `docker-compose.dev.yml` (PostgreSQL for development, plus optional Redis), `docker-compose.yml` (the production stack with worker, scheduler and a Cloudflare Tunnel; settings in `infra/.env.prod`, guide in `infra/cloudflare/`), Dockerfiles, nginx config, `postgres/` (creates the `probity_app` database user). |
 | `scripts/dev.ps1` | One-command local start on Windows. |
 | `Makefile` | The same tasks for macOS/Linux (`make install`, `db`, `bootstrap`, `api`, `web`, `dev`, `test`, …). |
 | `benchmark/real/` | A harness to run Probity on **your own** invoices against your own labels. The invoices, labels and reports folders are git-ignored and never committed. |
@@ -74,8 +74,8 @@ flowchart TD
     AC & APP & REJ --> CL[CLOSED: outcome saved to memory]
 ```
 
-1. **Upload** (`POST /api/v1/documents`). The file is checked: size, real file type, dangerous PDF content, virus scan if configured,
-   duplicates. Then it's stored.
+1. **Upload** (`POST /api/v1/documents`). The file is checked: size, real file type, scans and images refused, duplicates. PDFs are rewritten
+   without active content (hostile ones refused), a virus scan runs if configured, and only the clean copy is stored.
 2. **Create a case** (`POST /api/v1/cases`). The case runs inline in the API process by default, or on a Celery worker if
    `TASK_BACKEND=celery`. Status moves QUEUED → EXTRACTING → INVESTIGATING → VERIFYING → SCORING.
 3. **Agents** add **claims**, each with **evidence**: what the invoice says vs. what your records say. A check that can't run is recorded

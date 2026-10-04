@@ -14,7 +14,7 @@ The examples below use placeholders like `sk-ant-xxxxxxxx`. Replace them with yo
 |---|---|---|---|---|
 | PostgreSQL (Docker) | **Required** | Yes (runs on your PC) | `DATABASE_URL`, `DATABASE_MIGRATE_URL` | `apps/api/.env` |
 | App secrets (generated) | **Required** | Yes | `FIELD_KEY_B64`, `HMAC_KEY` | `apps/api/.env` |
-| Anthropic (Claude) | **Required** | No, pay per use (a small top-up is enough for testing) | `ANTHROPIC_API_KEY` | `apps/api/.env` |
+| AI provider: Anthropic (Claude) **or** Google Gemini | **Required (one of them)** | Anthropic: no, pay per use. Gemini: has a free tier | `LLM_PROVIDER`, plus `ANTHROPIC_API_KEY` or `GEMINI_API_KEY` | `apps/api/.env` |
 | Clerk (sign-in) | **Required** | Yes, free development instance | `CLERK_ISSUER`, `CLERK_SECRET_KEY`, `CLERK_AUTHORIZED_PARTIES` | `apps/api/.env` |
 | | | | `VITE_CLERK_PUBLISHABLE_KEY` | `apps/web/.env.local` |
 | Tavily (web research) | Optional | Has a free tier | `TAVILY_API_KEY` | `apps/api/.env` |
@@ -22,7 +22,7 @@ The examples below use placeholders like `sk-ant-xxxxxxxx`. Replace them with yo
 | Inbound email (vendor replies) | Optional, advanced | Depends on your email service | `EMAIL_REPLY_DOMAIN`, `INBOUND_EMAIL_SECRET` | `apps/api/.env` |
 | Redis (background worker) | Optional, advanced | Yes (Docker) | `TASK_BACKEND`, `REDIS_URL` | `apps/api/.env` |
 | S3 / Cloudflare R2 (file storage) | Optional, advanced (required in production) | Has free tiers | `STORAGE_BACKEND`, `S3_*` | `apps/api/.env` |
-| ClamAV (virus scan) | Optional, advanced (required in production) | Yes (open source) | `CLAMAV_HOST`, `CLAMAV_PORT` | `apps/api/.env` |
+| ClamAV (virus scan) | Optional, advanced | Yes (open source) | `CLAMAV_HOST`, `CLAMAV_PORT` | `apps/api/.env` |
 | GST registry | Not available | n/a | none | n/a |
 
 Prices and free tiers change. **Always check the provider's own pricing page.** The notes above are only a guide.
@@ -33,7 +33,7 @@ The smallest set that lets you run the app and the tests:
 
 1. **PostgreSQL** in Docker (free).
 2. **App secrets** (one command, free).
-3. **Anthropic API key**.
+3. **One AI key**: Anthropic (the default) or Google Gemini.
 4. **Clerk development app** (free): issuer, secret key, publishable key.
 
 Everything else is optional. Without it, Probity still runs and shows "could not verify" for the checks it can't do.
@@ -62,7 +62,8 @@ This starts PostgreSQL 16 on **127.0.0.1:5434** and creates two database users:
 | `probity` | `probity` | Owner of the schema. Runs migrations. Goes in `DATABASE_MIGRATE_URL`. |
 | `probity_app` | `probity_app` | What the app uses day to day. It can't bypass row-level security, which keeps workspaces apart. Goes in `DATABASE_URL`. |
 
-These passwords are fixed in `infra/` and are **only for your own computer**. Never reuse them anywhere real.
+These are the **local-development defaults** and are **only for your own computer**. Never reuse them anywhere real. (The
+production Docker stack sets its own passwords. See [Production stack](#production-stack-docker--cloudflare).)
 
 ```dotenv
 # apps/api/.env
@@ -91,7 +92,8 @@ python -m probity.bootstrap --generate-secrets
 ```
 
 This creates `apps/api/.env` from `.env.example` if it doesn't exist, and fills the two values **only if they are empty**. It writes
-them to the file and **never prints them**.
+them to the file and **never prints them**. It then connects to the database to create the schema, so set the `DATABASE_URL` lines
+first (see [SETUP.md](SETUP.md), step 5). Otherwise you'll see a "password authentication failed" error after the secrets are written.
 
 **Important:**
 - **Don't change these after you have data.** A new `FIELD_KEY_B64` makes stored bank numbers unreadable. A new `HMAC_KEY` breaks account
@@ -101,7 +103,22 @@ them to the file and **never prints them**.
 
 ---
 
-## Anthropic / Claude (required)
+## AI provider: choose Anthropic or Gemini (one is required)
+
+Probity needs **one** AI provider. Pick it with `LLM_PROVIDER` in `apps/api/.env`:
+
+| `LLM_PROVIDER` | Key needed | Default models (fast / reasoning) |
+|---|---|---|
+| `anthropic` (default) | `ANTHROPIC_API_KEY` | `claude-sonnet-5-5` / `claude-opus-5-5` |
+| `gemini` | `GEMINI_API_KEY` | `gemini-3.5-flash-lite` / `gemini-3.8-flash` |
+
+- **Model overrides are optional.** `LLM_MODEL_FAST` and `LLM_MODEL_REASONING` can be left empty to use the defaults.
+- **If you do set them, they must match the provider.** For example, a `claude-...` model with `LLM_PROVIDER=gemini` stops the API from
+  starting with "`LLM_MODEL_FAST=... is not a gemini model`".
+
+Whichever provider you choose, the risk score never uses the AI.
+
+### Anthropic / Claude
 
 **What it's for:** the AI steps:
 - filling gaps when reading invoices
@@ -125,10 +142,9 @@ The risk score itself never uses the AI.
 
 ```dotenv
 # apps/api/.env
+LLM_PROVIDER=anthropic
 ANTHROPIC_API_KEY=sk-ant-xxxxxxxx
 ```
-
-The models are set by `LLM_MODEL_REASONING` and `LLM_MODEL_FAST` (already filled in `.env.example`).
 
 **Check it works** (one small request; the key is never printed):
 
@@ -136,6 +152,29 @@ The models are set by `LLM_MODEL_REASONING` and `LLM_MODEL_FAST` (already filled
 cd apps/api
 python -m probity.check ai
 ```
+
+On success it reports that structured output works with the fast and reasoning models.
+
+### Google Gemini
+
+**What it's for:** the same AI steps as above, using Google's models instead.
+
+**Cost:** Google AI Studio has a free tier with rate limits, plus paid usage. Check Google's pricing page. The same per-case and
+per-workspace limits apply.
+
+**Get a key:**
+1. Go to Google AI Studio (aistudio.google.com) and sign in with a Google account.
+2. Choose **Get API key** and create a key. If you enable billing, set a budget alert in Google Cloud.
+3. Copy the key.
+
+```dotenv
+# apps/api/.env
+LLM_PROVIDER=gemini
+GEMINI_API_KEY=xxxxxxxx
+```
+
+If `LLM_PROVIDER=gemini` and the key is empty, the API won't start ("`GEMINI_API_KEY is not set (LLM_PROVIDER=gemini)`").
+Check it with the same command: `python -m probity.check ai`.
 
 ---
 
@@ -307,7 +346,34 @@ CLAMAV_HOST=127.0.0.1
 CLAMAV_PORT=3310
 ```
 
-Without it, the scan is skipped and the audit log says "SKIPPED". Production requires it. Check it with `python -m probity.check antivirus`.
+Without it, the scan is skipped and the audit log says "SKIPPED". It's optional everywhere, production included: every uploaded PDF is
+already rewritten without active content before it's stored. ClamAV adds signature-based scanning and needs 1–3 GB of RAM. Check it
+with `python -m probity.check antivirus`.
+
+### Production stack (Docker + Cloudflare)
+
+**You don't need this for development.** `infra/docker-compose.yml` runs Probity as a full production stack:
+- PostgreSQL
+- Redis (with a password)
+- a one-off migration step
+- the API, a Celery worker and one scheduler
+- the web app (nginx)
+- a Cloudflare Tunnel
+
+Its settings live in **`infra/.env.prod`** (git-ignored), not in `apps/api/.env`. Copy the template and fill it in:
+
+```powershell
+Copy-Item infra/env.prod.example infra/.env.prod
+docker compose --env-file infra/.env.prod -f infra/docker-compose.yml up -d --build
+```
+
+(`make up` / `make down` run the same thing on macOS/Linux.) Besides the keys above, it needs:
+- its own random passwords: `POSTGRES_PASSWORD`, `PROBITY_APP_PASSWORD`, `REDIS_PASSWORD`, `METRICS_TOKEN`
+- `CLOUDFLARE_TUNNEL_TOKEN`
+- `VITE_CLERK_PUBLISHABLE_KEY`, which is baked into the web image; the build fails without it
+- R2 storage settings (`S3_*`)
+
+Step-by-step guide: [infra/cloudflare/README.md](../infra/cloudflare/README.md).
 
 ---
 
@@ -331,7 +397,7 @@ Provider (GSP), which Probity doesn't integrate. So:
 - **Never paste keys** in GitHub issues, pull requests, chat messages or screenshots. That includes terminal screenshots where `.env` is
   open. Probity's own commands never print secret values; keep it that way.
 - **Use your own keys and your own Clerk dev app.** Don't share keys with teammates. Each person pays for and controls their own.
-- **Set spending limits** on Anthropic (and any paid service) before using the key.
+- **Set spending limits** on Anthropic, Google (if billing is on) and any other paid service before using the key.
 - **If a key leaks** (committed, pasted or shown on screen):
   1. **Rotate it immediately**: delete or revoke the key at the provider and create a new one.
   2. Update your `apps/api/.env` or `apps/web/.env.local`.

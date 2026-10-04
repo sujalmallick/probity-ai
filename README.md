@@ -58,7 +58,7 @@ flowchart LR
     A --> DB[(PostgreSQL<br/>row-level security)]
     G --> DB
     A -.-> C[Clerk<br/>sign-in]
-    G -.-> L[Claude<br/>AI]
+    G -.-> L[AI: Claude<br/>or Gemini]
     G -.-> T[Tavily<br/>web search]
     G -.-> RD[RDAP<br/>domain age]
     A -.-> E[Resend<br/>email]
@@ -69,7 +69,7 @@ Agents in order: document reader → planner → vendor investigator + transacti
 
 ## Quick start
 
-You need Git, Python 3.12+, Node 22, Docker Desktop, an Anthropic API key and a free Clerk development app. On Windows:
+You need Git, Python 3.12+, Node 22, Docker Desktop, an AI key (Anthropic, or Google Gemini) and a free Clerk development app. On Windows:
 
 ```powershell
 git clone https://github.com/sujalmallick/probity-ai.git
@@ -80,6 +80,7 @@ powershell -ExecutionPolicy Bypass -File scripts\dev.ps1
 The first run sets things up and tells you which keys to add. Add them and run it again, then open http://localhost:5180.
 
 **Full step-by-step guide (Windows, macOS, Linux):** [docs/SETUP.md](docs/SETUP.md). **Getting the keys:** [docs/API_KEYS.md](docs/API_KEYS.md).
+**Deploying (Docker + Cloudflare):** [infra/cloudflare/README.md](infra/cloudflare/README.md).
 
 ## Current status
 
@@ -92,13 +93,27 @@ Probity is a **hackathon prototype**. It works end to end on real data, but it h
 - Vendor list with verified bank accounts, domains and contacts; CSV import of vendors, past invoices and purchase orders.
 - Neutral vendor emails (Resend, allowlist while testing), vendor replies, out-of-band confirmation.
 - Roles (viewer, accountant, approver, owner), case memory, audit log, PDF/JSON export, and workspace isolation in the database.
+- A choice of AI provider: Anthropic Claude (default) or Google Gemini.
+- Past invoices and purchase orders by CSV import or one at a time (API). Records an accountant adds count in comparisons only after an
+  approver approves them.
+- Upload safety without a heavy virus scanner: every PDF is rewritten without active content (JavaScript, embedded files, auto-actions)
+  before it's stored; hostile PDFs are refused. ClamAV can still be added (`CLAMAV_HOST`).
+- Usage limits per workspace per day and per case (investigations, AI tokens, web searches, upload size). Hitting one stops the work
+  cleanly and names the limit.
+- A per-agent trace for every case and automatic sanity checks (score = verified points, no point without evidence, no "all clear"
+  without a search…); any problem holds the invoice. Failed cases can be retried from the start.
+- `python -m probity.check` tests every integration for real, including a database create/read/update/delete round trip;
+  `python -m probity.sanity` re-checks stored cases.
+- Run Probity on your own labelled invoices and get a report: [benchmark/real/README.md](benchmark/real/README.md).
+- A production Docker stack (API, worker, scheduler, web, Cloudflare Tunnel; R2 for files): see [infra/cloudflare/README.md](infra/cloudflare/README.md).
 
 **Planned / not yet supported**
 - **Scanned PDFs and photos:** refused today. There's no OCR.
 - **GST registry verification:** there's no free official API. Probity checks the GSTIN's format and checksum only, and shows the registry
   status as "could not verify". You can record what you saw on the GST portal by hand; it's labelled "Entered manually".
 - **Email providers other than Resend** (no SMTP); bounce and out-of-office handling for vendor replies.
-- **Screens for some API features:** notifications, adding single past invoices and POs, the invoice-risk policy.
+- **Screens for some API features:** approving past invoices and POs, adding single ones, the per-agent trace, retrying a failed case,
+  notifications, the invoice-risk policy. The API for each is in place ([docs/API_CONTRACT.md](docs/API_CONTRACT.md)).
 - **Frontend tests and a linter.**
 - **Data retention and deletion** policy.
 
@@ -106,7 +121,7 @@ Probity is a **hackathon prototype**. It works end to end on real data, but it h
 - Without approved history, verified bank accounts and a Tavily key, many checks say "could not verify", so a new workspace holds most invoices.
 - Non-INR invoices are held, because prices can't be compared.
 - A background worker (Redis + Celery) is optional. By default investigations run inside the API process, which is fine for one machine.
-- Running the whole stack with `make up` builds a web image without a Clerk key, so sign-in is unavailable there. Use the setup guide instead.
+- Without ClamAV, a PDF that matches known malware but has no active parts is stored (cleaned) rather than named as malware.
 
 Full list: [docs/FEATURES.md](docs/FEATURES.md).
 
@@ -121,6 +136,11 @@ Full list: [docs/FEATURES.md](docs/FEATURES.md).
 | [docs/Guardrails.md](docs/Guardrails.md) | The safety rules and how they're enforced |
 | [docs/DECISIONS.md](docs/DECISIONS.md) | Design decisions and current limits |
 | [docs/API_CONTRACT.md](docs/API_CONTRACT.md) | The API the web app uses |
+| [infra/cloudflare/README.md](infra/cloudflare/README.md) | Deploying the Docker stack behind Cloudflare (Tunnel, R2) |
+| [benchmark/real/README.md](benchmark/real/README.md) | Running Probity on your own labelled invoices |
+| [docs/SECURITY_HANDOVER.md](docs/SECURITY_HANDOVER.md) | What the security review fixed, the tests that guard it, what's still open |
+| [docs/FAILURE_AUDIT.md](docs/FAILURE_AUDIT.md) | How failures, stuck cases and errors are handled |
+| [docs/README.md](docs/README.md) | Index of every doc, including the original design docs |
 | [docs/PRD.md](docs/PRD.md) | The original product requirements (some parts describe the earlier demo version) |
 
 ## Contributing

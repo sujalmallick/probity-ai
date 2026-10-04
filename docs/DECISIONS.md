@@ -21,7 +21,7 @@ Where a spec was ambiguous, I chose the more conservative behaviour: more human 
 
 ## Real data only (2026-10-04)
 
-- No demo, seed, fixture, offline or mock mode exists in the app. Required settings (Postgres, Anthropic, Clerk, two app secrets) are
+- No demo, seed, fixture, offline or mock mode exists in the app. Required settings (Postgres, an AI key for Anthropic or Gemini, Clerk, two app secrets) are
   checked at startup; the API prints a live/missing checklist and refuses to start without them. `JWT_SECRET` was removed with
   local sign-in.
 - Test doubles (AI transport, RDAP/search/fetch, Resend, Clerk JWKS/profile) are injected only by `apps/api/tests/conftest.py`;

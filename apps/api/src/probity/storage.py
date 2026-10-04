@@ -27,11 +27,17 @@ def _s3():  # type: ignore[no-untyped-def]
     )
 
 
+def _is_r2(endpoint: str | None) -> bool:
+    """Cloudflare R2 rejects the x-amz-server-side-encryption header (it encrypts every object at rest itself)."""
+    return bool(endpoint) and ".r2.cloudflarestorage.com" in endpoint.lower()
+
+
 def put(workspace_id: str, sha256: str, data: bytes, mime: str) -> str:
     st = get_settings()
     key = _key(workspace_id, sha256)
     if st.storage_backend == "s3":
-        _s3().put_object(Bucket=st.s3_bucket, Key=key, Body=data, ContentType=mime, ServerSideEncryption="AES256")
+        extra = {} if _is_r2(st.s3_endpoint_url) else {"ServerSideEncryption": "AES256"}
+        _s3().put_object(Bucket=st.s3_bucket, Key=key, Body=data, ContentType=mime, **extra)
         return f"s3://{st.s3_bucket}/{key}"
     path = Path(st.storage_dir) / key
     path.parent.mkdir(parents=True, exist_ok=True)

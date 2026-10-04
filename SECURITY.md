@@ -35,9 +35,9 @@ you if you'd like.
 
 ## Out of scope
 
-- Problems in third-party services themselves (Clerk, Anthropic, Tavily, Resend). Report those to the provider.
+- Problems in third-party services themselves (Clerk, Anthropic, Google Gemini, Tavily, Resend, Cloudflare). Report those to the provider.
 - Attacks that need someone's own keys or `.env` file, or full access to their computer.
-- The fixed local-development database passwords in `infra/` and `scripts/dev.ps1` (they're for a database on your own computer only).
+- The default local-development database passwords used by `infra/docker-compose.dev.yml` and `scripts/dev.ps1` (they're for a database on your own computer only).
 - Denial of service through very high traffic.
 
 ## If you leak your own key
