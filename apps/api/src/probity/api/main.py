@@ -176,7 +176,9 @@ def auth_config() -> dict:
 def demo_users(s: Session = Depends(db)) -> list[dict]:
     if get_settings().auth_mode != "local" or not _demo_on():
         raise HTTPException(404, "not available")
-    return [{"id": u.id, "name": u.name, "email": u.email, "role": u.role} for u in s.scalars(select(User).order_by(User.role))]
+    names = {w.id: w.name for w in s.scalars(select(Workspace))}
+    return [{"id": u.id, "name": u.name, "email": u.email, "role": u.role, "workspace": {"id": u.workspace_id, "name": names.get(u.workspace_id)}}
+            for u in s.scalars(select(User).order_by(User.role))]
 
 
 class DemoLogin(BaseModel):
@@ -560,12 +562,14 @@ def vendor_reply(case_id: str, body: ReplyIn, user: User = Depends(current_user)
 class OOBIn(BaseModel):
     claim_ids: list[str]
     method: Literal["phone_known_contact", "bank_letter", "in_person"]
-    note: str
+    note: str = Field(max_length=2000)
+    # Attestation that the channel was already on file (not taken from the invoice or the reply).
+    known_channel: bool | None = None
 
 
 @app.post(f"{API}/cases/{{case_id}}/out-of-band-confirmation")
 def oob(case_id: str, body: OOBIn, user: User = Depends(require_mfa_for_approvals), s: Session = Depends(db)) -> dict:
-    return svc.confirm_out_of_band(s, user, case_id, body.claim_ids, body.method, body.note)
+    return svc.confirm_out_of_band(s, user, case_id, body.claim_ids, body.method, body.note, known_channel=body.known_channel)
 
 
 @app.post(f"{API}/cases/{{case_id}}/rescore")

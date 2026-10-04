@@ -84,6 +84,8 @@ export async function api<T = any>(path: string, init: RequestInit = {}): Promis
 }
 
 export const post = <T = any>(path: string, body?: unknown) => api<T>(path, { method: "POST", body: body === undefined ? undefined : JSON.stringify(body) });
+export const patch = <T = any>(path: string, body: unknown) => api<T>(path, { method: "PATCH", body: JSON.stringify(body) });
+export const del = (path: string) => api<void>(path, { method: "DELETE" });
 
 export async function uploadFile(file: File | Blob, name: string) {
   const fd = new FormData();

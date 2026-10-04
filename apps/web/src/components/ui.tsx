@@ -1,5 +1,5 @@
-import { useEffect, useRef, type ReactNode } from "react";
-import { AlertTriangle, CheckCircle2, CircleDashed, Loader2, ShieldAlert, ShieldCheck, X, XCircle } from "lucide-react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { AlertTriangle, CheckCircle2, ChevronDown, CircleDashed, Loader2, ShieldAlert, ShieldCheck, X, XCircle } from "lucide-react";
 import { STATUS_LABEL, tierColor, tierSoft } from "../lib/format";
 
 export function TierChip({ tier, score }: { tier?: string; score?: number }) {
@@ -49,7 +49,7 @@ export function Modal({ title, onClose, children, wide }: { title: string; onClo
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onClick={onClose}>
       <div ref={ref} role="dialog" aria-modal aria-label={title} className={`card fade-in max-h-[90vh] w-full overflow-auto p-5 shadow-xl ${wide ? "max-w-2xl" : "max-w-lg"}`} onClick={(e) => e.stopPropagation()}>
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-base font-semibold">{title}</h2>
@@ -73,4 +73,74 @@ export function Empty({ icon, title, children }: { icon: ReactNode; title: strin
 
 export function Skeleton({ className = "" }: { className?: string }) {
   return <div className={`pulse rounded-md bg-surface-2 ${className}`} />;
+}
+
+/** Right-hand slide-over panel. Escape or the backdrop closes it; focus moves into it on open. */
+export function Drawer({ title, onClose, children }: { title: ReactNode; onClose: () => void; children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    ref.current?.querySelector<HTMLElement>("button")?.focus();
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div className="fixed inset-0 z-50" role="dialog" aria-modal aria-label={typeof title === "string" ? title : "Panel"}>
+      <div className="fade-in absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
+      <div ref={ref} className="drawer-in absolute inset-y-0 right-0 flex w-[420px] max-w-[92vw] flex-col border-l border-line bg-bg shadow-2xl">
+        <div className="flex items-center justify-between border-b border-line px-5 py-4">
+          <h2 className="text-base font-semibold">{title}</h2>
+          <button className="rounded p-1 text-muted hover:bg-surface-2" onClick={onClose} aria-label="Close"><X size={18} /></button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-4">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+/** Small dropdown menu: Escape or a click outside closes it, arrow keys move between items. */
+export function MenuButton({ label, icon, items, align = "right", up = false }: { label: ReactNode; icon?: ReactNode; items: { label: string; hint?: string; icon?: ReactNode; onSelect: () => void }[]; align?: "left" | "right"; up?: boolean }) {
+  const [open, setOpen] = useState(false);
+  const wrap = useRef<HTMLDivElement>(null);
+  const btn = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const first = wrap.current?.querySelector<HTMLElement>('[role="menuitem"]');
+    first?.focus();
+    const onDown = (e: MouseEvent) => !wrap.current?.contains(e.target as Node) && setOpen(false);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { setOpen(false); btn.current?.focus(); }
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        const els = [...(wrap.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])];
+        const i = els.indexOf(document.activeElement as HTMLElement);
+        els[(i + (e.key === "ArrowDown" ? 1 : -1) + els.length) % els.length]?.focus();
+        e.preventDefault();
+      }
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => { document.removeEventListener("mousedown", onDown); document.removeEventListener("keydown", onKey); };
+  }, [open]);
+  return (
+    <div ref={wrap} className="relative">
+      <button ref={btn} className="btn !py-1.5 text-sm" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(!open)}>
+        {icon}{label}{!up && <ChevronDown size={14} className={`text-muted transition-transform duration-150 ${open ? "rotate-180" : ""}`} aria-hidden />}
+      </button>
+      {open && (
+        <div role="menu" className={`fade-in absolute z-40 min-w-[200px] ${up ? "bottom-full mb-1.5" : "top-full mt-1.5"} rounded-xl border border-line bg-surface p-1 shadow-xl ${align === "right" ? "right-0" : "left-0"}`}>
+          {items.map((it) => (
+            <button
+              key={it.label}
+              role="menuitem"
+              className="flex w-full items-start gap-2.5 rounded-lg px-3 py-2 text-left text-sm hover:bg-surface-2 focus-visible:bg-surface-2 focus-visible:outline-none"
+              onClick={() => { setOpen(false); it.onSelect(); }}
+            >
+              {it.icon && <span className="mt-0.5 text-muted">{it.icon}</span>}
+              <span><span className="block">{it.label}</span>{it.hint && <span className="block text-xs text-muted">{it.hint}</span>}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }

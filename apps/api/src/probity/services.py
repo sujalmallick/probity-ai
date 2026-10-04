@@ -311,14 +311,20 @@ def vendor_reply(s: Session, workspace_id: str, actor: str, case_id: str, from_e
     return {"claim_ids": [r.id for r in rows], "indicators": indicators, "score_changed": False}
 
 
-def confirm_out_of_band(s: Session, user: User, case_id: str, claim_ids: list[str], method: str, note: str) -> dict:
+OOB_NOTE_MIN_CHARS = 20
+
+
+def confirm_out_of_band(s: Session, user: User, case_id: str, claim_ids: list[str], method: str, note: str,
+                        known_channel: bool | None = None) -> dict:
     """Approver-only. The ONLY path by which a vendor's statements can lower the score (G11)."""
     require_role(user, "approver")
     case = get_case(s, user.workspace_id, case_id)
     if case.status != "AWAITING_HUMAN":
         raise Conflict(f"case is {case.status}")
-    if not note or len(note.strip()) < 5:
-        raise BadRequest("describe the out-of-band confirmation (who was called, on which known number)")
+    if known_channel is False:
+        raise BadRequest("Out-of-band confirmation must use a phone number or channel already on file, not one from the invoice or the vendor's reply.")
+    if not note or len(note.strip()) < OOB_NOTE_MIN_CHARS:
+        raise BadRequest(f"Describe the out-of-band confirmation in at least {OOB_NOTE_MIN_CHARS} characters: who you contacted, through which channel on file, and what they confirmed.")
     claims = [c for c in s.scalars(select(ClaimRow).where(ClaimRow.id.in_(claim_ids), ClaimRow.case_id == case.id, ClaimRow.agent == "action"))]
     if not claims:
         raise BadRequest("no vendor-reply claims selected")
@@ -348,7 +354,7 @@ def confirm_out_of_band(s: Session, user: User, case_id: str, claim_ids: list[st
         ev.status = "verified"
         c.status, c.verifier_notes = "verified", f"confirmed out-of-band by {user.name} via {method}"
         c.confidence = 0.95
-    audit(s, user.workspace_id, user.id, "verification.out_of_band", case.id, {"claims": claim_ids, "method": method, "note": note})
+    audit(s, user.workspace_id, user.id, "verification.out_of_band", case.id, {"claims": claim_ids, "method": method, "note": note, "known_channel": known_channel})
     s.commit()
     emit(user.workspace_id, case.id, "verification.confirmed_out_of_band", agent="human_gate", status="done", message=f"{user.name} confirmed {len(claims)} statement(s) via {method.replace('_', ' ')}")
     risk = rescore(user.workspace_id, case.id, reason="out_of_band_confirmation", rerun_checks=True)
