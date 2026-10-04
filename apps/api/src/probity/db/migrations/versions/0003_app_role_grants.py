@@ -27,7 +27,8 @@ def upgrade() -> None:
                 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO probity_app;
                 REVOKE UPDATE, DELETE, TRUNCATE ON audit_log FROM probity_app;
                 REVOKE UPDATE, DELETE, TRUNCATE ON evidence FROM probity_app;
-                REVOKE ALL ON alembic_version FROM probity_app;
+                REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON alembic_version FROM probity_app;
+                GRANT SELECT ON alembic_version TO probity_app;  -- readiness checks the schema version
                 GRANT EXECUTE ON FUNCTION probity_case_workspace(text) TO probity_app;
             END IF;
         END $$;

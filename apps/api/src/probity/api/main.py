@@ -6,6 +6,7 @@ import asyncio
 import json
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -113,6 +114,12 @@ async def _http(request: Request, e: HTTPException):  # type: ignore[no-untyped-
 
 API = "/api/v1"
 
+from probity.api import vendors as _vendors_api  # noqa: E402
+from probity.api import workspace as _workspace_api  # noqa: E402
+
+app.include_router(_vendors_api.router)
+app.include_router(_workspace_api.router)
+
 # CSP for the web app (served from this origin). Clerk's frontend API, images and bot-protection need allowances.
 _CLERK = " ".join(filter(None, [get_settings().clerk_frontend_api or "https://*.clerk.accounts.dev", "https://*.clerk.com"]))
 WEB_CSP = (
@@ -150,15 +157,20 @@ def metrics(authorization: str | None = Header(default=None)) -> Response:
 
 # ---------------------------------------------------------------- auth (AUTH_MODE=local, non-prod)
 
+def _demo_on() -> bool:
+    st = get_settings()
+    return st.demo_features and st.env != "prod"
+
+
 @app.get(f"{API}/auth/config")
 def auth_config() -> dict:
     st = get_settings()
-    return {"mode": st.auth_mode, "demo_login": st.auth_mode == "local" and st.env != "prod"}
+    return {"mode": st.auth_mode, "demo_login": st.auth_mode == "local" and _demo_on()}
 
 
 @app.get(f"{API}/auth/demo-users")
 def demo_users(s: Session = Depends(db)) -> list[dict]:
-    if get_settings().auth_mode != "local" or get_settings().env == "prod":
+    if get_settings().auth_mode != "local" or not _demo_on():
         raise HTTPException(404, "not available")
     return [{"id": u.id, "name": u.name, "email": u.email, "role": u.role} for u in s.scalars(select(User).order_by(User.role))]
 
@@ -169,7 +181,7 @@ class DemoLogin(BaseModel):
 
 @app.post(f"{API}/auth/demo-login")
 def demo_login(body: DemoLogin, request: Request, s: Session = Depends(db)) -> dict:
-    if get_settings().auth_mode != "local" or get_settings().env == "prod":
+    if get_settings().auth_mode != "local" or not _demo_on():
         raise HTTPException(404, "not available")
     u = s.get(User, body.user_id)
     if not u:
@@ -202,7 +214,7 @@ def put_ws_policy(body: dict[str, Any], request: Request, user: User = Depends(c
     if bad:
         raise svc.BadRequest(f"unknown policy keys: {sorted(bad)}")
     before = dict(ws.policy or {})
-    ws.policy = {**before, **body}
+    ws.policy = {**before, **body, "reviewed_at": datetime.now(timezone.utc).isoformat()}
     audit(s, ws.id, user.id, "policy.updated", ws.id, {"before": before, "after": ws.policy}, request.state.request_id)
     return get_policy(ws)
 
@@ -482,18 +494,6 @@ def decision(case_id: str, body: DecisionIn, user: User = Depends(require_mfa_fo
     return {"status": c.status}
 
 
-class NoteIn(BaseModel):
-    text: str = Field(min_length=1, max_length=2000)
-
-
-@app.post(f"{API}/cases/{{case_id}}/notes", status_code=201)
-def add_note(case_id: str, body: NoteIn, request: Request, user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
-    svc.require_role(user, "accountant")
-    c = svc.get_case(s, user.workspace_id, case_id)
-    audit(s, user.workspace_id, user.id, "note.added", c.id, {"text": body.text}, request.state.request_id)
-    return {"ok": True}
-
-
 @app.get(f"{API}/cases/{{case_id}}/drafts")
 def drafts(case_id: str, user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
     return {"items": svc.serialize_case(s, svc.get_case(s, user.workspace_id, case_id), user)["drafts"]}
@@ -617,66 +617,6 @@ async def inbound_email(request: Request) -> dict:
 
 # ---------------------------------------------------------------- vendors, memory
 
-@app.get(f"{API}/vendors")
-def vendors(user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
-    out = []
-    for v in s.scalars(select(Vendor).where(Vendor.workspace_id == user.workspace_id).order_by(Vendor.name)):
-        n = s.scalar(select(func.count()).select_from(HistoricalInvoice).where(HistoricalInvoice.vendor_id == v.id)) or 0
-        cases = s.scalar(select(func.count()).select_from(Case).where(Case.vendor_id == v.id)) or 0
-        out.append({"id": v.id, "name": v.name, "gstin": v.gstin, "address": v.address, "website": v.website, "invoices": n, "cases": cases})
-    return {"items": out}
-
-
-@app.get(f"{API}/vendors/{{vendor_id}}")
-def vendor(vendor_id: str, user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
-    v = s.get(Vendor, vendor_id)
-    if not v or v.workspace_id != user.workspace_id:
-        raise LookupError("vendor not found")
-    q = lambda M: s.scalars(select(M).where(M.vendor_id == v.id))  # noqa: E731
-    hist = list(s.scalars(select(HistoricalInvoice).where(HistoricalInvoice.vendor_id == v.id).order_by(HistoricalInvoice.invoice_date)))
-    return {
-        "id": v.id, "name": v.name, "gstin": v.gstin, "address": v.address, "website": v.website,
-        "accounts": [{"account": crypto.mask(a.last4), "ifsc": a.ifsc, "verified": a.verified, "verified_method": a.verified_method, "first_seen": a.first_seen, "last_seen": a.last_seen} for a in q(VendorBankAccount)],
-        "domains": [{"domain": d.domain, "verified": d.verified} for d in q(VendorDomain)],
-        "contacts": [{"name": c.name, "email": c.email, "verified": c.verified} for c in q(VendorContact)],
-        "price_history": [{"date": h.invoice_date, "invoice_number": h.invoice_number, "total_minor": h.total_minor, "items": h.line_items} for h in hist],
-        "prior_cases": [{"case_id": m.case_id, "outcome": m.outcome, "summary": m.summary, "peak_score": m.peak_score} for m in s.scalars(select(CaseMemory).where(CaseMemory.vendor_id == v.id))],
-    }
-
-
-class BankIn(BaseModel):
-    account_number: str = Field(min_length=6, max_length=34)
-    ifsc: str | None = None
-    note: str = Field(min_length=5)
-
-
-@app.post(f"{API}/vendors/{{vendor_id}}/bank-accounts", status_code=201)
-def add_bank(vendor_id: str, body: BankIn, request: Request, user: User = Depends(require_mfa_for_approvals), s: Session = Depends(db)) -> dict:
-    svc.require_role(user, "approver")
-    v = s.get(Vendor, vendor_id)
-    if not v or v.workspace_id != user.workspace_id:
-        raise LookupError("vendor not found")
-    a = VendorBankAccount(workspace_id=user.workspace_id, vendor_id=v.id, last4=crypto.last4(body.account_number), acct_hmac=crypto.account_hmac(body.account_number),
-                          acct_enc=crypto.encrypt(body.account_number), ifsc=body.ifsc, verified=True, verified_method="manual", verified_by=user.id)
-    s.add(a)
-    audit(s, user.workspace_id, user.id, "vendor.bank_verified", v.id, {"account": crypto.mask(a.last4), "note": body.note}, request.state.request_id)
-    return {"account": crypto.mask(a.last4), "verified": True}
-
-
-@app.get(f"{API}/vendors/{{vendor_id}}/graph")
-def vendor_graph(vendor_id: str, user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
-    from probity import graph_rel
-
-    return graph_rel.vendor_graph(s, user.workspace_id, vendor_id)
-
-
-@app.get(f"{API}/graph/shared-attributes")
-def shared_attrs(user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
-    from probity import graph_rel
-
-    return {"items": graph_rel.shared_attributes(s, user.workspace_id)}
-
-
 @app.get(f"{API}/memory/cases")
 def memory(q: str = "", user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
     rows = list(s.scalars(select(CaseMemory).where(CaseMemory.workspace_id == user.workspace_id).order_by(CaseMemory.created_at.desc())))
@@ -716,7 +656,7 @@ def benchmark_summary(user: User = Depends(current_user)) -> dict:
 
 @app.post(f"{API}/demo/seed")
 def demo_seed(user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
-    if get_settings().env == "prod":
+    if not _demo_on():
         raise HTTPException(404, "not available")
     svc.require_role(user, "accountant")
     from probity.demo import seed
@@ -726,6 +666,8 @@ def demo_seed(user: User = Depends(current_user), s: Session = Depends(db)) -> d
 
 @app.get(f"{API}/demo/files/{{name}}")
 def demo_file(name: str, user: User = Depends(current_user)) -> FileResponse:
+    if not _demo_on():
+        raise HTTPException(404, "not available")
     from probity.demo.seed import DEMO_DIR
 
     p = (DEMO_DIR / name).resolve()
@@ -737,7 +679,7 @@ def demo_file(name: str, user: User = Depends(current_user)) -> FileResponse:
 @app.post(f"{API}/demo/vendor-reply/{{case_id}}")
 def demo_vendor_reply(case_id: str, kind: Literal["legit", "spoof"] = "legit", user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
     """Simulated vendor inbox: deliver a scripted reply to the case's sent verification email."""
-    if get_settings().env == "prod":
+    if not _demo_on():
         raise HTTPException(404, "not available")
     from probity.demo.seed import scripted_reply
 
@@ -748,6 +690,8 @@ def demo_vendor_reply(case_id: str, kind: Literal["legit", "spoof"] = "legit", u
 
 @app.put(f"{API}/demo/speed")
 def demo_speed(delay_ms: int = Query(..., ge=0, le=5000), user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
+    if not _demo_on():
+        raise HTTPException(404, "not available")
     ws = s.get(Workspace, user.workspace_id)
     assert ws
     ws.policy = {**(ws.policy or {}), "demo_agent_delay_ms": delay_ms}

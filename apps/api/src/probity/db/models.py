@@ -95,6 +95,8 @@ class Vendor(Base):
     pan: Mapped[str | None] = mapped_column(String(10))
     address: Mapped[str | None] = mapped_column(Text)
     website: Mapped[str | None] = mapped_column(String(300))
+    archived: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    notes: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -334,6 +336,34 @@ class GraphEdge(Base):
     dst_id: Mapped[str] = mapped_column(String(128), index=True)
     label: Mapped[str | None] = mapped_column(String(200))
     case_id: Mapped[str | None] = mapped_column(String(40))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class CaseNote(Base):
+    __tablename__ = "case_notes"
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("note"))
+    workspace_id: Mapped[str] = mapped_column(String(40), index=True)
+    case_id: Mapped[str] = mapped_column(ForeignKey("cases.id"), index=True)
+    author_id: Mapped[str] = mapped_column(String(40))
+    text: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ImportJob(Base):
+    """CSV imports of vendor master, invoice history and purchase orders (validated, then committed)."""
+
+    __tablename__ = "imports"
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("imp"))
+    workspace_id: Mapped[str] = mapped_column(String(40), index=True)
+    kind: Mapped[str] = mapped_column(String(30))  # vendors | invoices | purchase_orders
+    filename: Mapped[str] = mapped_column(String(300))
+    status: Mapped[str] = mapped_column(String(20))  # committed | rejected
+    rows_total: Mapped[int] = mapped_column(Integer, default=0)
+    rows_ok: Mapped[int] = mapped_column(Integer, default=0)
+    created: Mapped[int] = mapped_column(Integer, default=0)
+    updated: Mapped[int] = mapped_column(Integer, default=0)
+    errors: Mapped[list[Any]] = mapped_column(JSONType, default=list)
+    actor_id: Mapped[str] = mapped_column(String(40))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

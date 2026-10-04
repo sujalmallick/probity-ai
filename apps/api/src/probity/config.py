@@ -94,6 +94,8 @@ class Settings(BaseSettings):
     max_seconds: int = 240
 
     agent_delay_ms: int = 0
+    demo_features: bool = True  # demo invoices, simulated inbox, demo login, benchmark page (always off when ENV=prod)
+    show_landing_page: bool = True
     cors_origins: str = "http://localhost:5180,http://127.0.0.1:5180"
 
     @field_validator("database_url", "database_migrate_url", mode="before")
