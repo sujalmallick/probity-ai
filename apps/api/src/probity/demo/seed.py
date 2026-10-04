@@ -72,7 +72,7 @@ def seed_workspace(s: Session, today: date | None = None, name: str = "Probity D
         s.add(VendorBankAccount(workspace_id=ws.id, vendor_id=v.id, last4=crypto.last4(acct), acct_hmac=hm, acct_enc=crypto.encrypt(acct), ifsc=ifsc,
                                 verified=True, verified_method="onboarding_kyc", first_seen=first, last_seen=today - timedelta(days=20)))
         s.add(VendorDomain(workspace_id=ws.id, vendor_id=v.id, domain=site, verified=True, verified_method="onboarding_kyc"))
-        s.add(VendorContact(workspace_id=ws.id, vendor_id=v.id, name=cname, email=cemail, phone="+91 20 4000 1000", verified=True))
+        s.add(VendorContact(workspace_id=ws.id, vendor_id=v.id, name=cname, email=cemail, phone="+91 20 4000 1000", verified=True, verified_method="onboarding_kyc"))
         prefix = "".join(w[0] for w in vname.split()[:2]).upper()
         for k in range(12):
             p = ABC_PRICES[k] if idx == 0 else price * (100 + VARIATION[k]) // 100

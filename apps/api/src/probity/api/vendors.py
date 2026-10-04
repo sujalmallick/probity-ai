@@ -8,6 +8,7 @@ emails go; verified accounts/domains are what bank-change and new-domain signals
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, or_, select
@@ -18,7 +19,7 @@ from probity import services as svc
 from probity.api.deps import current_user, db, require_mfa_for_approvals
 from probity.db.audit import audit
 from probity.db.models import (
-    Case, CaseMemory, GraphEdge, HistoricalInvoice, PurchaseOrder, User, Vendor, VendorBankAccount, VendorContact, VendorDomain, iso,
+    AuditLog, Case, CaseMemory, GraphEdge, HistoricalInvoice, PurchaseOrder, User, Vendor, VendorBankAccount, VendorContact, VendorDomain, iso,
 )
 from probity.guardrails import crypto
 from probity.ingestion.validators import normalize_domain, valid_gstin, valid_ifsc
@@ -51,6 +52,38 @@ def _verify_gate(user: User, verified: bool, note: str | None) -> None:
         svc.require_role(user, "approver")
         if not note or len(note.strip()) < 5:
             raise svc.BadRequest("explain how this was verified out-of-band (e.g. called the known contact, bank letter)")
+
+
+OOB_METHODS = {"phone_known_contact", "bank_letter", "in_person"}
+
+
+def _stamp(item, user: User, verified: bool, method: str | None, note: str | None) -> None:  # type: ignore[no-untyped-def]
+    """Record verification provenance on a bank account / domain / contact (cleared when un-verified)."""
+    item.verified = verified
+    item.verified_method = method if verified else None
+    item.verified_by = user.id if verified else None
+    item.verified_at = datetime.now(timezone.utc) if verified else None
+    item.verified_note = (note or "").strip() or None if verified else None
+
+
+def _verification(s: Session, v: Vendor, item, kind: str, key: str, names: dict, audit_rows: list) -> dict | None:  # type: ignore[no-untyped-def]
+    """{by:{id,name}|None, at, method, note} for a verified item. Columns first; for items verified before
+    provenance columns existed, or via a case's out-of-band confirmation, fall back to the audit log."""
+    if not item.verified:
+        return None
+    by, at, method, note = item.verified_by, item.verified_at, item.verified_method, item.verified_note
+    if at is None:
+        actions = {"bank": ("vendor.bank_added", "vendor.bank_verified"), "domain": ("vendor.domain_added", "vendor.domain_verified"),
+                   "contact": ("vendor.contact_added", "vendor.contact_updated")}[kind]
+        field = {"bank": "account", "domain": "domain", "contact": "email"}[kind]
+        hit = next((a for a in audit_rows if a.entity == v.id and a.action in actions and a.data.get(field) == key
+                    and (a.action.endswith("_verified") or a.data.get("verified"))), None)
+        if hit is None and method in OOB_METHODS:
+            hit = next((a for a in audit_rows if a.action == "verification.out_of_band" and (by is None or a.actor == by)), None)
+        if hit is not None:
+            by, at, note = by or hit.actor, hit.ts, note or hit.data.get("note")
+            method = method or hit.data.get("method") or "manual"
+    return {"by": {"id": by, "name": names.get(by, by)} if by else None, "at": iso(at), "method": method, "note": note}
 
 
 def vendor_summary(s: Session, v: Vendor) -> dict:
@@ -112,12 +145,19 @@ def get_vendor(vendor_id: str, user: User = Depends(current_user), s: Session = 
     v = _vendor(s, user, vendor_id)
     q = lambda M: s.scalars(select(M).where(M.vendor_id == v.id))  # noqa: E731
     hist = list(s.scalars(select(HistoricalInvoice).where(HistoricalInvoice.vendor_id == v.id).order_by(HistoricalInvoice.invoice_date)))
+    names = {u.id: u.name for u in s.scalars(select(User).where(User.workspace_id == user.workspace_id))}
+    case_ids = [c for c in s.scalars(select(Case.id).where(Case.vendor_id == v.id))]
+    audit_rows = list(s.scalars(select(AuditLog).where(AuditLog.workspace_id == user.workspace_id, or_(AuditLog.entity == v.id, AuditLog.entity.in_(case_ids or [""])))
+                                .order_by(AuditLog.id.desc())))
+    ver = lambda item, kind, key: _verification(s, v, item, kind, key, names, audit_rows)  # noqa: E731
     return {
         **vendor_summary(s, v),
         "accounts": [{"id": a.id, "account": crypto.mask(a.last4), "ifsc": a.ifsc, "verified": a.verified, "verified_method": a.verified_method,
+                      "verification": ver(a, "bank", crypto.mask(a.last4)),
                       "first_seen": a.first_seen.isoformat() if a.first_seen else None, "last_seen": a.last_seen.isoformat() if a.last_seen else None} for a in q(VendorBankAccount)],
-        "domains": [{"id": d.id, "domain": d.domain, "verified": d.verified, "verified_method": d.verified_method} for d in q(VendorDomain)],
-        "contacts": [{"id": c.id, "name": c.name, "email": c.email, "phone": c.phone, "verified": c.verified} for c in q(VendorContact)],
+        "domains": [{"id": d.id, "domain": d.domain, "verified": d.verified, "verified_method": d.verified_method, "verification": ver(d, "domain", d.domain)} for d in q(VendorDomain)],
+        "contacts": [{"id": c.id, "name": c.name, "email": c.email, "phone": c.phone, "verified": c.verified, "verified_method": c.verified_method,
+                      "verification": ver(c, "contact", c.email)} for c in q(VendorContact)],
         "price_history": [{"date": h.invoice_date.isoformat(), "invoice_number": h.invoice_number, "total_minor": h.total_minor, "items": h.line_items} for h in hist],
         "purchase_orders": [{"po_number": p.po_number, "po_date": p.po_date.isoformat(), "lines": p.lines} for p in q(PurchaseOrder)],
         "prior_cases": [{"case_id": m.case_id, "outcome": m.outcome, "summary": m.summary, "peak_score": m.peak_score, "peak_tier": m.peak_tier, "at": iso(m.created_at)}
@@ -181,8 +221,8 @@ def add_bank_account(vendor_id: str, body: BankIn, request: Request, user: User 
     if s.scalars(select(VendorBankAccount).where(VendorBankAccount.vendor_id == v.id, VendorBankAccount.acct_hmac == h)).first():
         raise svc.Conflict("this account is already on the vendor")
     a = VendorBankAccount(workspace_id=user.workspace_id, vendor_id=v.id, last4=crypto.last4(body.account_number), acct_hmac=h,
-                          acct_enc=crypto.encrypt(body.account_number), ifsc=(body.ifsc or "").upper() or None, verified=body.verified,
-                          verified_method="manual" if body.verified else None, verified_by=user.id if body.verified else None)
+                          acct_enc=crypto.encrypt(body.account_number), ifsc=(body.ifsc or "").upper() or None)
+    _stamp(a, user, body.verified, "manual", body.verification_note)
     s.add(a)
     s.flush()
     graph_rel.add_edge(s, user.workspace_id, v.id, "has_bank", "bank", h, crypto.mask(a.last4))
@@ -203,7 +243,7 @@ def verify_bank_account(vendor_id: str, account_id: str, body: VerifyPatch, requ
     a = s.get(VendorBankAccount, account_id)
     if a is None or a.vendor_id != v.id:
         raise LookupError("bank account not found")
-    a.verified, a.verified_method, a.verified_by = body.verified, ("manual" if body.verified else None), (user.id if body.verified else None)
+    _stamp(a, user, body.verified, "manual", body.verification_note)
     audit(s, user.workspace_id, user.id, "vendor.bank_verified" if body.verified else "vendor.bank_unverified", v.id,
           {"account": crypto.mask(a.last4), "note": body.verification_note}, request.state.request_id)
     return {"id": a.id, "account": crypto.mask(a.last4), "verified": a.verified}
@@ -240,7 +280,8 @@ def add_domain(vendor_id: str, body: DomainIn, request: Request, user: User = De
         raise svc.BadRequest("not a valid domain")
     if s.scalars(select(VendorDomain).where(VendorDomain.vendor_id == v.id, VendorDomain.domain == dom)).first():
         raise svc.Conflict("domain already on the vendor")
-    d = VendorDomain(workspace_id=user.workspace_id, vendor_id=v.id, domain=dom, verified=body.verified, verified_method="manual" if body.verified else None)
+    d = VendorDomain(workspace_id=user.workspace_id, vendor_id=v.id, domain=dom)
+    _stamp(d, user, body.verified, "manual", body.verification_note)
     s.add(d)
     s.flush()
     graph_rel.add_edge(s, user.workspace_id, v.id, "uses_domain", "domain", dom, dom)
@@ -256,7 +297,7 @@ def verify_domain(vendor_id: str, domain_id: str, body: VerifyPatch, request: Re
     d = s.get(VendorDomain, domain_id)
     if d is None or d.vendor_id != v.id:
         raise LookupError("domain not found")
-    d.verified, d.verified_method = body.verified, ("manual" if body.verified else None)
+    _stamp(d, user, body.verified, "manual", body.verification_note)
     audit(s, user.workspace_id, user.id, "vendor.domain_verified" if body.verified else "vendor.domain_unverified", v.id, {"domain": d.domain, "note": body.verification_note}, request.state.request_id)
     return {"id": d.id, "domain": d.domain, "verified": d.verified}
 
@@ -287,7 +328,8 @@ def add_contact(vendor_id: str, body: ContactIn, request: Request, user: User = 
     svc.require_role(user, "accountant")
     _verify_gate(user, body.verified, body.verification_note)
     v = _vendor(s, user, vendor_id)
-    c = VendorContact(workspace_id=user.workspace_id, vendor_id=v.id, name=body.name, email=body.email.strip().lower(), phone=body.phone, verified=body.verified)
+    c = VendorContact(workspace_id=user.workspace_id, vendor_id=v.id, name=body.name, email=body.email.strip().lower(), phone=body.phone)
+    _stamp(c, user, body.verified, "manual", body.verification_note)
     s.add(c)
     s.flush()
     audit(s, user.workspace_id, user.id, "vendor.contact_added", v.id, {"email": c.email, "verified": c.verified, "note": body.verification_note}, request.state.request_id)
@@ -312,7 +354,8 @@ def update_contact(vendor_id: str, contact_id: str, body: ContactPatch, request:
         if body.verified != c.verified:
             svc.require_role(user, "approver")
         _verify_gate(user, bool(body.verified), body.verification_note)
-        c.verified = body.verified
+        if body.verified != c.verified:
+            _stamp(c, user, bool(body.verified), "manual", body.verification_note)
     if body.name is not None:
         c.name = body.name
     if body.phone is not None:

@@ -159,9 +159,10 @@ class NoteIn(BaseModel):
 @router.get("/cases/{case_id}/notes")
 def list_notes(case_id: str, user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
     svc.get_case(s, user.workspace_id, case_id)
-    names = {u.id: u.name for u in s.scalars(select(User).where(User.workspace_id == user.workspace_id))}
+    people = {u.id: u for u in s.scalars(select(User).where(User.workspace_id == user.workspace_id))}
     rows = s.scalars(select(CaseNote).where(CaseNote.case_id == case_id).order_by(CaseNote.created_at))
-    return {"items": [{"id": n.id, "text": n.text, "author": names.get(n.author_id, n.author_id), "author_id": n.author_id, "at": iso(n.created_at)} for n in rows]}
+    return {"items": [{"id": n.id, "text": n.text, "author": people[n.author_id].name if n.author_id in people else n.author_id,
+                       "author_id": n.author_id, "author_role": people[n.author_id].role if n.author_id in people else None, "at": iso(n.created_at)} for n in rows]}
 
 
 @router.post("/cases/{case_id}/notes", status_code=201)
@@ -172,7 +173,7 @@ def add_note(case_id: str, body: NoteIn, request: Request, user: User = Depends(
     s.add(n)
     s.flush()
     audit(s, user.workspace_id, user.id, "note.added", case.id, {"note_id": n.id, "case_id": case.id}, request.state.request_id)
-    return {"id": n.id, "text": n.text, "author": user.name, "author_id": user.id, "at": iso(n.created_at)}
+    return {"id": n.id, "text": n.text, "author": user.name, "author_id": user.id, "author_role": user.role, "at": iso(n.created_at)}
 
 
 # ---------------------------------------------------------------- notifications

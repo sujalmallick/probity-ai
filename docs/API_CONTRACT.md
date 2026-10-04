@@ -68,13 +68,19 @@ VendorSummary = { "id","name","gstin","pan","address","website","archived","note
 400 bad GSTIN checksum · 409 GSTIN already used by another vendor. PAN is derived from GSTIN if omitted.
 ### `GET /vendors/{id}` → VendorSummary +
 ```json
-{ "accounts": [{"id","account":"XXXX1234","ifsc","verified","verified_method","first_seen","last_seen"}],
-  "domains":  [{"id","domain","verified","verified_method"}],
-  "contacts": [{"id","name","email","phone","verified"}],
+{ "accounts": [{"id","account":"XXXX1234","ifsc","verified","verified_method","verification","first_seen","last_seen"}],
+  "domains":  [{"id","domain","verified","verified_method","verification"}],
+  "contacts": [{"id","name","email","phone","verified","verified_method","verification"}],
   "price_history": [{"date","invoice_number","total_minor","items":[{"description","qty","unit_price_minor"}]}],
   "purchase_orders": [{"po_number","po_date","lines":[…]}],
   "prior_cases": [{"case_id","outcome","summary","peak_score","peak_tier","at"}] }
 ```
+`verification` is `null` when the item is not verified, otherwise
+`{ "by": {"id","name"} | null, "at": ISO | null, "method": "manual|import|phone_known_contact|bank_letter|in_person|onboarding_kyc", "note": string | null }`
+— e.g. render "Verified by Vikram Mehta · 4 Oct · 'Called R. Kulkarni on the number on file'". `by` is `null` for items verified during
+onboarding KYC (seed/migration); imports use the importing user and the note "Marked verified in a CSV import"; out-of-band
+confirmations on a case carry that confirmation's note. Un-verifying clears it.
+
 ### `PATCH /vendors/{id}` (accountant+; changing `gstin` needs approver) `{name?, gstin?, address?, website?, notes?, archived?}`
 
 **Verification rule (important for UI):** setting `verified: true` on a bank account, domain or contact means
@@ -134,7 +140,7 @@ Rules: import vendors **before** invoices/POs (they reference vendors by GSTIN o
 | drafts: `GET /cases/{id}/drafts`, `PATCH …/drafts/{draft_id}`, `POST …/drafts/{draft_id}/send {override_unverified_recipient?}` | send = approver · MFA |
 | `POST /cases/{id}/out-of-band-confirmation {claim_ids, method, note, known_channel?}` | approver · MFA. `note`: required, ≥ 20 chars after trimming (`OOB_NOTE_MIN_CHARS`), ≤ 2000 — "who did you contact, on which number already on file". `known_channel`: `true` = confirmed via a channel already on file; `false` → 400 (a channel taken from the invoice/email can't confirm anything); omitted = allowed (older clients). Recorded in the audit entry. UI: ask "Did you use a phone number/email that was already on file before this invoice?" |
 | `POST /cases/{id}/close {outcome, resolution}` | approver (accountant for auto-cleared) |
-| **new** `GET /cases/{id}/notes` → `{items:[{id,text,author,author_id,at}]}` | any |
+| **new** `GET /cases/{id}/notes` → `{items:[{id,text,author,author_id,author_role,at}]}` | any |
 | **new** `POST /cases/{id}/notes {text}` | accountant+ → note (201). Show as a comment thread on the case |
 | `POST /demo/vendor-reply/{id}?kind=legit|spoof` | **only when `features.simulated_inbox`** |
 
@@ -162,3 +168,5 @@ Rules: import vendors **before** invoices/POs (they reference vendors by GSTIN o
   attachment with envelope-sender domain; extracted `invoice_date`/`due_date` values are now normalized ISO dates (raw text kept in `raw`).
 - 2026-10-04 — v1.2: notifications (§6); case queue search, multi-value filters and cursor pagination; `demo-users` items carry
   `workspace {id, name}` (FRONTEND).
+- 2026-10-04 — v1.3: `verification {by, at, method, note}` on vendor accounts/domains/contacts (+ `verified_method` on contacts);
+  `author_role` on case notes. Migration 0006 (provenance columns).

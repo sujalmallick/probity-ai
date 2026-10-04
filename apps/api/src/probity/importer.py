@@ -89,6 +89,15 @@ def _clean(v: str | None) -> str:
     return v
 
 
+def _import_stamp(item, user: User, verified: bool) -> None:  # type: ignore[no-untyped-def]
+    item.verified = verified
+    if verified:
+        from datetime import datetime, timezone
+
+        item.verified_method, item.verified_by, item.verified_at = "import", user.id, datetime.now(timezone.utc)
+        item.verified_note = "Marked verified in a CSV import"
+
+
 def _yes(v: str) -> bool:
     return v.strip().lower() in ("yes", "y", "true", "1", "verified")
 
@@ -194,17 +203,19 @@ def import_vendors(s: Session, user: User, rows: list[dict], commit: bool, can_v
             existing = s.scalars(select(VendorBankAccount).where(VendorBankAccount.vendor_id == v.id, VendorBankAccount.acct_hmac == h)).first()
             verified = _yes(c["bank_verified"])
             if existing is None:
-                s.add(VendorBankAccount(workspace_id=ws, vendor_id=v.id, last4=crypto.last4(acct), acct_hmac=h, acct_enc=crypto.encrypt(acct),
-                                        ifsc=c["ifsc"].upper() or None, verified=verified, verified_method="import" if verified else None,
-                                        verified_by=user.id if verified else None))
+                acc = VendorBankAccount(workspace_id=ws, vendor_id=v.id, last4=crypto.last4(acct), acct_hmac=h, acct_enc=crypto.encrypt(acct),
+                                        ifsc=c["ifsc"].upper() or None)
+                _import_stamp(acc, user, verified)
+                s.add(acc)
             elif verified and not existing.verified:
-                existing.verified, existing.verified_method, existing.verified_by = True, "import", user.id
+                _import_stamp(existing, user, True)
         if c["contact_email"]:
             email = c["contact_email"].lower()
             existing_c = s.scalars(select(VendorContact).where(VendorContact.vendor_id == v.id, VendorContact.email == email)).first()
             if existing_c is None:
-                s.add(VendorContact(workspace_id=ws, vendor_id=v.id, name=c["contact_name"] or None, email=email, phone=c["contact_phone"] or None,
-                                    verified=_yes(c["contact_verified"])))
+                con = VendorContact(workspace_id=ws, vendor_id=v.id, name=c["contact_name"] or None, email=email, phone=c["contact_phone"] or None)
+                _import_stamp(con, user, _yes(c["contact_verified"]))
+                s.add(con)
     if commit:
         s.flush()
         graph_rel.index_vendor_master(s, ws)

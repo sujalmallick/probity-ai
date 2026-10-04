@@ -112,6 +112,8 @@ class VendorBankAccount(Base):
     verified: Mapped[bool] = mapped_column(Boolean, default=False)
     verified_method: Mapped[str | None] = mapped_column(String(40))
     verified_by: Mapped[str | None] = mapped_column(String(40))
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    verified_note: Mapped[str | None] = mapped_column(Text)
     first_seen: Mapped[date | None] = mapped_column(Date)
     last_seen: Mapped[date | None] = mapped_column(Date)
 
@@ -124,6 +126,9 @@ class VendorDomain(Base):
     domain: Mapped[str] = mapped_column(String(253))
     verified: Mapped[bool] = mapped_column(Boolean, default=False)
     verified_method: Mapped[str | None] = mapped_column(String(40))
+    verified_by: Mapped[str | None] = mapped_column(String(40))
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    verified_note: Mapped[str | None] = mapped_column(Text)
 
 
 class VendorContact(Base):
@@ -135,6 +140,10 @@ class VendorContact(Base):
     email: Mapped[str] = mapped_column(String(200))
     phone: Mapped[str | None] = mapped_column(String(40))
     verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    verified_method: Mapped[str | None] = mapped_column(String(40))
+    verified_by: Mapped[str | None] = mapped_column(String(40))
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    verified_note: Mapped[str | None] = mapped_column(Text)
 
 
 class HistoricalInvoice(Base):

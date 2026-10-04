@@ -155,3 +155,57 @@ def test_json_declares_utf8_and_text_survives(client, empty_ws):
     assert "\u2014" in why and "\u00e2\u20ac" not in why  # em dash intact, no mojibake
     err = client.get(f"{API}/vendors/nope", headers=hdr(client, "owner"))
     assert err.status_code == 404 and err.headers["content-type"] == "application/json; charset=utf-8"
+
+
+def test_verification_provenance_and_note_roles(client, empty_ws):
+    owner, appr, acc = hdr(client, "owner"), hdr(client, "approver"), hdr(client, "accountant")
+    vid = client.post(f"{API}/vendors", headers=acc, json={"name": "Kaveri Packaging Pvt Ltd", "gstin": "29AACCK5521M1Z9"}).json()["id"]
+    a = client.post(f"{API}/vendors/{vid}/bank-accounts", headers=acc, json={"account_number": "91802004455667"}).json()
+    c = client.post(f"{API}/vendors/{vid}/contacts", headers=acc, json={"name": "Meera", "email": "billing@kaveripack.in"}).json()
+    detail = client.get(f"{API}/vendors/{vid}", headers=acc).json()
+    assert detail["accounts"][0]["verification"] is None and detail["contacts"][0]["verification"] is None
+    client.patch(f"{API}/vendors/{vid}/bank-accounts/{a['id']}", headers=appr, json={"verified": True, "verification_note": "Called Meera on the number on file"})
+    client.patch(f"{API}/vendors/{vid}/contacts/{c['id']}", headers=appr, json={"verified": True, "verification_note": "Confirmed at onboarding call"})
+    detail = client.get(f"{API}/vendors/{vid}", headers=acc).json()
+    va, vc = detail["accounts"][0]["verification"], detail["contacts"][0]["verification"]
+    assert va["by"]["name"] == "Arjun Approver" and va["method"] == "manual" and va["note"] == "Called Meera on the number on file" and va["at"]
+    assert vc["by"]["name"] == "Arjun Approver" and vc["note"] == "Confirmed at onboarding call" and detail["contacts"][0]["verified_method"] == "manual"
+    client.patch(f"{API}/vendors/{vid}/bank-accounts/{a['id']}", headers=appr, json={"verified": False})
+    assert client.get(f"{API}/vendors/{vid}", headers=acc).json()["accounts"][0]["verification"] is None
+
+    # imported as verified → method "import", by the importing user
+    vh = ["name", "gstin", "bank_account_number", "ifsc", "bank_verified"]
+    upload(client, owner, "vendors", _csv(vh, [["ABC Supplies Pvt Ltd", "27AABCA1234F1Z9", "50200012341234", "HDFC0001234", "yes"]]), dry_run=False)
+    abc = next(v for v in client.get(f"{API}/vendors", headers=acc).json()["items"] if v["gstin"] == "27AABCA1234F1Z9")
+    vi = client.get(f"{API}/vendors/{abc['id']}", headers=acc).json()["accounts"][0]["verification"]
+    assert vi["method"] == "import" and vi["by"]["name"] == "Olivia Owner"
+
+    # notes carry the author's role
+    from test_demo_flow import upload_and_run
+
+    case = upload_and_run(client, acc, "invoice_kaveri_clean.pdf")
+    assert client.post(f"{API}/cases/{case['id']}/notes", headers=appr, json={"text": "Checked with Meera"}).json()["author_role"] == "approver"
+    assert client.get(f"{API}/cases/{case['id']}/notes", headers=acc).json()["items"][0]["author_role"] == "approver"
+
+
+def test_out_of_band_confirmation_provenance_on_vendor(client):
+    """Bank/domain verified through a case's out-of-band confirmation show the approver and their note."""
+    from conftest import login as demo_login
+    from test_demo_flow import upload_and_run
+
+    acc, appr = demo_login(client, "accountant"), demo_login(client, "approver")
+    case = upload_and_run(client, acc, "invoice_4821.pdf")
+    client.post(f"{API}/cases/{case['id']}/decision", headers=appr, json={"decision": "REQUEST_VERIFICATION", "reason": "verify"})
+    d = client.get(f"{API}/cases/{case['id']}/drafts", headers=appr).json()["items"][0]
+    client.post(f"{API}/cases/{case['id']}/drafts/{d['id']}/send", headers=appr, json={})
+    reply = client.post(f"{API}/demo/vendor-reply/{case['id']}?kind=legit", headers=acc).json()
+    note = "Called R. Kulkarni on +91 20 4000 1000 (number on file)"
+    assert client.post(f"{API}/cases/{case['id']}/out-of-band-confirmation", headers=appr,
+                       json={"claim_ids": reply["claim_ids"], "method": "phone_known_contact", "note": note}).status_code == 200
+    v = client.get(f"{API}/vendors/{case['vendor_id']}", headers=acc).json()
+    new_acct = next(a for a in v["accounts"] if a["account"] == "XXXX9812")
+    assert new_acct["verification"]["note"] == note and new_acct["verification"]["method"] == "phone_known_contact"
+    me = client.get(f"{API}/me", headers=appr).json()
+    assert new_acct["verification"]["by"] == {"id": me["id"], "name": me["name"]} and new_acct["verification"]["at"]
+    kyc = next(a for a in v["accounts"] if a["account"] == "XXXX1234")["verification"]
+    assert kyc["method"] == "onboarding_kyc" and kyc["by"] is None
