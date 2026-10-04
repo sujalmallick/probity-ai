@@ -25,6 +25,12 @@ CHECK_OWNER = {
     "history": "transaction_analyst", "statistical": "transaction_analyst", "round_sum": "transaction_analyst",
     "external_reputation": "web_research",
 }
+# Events that record a step of the case's life rather than an agent run: a person's decision or confirmation, the
+# verification email, the vendor's reply, case creation and closing. Each one shows its agent ran; the event's own
+# status says how it ended ("waiting" = a decision is recorded but another approval is still needed).
+LIFECYCLE_EVENTS = {"case.created", "decision.recorded", "action.sent", "vendor.reply_received",
+                    "verification.confirmed_out_of_band", "case.closed"}
+_LIFECYCLE_STATUS = {"failed": "failed", "waiting": "waiting"}
 
 
 def _blank(agent: str) -> dict[str, Any]:
@@ -67,6 +73,9 @@ def build(s: Session, case: Case) -> dict[str, Any]:
         elif e.type in ("gate.waiting", "risk.updated") and a["status"] == "not_run":
             a["status"], a["finished_at"] = "done", e.ts
             a["steps"].append(mask_account_numbers(e.message))
+        elif e.type in LIFECYCLE_EVENTS:  # no agent.started here, so no duration: a person's think-time isn't run time
+            a["status"], a["finished_at"] = _LIFECYCLE_STATUS.get(e.status or "", "done"), e.ts
+            a["steps"].append(mask_account_numbers(e.message))
     for a in agents.values():
         if a["started_at"] and a["finished_at"]:
             a["seconds"] = round((a["finished_at"] - a["started_at"]).total_seconds(), 2)
@@ -106,6 +115,10 @@ def build(s: Session, case: Case) -> dict[str, Any]:
     ordered = [agents[a] for a in AGENTS] + [v for k, v in agents.items() if k not in AGENTS]
     for a in ordered:
         a["steps"] = a["steps"][-20:]
+        # Some work leaves no timeline events, only AI calls or claims (the on-demand risk explanation, approver
+        # statements): those records show it ran.
+        if a["status"] == "not_run" and (a["ai"]["calls"] or a["claims"]["total"]):
+            a["status"] = "failed" if a["ai"]["calls"] and a["ai"]["failed"] == a["ai"]["calls"] and not a["claims"]["total"] else "done"
     totals = {
         "ai_calls": sum(a["ai"]["calls"] for a in ordered), "ai_failed": sum(a["ai"]["failed"] for a in ordered),
         "tokens": sum(a["ai"]["tokens_in"] + a["ai"]["tokens_out"] for a in ordered),

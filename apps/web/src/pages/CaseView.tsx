@@ -1195,8 +1195,9 @@ function InvoiceRiskTab({ id }: { id: string }) {
 const AGENT_NAME: Record<string, string> = {
   orchestrator: "Planner", document: "Document reader", vendor: "Vendor identity", transaction: "Transaction history", web: "Web research",
   risk: "Risk engine", verifier: "Verifier", action: "Vendor contact",
+  pipeline: "Case lifecycle", human_gate: "People's decisions", memory: "Case memory", risk_explainer: "Risk explainer",
 };
-const TRACE_TONE: Record<string, string> = { done: "var(--low)", failed: "var(--high)", running: "var(--accent)", skipped: "var(--muted)", not_run: "var(--muted)" };
+const TRACE_TONE: Record<string, string> = { done: "var(--low)", failed: "var(--high)", running: "var(--accent)", waiting: "var(--medium)", skipped: "var(--muted)", not_run: "var(--muted)" };
 
 /** What each agent did on this case (GET /cases/{id}/trace): timing, checks, what couldn't be verified, rule-based
  *  fallbacks, errors and AI usage. For reviewers and support; it doesn't change anything. */

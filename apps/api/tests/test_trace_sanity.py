@@ -7,6 +7,7 @@ from sqlalchemy import select
 
 from probity import sanity
 from probity.db.models import Case, ClaimRow, EvidenceRow
+from probity.events import emit
 
 
 def _agents(trace):  # type: ignore[no-untyped-def]
@@ -33,6 +34,35 @@ def test_trace_shows_each_agent_and_its_gaps(client, world, fake_lookups):
     assert t["totals"]["could_not_verify"] >= 2 and t["totals"]["fallbacks"] >= 2
     assert t["sanity"]["ok"] is True and t["sanity"]["problems"] == []
     assert NEW_ACCOUNT not in str(t)  # account numbers stay masked in the trace
+
+
+def test_trace_shows_decisions_and_closing_as_run(client, world, fake_lookups):
+    """People's decisions and closing are recorded as their own events, not agent runs; the trace still shows them."""
+    fake_lookups.domains[NEW_DOMAIN] = 21
+    acc, appr = login(client, "accountant"), login(client, "approver")
+    case = run_case(client, acc, bank_change_spec())
+    trace = lambda: _agents(client.get(f"{API}/cases/{case['id']}/trace", headers=acc).json())  # noqa: E731
+    a = trace()
+    assert a["pipeline"]["status"] == "done" and "created" in a["pipeline"]["steps"][0]
+    assert "human_gate" not in a and "memory" not in a  # nothing decided yet: those rows don't exist
+    # A decision that still needs another approver is recorded with status "waiting" (services.decide).
+    emit(world.workspace_id, case["id"], "decision.recorded", agent="human_gate", status="waiting", message="1 of 2 approvals")
+    assert trace()["human_gate"]["status"] == "waiting"
+    r = client.post(f"{API}/cases/{case['id']}/decision", headers=appr, json={"decision": "APPROVE", "reason": "bank change checked on a known number"})
+    assert r.json()["status"] == "APPROVED"
+    assert client.post(f"{API}/cases/{case['id']}/close", headers=appr, json={"outcome": "CLEARED", "resolution": "paid after checks"}).json()["status"] == "CLOSED"
+    a = trace()
+    assert a["human_gate"]["status"] == "done" and a["human_gate"]["seconds"] is None  # no run time for a person's decision
+    assert a["memory"]["status"] == "done" and "saved to case memory" in a["memory"]["steps"][-1]
+
+
+def test_on_demand_risk_explanation_shows_as_run(client, world, llm):
+    """The Invoice risk tab's AI explanation leaves only an AI call; the trace counts it as the explainer running."""
+    acc = login(client, "accountant")
+    case = run_case(client, acc, clean_spec())
+    client.get(f"{API}/cases/{case['id']}/invoice-risk?narrate=true", headers=acc)
+    a = _agents(client.get(f"{API}/cases/{case['id']}/trace", headers=acc).json())
+    assert a["risk_explainer"]["ai"]["calls"] == 1 and a["risk_explainer"]["status"] in ("done", "failed")
 
 
 def test_trace_is_workspace_scoped(client, world):
