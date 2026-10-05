@@ -22,7 +22,7 @@ import StatusPage, { fetchReady } from "./pages/Status";
 import Baseline from "./pages/Baseline";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Spinner } from "./components/ui";
-import { loadAppConfig, unavailableIntegrations, useAppConfig } from "./lib/config";
+import { integrationsNeedingAction, loadAppConfig, useAppConfig } from "./lib/config";
 import { LogoMark } from "./components/Logo";
 
 const CLERK_KEY = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY as string | undefined;
@@ -185,8 +185,8 @@ function Shell({ children }: { children: React.ReactNode }) {
 /** "Live" status from /app/config.integrations; integrations that aren't available are listed in the tooltip. */
 function LiveStatus({ compact = false }: { compact?: boolean }) {
   const cfg = useAppConfig();
-  const missing = unavailableIntegrations(cfg);
-  const detail = missing.length ? `Live · not available: ${missing.join(", ")}` : "Live · all integrations available";
+  const missing = integrationsNeedingAction(cfg);
+  const detail = missing.length ? `Live · needs setting up: ${missing.join(", ")}` : "Live · everything needed is connected";
   return (
     <Link
       to="/status"
@@ -198,7 +198,7 @@ function LiveStatus({ compact = false }: { compact?: boolean }) {
         <span className="pulse absolute inline-flex h-full w-full rounded-full bg-low opacity-60" />
         <span className="relative inline-flex h-2 w-2 rounded-full bg-low" />
       </span>
-      {!compact && <span>Live{missing.length ? <span className="text-muted"> · {missing.length} not available</span> : null}</span>}
+      {!compact && <span>Live{missing.length ? <span className="text-muted"> · {missing.length} to set up</span> : null}</span>}
     </Link>
   );
 }
