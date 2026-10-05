@@ -10,7 +10,8 @@ findings into a score. Low-risk invoices can be cleared automatically; anything 
 > **The AI can investigate, but it cannot change the risk score.** Agents find signals, every claim needs evidence, code computes the
 > score, and a human decides the payment.
 
-**Try it live: https://probity-3xgk.onrender.com.** Sign up with your email and you get your own empty workspace. It's on free hosting,
+**Try it live: https://probity-3xgk.onrender.com.** 
+Sign up with your email and you get your own empty workspace. It's on free hosting,
 so the first visit after a quiet spell can take about a minute to wake up.
 
 ## Who it's for
