@@ -436,6 +436,22 @@ class AuditLog(Base):
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class PrivacyRedaction(Base):
+    """One audit-log or evidence row whose personal details were replaced by "[erased]" (privacy.erase_contact).
+    `mac` is an HMAC over the row as it now reads, so verify_chain can still prove nothing else in it changed."""
+
+    __tablename__ = "privacy_redactions"
+    __table_args__ = (UniqueConstraint("table_name", "row_id"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workspace_id: Mapped[str] = mapped_column(String(40), index=True)
+    table_name: Mapped[str] = mapped_column(String(30))  # audit_log | evidence
+    row_id: Mapped[str] = mapped_column(String(40))
+    erasure_id: Mapped[str] = mapped_column(String(40))
+    erased_by: Mapped[str] = mapped_column(String(40))
+    erased_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    mac: Mapped[str] = mapped_column(String(64))
+
+
 class LLMCall(TelemetryBase):
     __tablename__ = "llm_calls"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

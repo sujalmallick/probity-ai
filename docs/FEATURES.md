@@ -205,7 +205,8 @@ Roles from least to most access: **viewer < accountant < approver < owner**. Eac
 | Production start-up rules | Working | With `ENV=prod` the API refuses to start without cloud storage, a metrics token, a Redis password, and TLS for remote database connections. |
 | Live hosted deployment | Working | https://probity-3xgk.onrender.com: Render (free) + Neon (database and files) + Clerk. Deployed automatically from the `real-data` branch. Guide: `infra/render/README.md`. |
 | Production Docker stack | Working | `infra/docker-compose.yml`: PostgreSQL, password-protected Redis, migrations, API, worker, scheduler, web and a Cloudflare Tunnel (about 2 GB RAM). See `infra/cloudflare/README.md`. |
-| Data retention and deletion | Planned | Open item, see [SECURITY_HANDOVER.md](SECURITY_HANDOVER.md). |
+| Contact privacy | Working | Viewers see vendor contacts' emails and phones masked. An owner can erase a contact on request: their name, email and phone become "[erased]" everywhere, audit log included, and the audit chain still verifies. See [PRIVACY.md](PRIVACY.md). |
+| Data retention | Partly | 8-year retention period (`RETENTION_YEARS`) and an owner report of what is past it. Nothing is deleted automatically yet. |
 
 ---
 
@@ -237,5 +238,5 @@ Pick one, open an issue saying you're on it, and see [CONTRIBUTING.md](../CONTRI
 
 **Tooling and operations**
 - A frontend linter and frontend tests (neither exists yet).
-- Data retention and deletion.
+- Deleting cases and their files after the retention period (today an owner can only list them).
 - Dependabot, and GitHub Actions pinned to commit SHAs.

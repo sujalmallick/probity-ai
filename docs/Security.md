@@ -33,7 +33,7 @@ The system handles bank accounts, tax IDs, vendor and payment data, and can send
 - At rest: DB/disk encryption; **field-level encryption** (AES-GCM, KMS-managed key) for bank account numbers, PAN, GSTIN-adjacent contacts. Store `last4` + HMAC hash for matching/diffing so changes detect without decrypting.
 - **Redaction before LLM calls:** replace account numbers/PAN/emails with typed placeholders (`<ACCT_1>`) unless the node strictly needs the value (comparison done in code, not in the prompt).
 - Log scrubbing: structured logger with PII filters; never log full documents, tokens, or prompts containing PII.
-- Retention policy configurable (default 7 years for financial case records, raw uploads 12 months); right-to-delete workflow retaining legally required audit stubs.
+- Retention period configurable (`RETENTION_YEARS`, default 8: GST record-keeping); erasure of a vendor contact on request, with personal details in the audit log replaced by "[erased]" under signed redaction records (see PRIVACY.md). Automatic deletion is not built.
 - Backups encrypted, restore tested.
 
 ## 5. Securing the AI layer

@@ -22,7 +22,7 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from probity import request_context
-from probity.db.models import AuditLog
+from probity.db.models import AuditLog, PrivacyRedaction
 
 GENESIS = "0" * 64
 _lock = threading.Lock()  # SQLite (single writer); Postgres uses a per-workspace advisory lock held until commit
@@ -37,6 +37,26 @@ def _chain_key() -> bytes:
     if not secret:
         raise RuntimeError("HMAC_KEY is required: the audit log is keyed with it")
     return hmac.new(secret.encode(), b"probity/audit-chain/v2", hashlib.sha256).digest()
+
+
+@lru_cache
+def _redaction_key() -> bytes:
+    from probity.config import get_settings
+
+    return hmac.new((get_settings().hmac_key or "").encode(), b"probity/privacy-redaction/v1", hashlib.sha256).digest()
+
+
+def redaction_mac(table: str, row_id: str, erasure_id: str, erased_by: str, content: dict[str, Any]) -> str:
+    """HMAC over a redacted row as it now reads. For audit rows `content` holds every column, including the original
+    hash and prev_hash, so a redaction can't be moved to another row or used to change anything but personal details."""
+    payload = json.dumps({"table": table, "row": row_id, "erasure": erasure_id, "by": erased_by, "content": content},
+                         sort_keys=True, default=str)
+    return hmac.new(_redaction_key(), payload.encode(), hashlib.sha256).hexdigest()
+
+
+def audit_row_content(row: AuditLog) -> dict[str, Any]:
+    return {"ws": row.workspace_id, "actor": row.actor, "action": row.action, "entity": row.entity, "data": row.data,
+            "request_id": row.request_id, "ts": _ts(row.ts), "prev_hash": row.prev_hash, "hash": row.hash}
 
 
 def _ts(ts: datetime | None) -> str:
@@ -115,11 +135,21 @@ def audit(
 
 def verify_chain(s: Session, workspace_id: str, anchor: tuple[int, str] | None = None) -> tuple[bool, int | None]:
     """Returns (ok, first_bad_id). With `anchor` = a previously witnessed (id, hash) head, also fails when that row
-    is gone or changed (truncation); first_bad_id is then the anchor id."""
+    is gone or changed (truncation); first_bad_id is then the anchor id.
+
+    A row whose personal details were erased (privacy.erase_contact) no longer matches its original hash; it passes
+    only if its redaction record's HMAC matches the row exactly as it now reads, original hash included."""
     prev = GENESIS
     anchored = anchor is None
+    redactions = {r.row_id: r for r in s.scalars(select(PrivacyRedaction).where(
+        PrivacyRedaction.workspace_id == workspace_id, PrivacyRedaction.table_name == "audit_log"))}
     for row in s.scalars(select(AuditLog).where(AuditLog.workspace_id == workspace_id).order_by(AuditLog.id)):
-        if row.prev_hash != prev or row.hash != _row_digest(row, prev):
+        red = redactions.get(str(row.id))
+        if red is not None:
+            intact = hmac.compare_digest(red.mac, redaction_mac("audit_log", str(row.id), red.erasure_id, red.erased_by, audit_row_content(row)))
+        else:
+            intact = row.hash == _row_digest(row, prev)
+        if row.prev_hash != prev or not intact:
             return False, row.id
         if anchor is not None and row.id == anchor[0]:
             if row.hash != anchor[1]:

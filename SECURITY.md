@@ -4,7 +4,7 @@
 
 Probity is a **student hackathon prototype**. It has had internal security reviews (see `docs/Security.md` and
 `docs/SECURITY_HANDOVER.md`), but **it has not been independently audited and isn't ready for production use** with real company
-payments. Some items are still open, for example data retention and deletion, and supply-chain pinning.
+payments. Some items are still open, for example automatic deletion after the retention period, and supply-chain pinning.
 
 ## Reporting a vulnerability
 

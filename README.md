@@ -121,7 +121,7 @@ Probity is a **hackathon prototype**. It works end to end on real data, but it h
 - **Screens for some API features:** approving past invoices and POs, adding single ones, the per-agent trace, retrying a failed case,
   notifications, the invoice-risk policy. The API for each is in place ([docs/API_CONTRACT.md](docs/API_CONTRACT.md)).
 - **Frontend tests and a linter.**
-- **Data retention and deletion** policy.
+- **Automatic deletion** of cases past the retention period (8 years by default; an owner can list them). See [docs/PRIVACY.md](docs/PRIVACY.md).
 
 **Known limitations**
 - Without approved history, verified bank accounts and a Tavily key, many checks say "could not verify", so a new workspace holds most invoices.

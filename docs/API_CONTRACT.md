@@ -58,6 +58,10 @@ Suggested UX: show the checklist on the Dashboard while `complete` is false (dis
 ### `PATCH /workspace {name}` (owner) → `{id, name}`
 ### `GET /workspace/export` (owner) → JSON download of vendors + cases (data portability).
 
+### `GET /workspace/retention` (owner) → `{retention_years, cutoff, cases_past_retention, oldest_case_at, automatic_deletion: false}`.
+
+Viewers get vendor contacts' emails and phones masked (`a***@vendor.com`, `XXXX1234`, contact rows carry `masked: true`) in every response that can contain them.
+
 ## 3. Vendors (vendor master = the baseline every invoice is checked against)
 
 ### `GET /vendors?q=&include_archived=false` → `{items: VendorSummary[]}`
@@ -100,6 +104,7 @@ Show a dialog asking *how* it was verified. Accountants can add unverified items
 | `POST /vendors/{id}/contacts` | accountant (approver if verified) | `{name?, email, phone?, verified?, verification_note?}` |
 | `PATCH /vendors/{id}/contacts/{contact_id}` | accountant; approver to change `verified` | `{name?, phone?, verified?, verification_note?}` |
 | `DELETE /vendors/{id}/contacts/{contact_id}` | approver | — |
+| `POST /vendors/{id}/contacts/{contact_id}/erase` | owner (+MFA per policy) | `{reason}` (≥10 letters/digits) → counts of rows changed per table. Deletes the contact and replaces its name, email and phone with "[erased]" everywhere, audit log included ([PRIVACY.md](PRIVACY.md)). 409 if the audit chain already fails verification. |
 | `GET /vendors/{id}/graph` | any | `{nodes:[{id,type:"vendor|bank|domain|gstin|address",label,root?,shared?}], edges:[{source,target,rel}]}` |
 | `GET /graph/shared-attributes` | any | `{items:[{type,label,vendors:[{id,name}]}]}` — attributes used by >1 vendor |
 

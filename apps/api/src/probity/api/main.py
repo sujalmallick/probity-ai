@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import func, or_, select  # noqa: F401
 from sqlalchemy.orm import Session
 
+from probity import privacy
 from probity import services as svc
 from probity.api.deps import bearer_token, current_user, db, require_mfa_for_approvals, upload_limit
 from probity.auth import AuthError, InvitationPending, authenticate, verify_clerk_token
@@ -541,7 +542,7 @@ def get_case(case_id: str, user: User = Depends(current_user), s: Session = Depe
 
 @app.get(f"{API}/cases/{{case_id}}/evidence")
 def get_evidence(case_id: str, user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
-    return {"items": svc.case_evidence(s, svc.get_case(s, user.workspace_id, case_id))}
+    return {"items": svc.case_evidence(s, svc.get_case(s, user.workspace_id, case_id), user)}
 
 
 @app.get(f"{API}/cases/{{case_id}}/trace")
@@ -549,14 +550,14 @@ def case_trace(case_id: str, user: User = Depends(current_user), s: Session = De
     """Per-agent trace: timing, checks, could-not-verify, rule-based fallbacks, AI calls and claims, plus sanity results."""
     from probity import trace
 
-    return trace.build(s, svc.get_case(s, user.workspace_id, case_id))
+    return privacy.for_viewer(user, trace.build(s, svc.get_case(s, user.workspace_id, case_id)))  # type: ignore[no-any-return]
 
 
 @app.get(f"{API}/cases/{{case_id}}/explain")
 def explain(case_id: str, user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
     case = svc.get_case(s, user.workspace_id, case_id)
     full = svc.serialize_case(s, case, user)
-    ev = {e["id"]: e for e in svc.case_evidence(s, case)}
+    ev = {e["id"]: e for e in svc.case_evidence(s, case, user)}
     claims = {c["id"]: c for c in full["claims"]}
     steps = []
     for i, ct in enumerate([c for c in (case.risk or {}).get("contributions", [])], start=1):
@@ -575,14 +576,14 @@ def case_audit(case_id: str, user: User = Depends(current_user), s: Session = De
     svc.get_case(s, user.workspace_id, case_id)
     rows = s.scalars(select(AuditLog).where(AuditLog.workspace_id == user.workspace_id, or_(AuditLog.entity == case_id, AuditLog.data["case_id"].as_string() == case_id)).order_by(AuditLog.id))
     ok, bad = verify_chain(s, user.workspace_id)
-    return {"chain_valid": ok, "first_bad_id": bad, "items": [{"id": r.id, "actor": r.actor, "action": r.action, "data": r.data, "hash": r.hash[:16], "prev_hash": r.prev_hash[:16], "ts": iso(r.ts)} for r in rows]}
+    return {"chain_valid": ok, "first_bad_id": bad, "items": [{"id": r.id, "actor": r.actor, "action": r.action, "data": privacy.for_viewer(user, r.data), "hash": r.hash[:16], "prev_hash": r.prev_hash[:16], "ts": iso(r.ts)} for r in rows]}
 
 
 @app.get(f"{API}/cases/{{case_id}}/export")
 def export_case(case_id: str, request: Request, format: Literal["json", "pdf"] = "json", user: User = Depends(current_user), s: Session = Depends(db)) -> Response:
     case = svc.get_case(s, user.workspace_id, case_id)
     audit(s, user.workspace_id, user.id, "case.exported", case.id, {"format": format}, request.state.request_id)
-    body = {"case": svc.serialize_case(s, case, user), "evidence": svc.case_evidence(s, case), "audit": case_audit(case_id, user, s)}
+    body = {"case": svc.serialize_case(s, case, user), "evidence": svc.case_evidence(s, case, user), "audit": case_audit(case_id, user, s)}
     if format == "pdf":
         from probity.report import build_case_pdf
 
@@ -596,6 +597,7 @@ async def case_events(case_id: str, request: Request, user: User = Depends(curre
     """SSE agent stream. Backfills from the database after Last-Event-ID, then streams live events from
     Redis pub/sub (or polls the database when Redis is not configured). Keepalive every 15 s."""
     ws = user.workspace_id
+    masked = not privacy.sees_contacts(user)  # read before the session closes
     # Release the request's DB session now: a stream can stay open for minutes, and an open transaction
     # would sit "idle in transaction" holding locks and blocking vacuum/migrations.
     req_session.commit()
@@ -605,6 +607,7 @@ async def case_events(case_id: str, request: Request, user: User = Depends(curre
     last = int(request.headers.get("Last-Event-ID") or request.query_params.get("last_event_id") or 0)
 
     def frame(p: dict) -> str:
+        p = privacy.mask_contacts(p) if masked else p
         return f"id: {p['seq']}\nevent: message\ndata: {json.dumps(p, default=str)}\n\n"
 
     async def backfill():  # type: ignore[no-untyped-def]
