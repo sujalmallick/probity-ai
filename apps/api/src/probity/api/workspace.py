@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from probity import __version__, importer
+from probity import __version__, importer, privacy
 from probity import services as svc
 from probity.api.deps import current_user, db, require_mfa_for_approvals
 from probity.config import get_settings
@@ -183,7 +183,7 @@ def list_notes(case_id: str, user: User = Depends(current_user), s: Session = De
     svc.get_case(s, user.workspace_id, case_id)
     people = {u.id: u for u in s.scalars(select(User).where(User.workspace_id == user.workspace_id))}
     rows = s.scalars(select(CaseNote).where(CaseNote.case_id == case_id).order_by(CaseNote.created_at))
-    return {"items": [{"id": n.id, "text": n.text, "author": people[n.author_id].name if n.author_id in people else n.author_id,
+    return {"items": [{"id": n.id, "text": privacy.for_viewer(user, n.text), "author": people[n.author_id].name if n.author_id in people else n.author_id,
                        "author_id": n.author_id, "author_role": people[n.author_id].role if n.author_id in people else None, "at": iso(n.created_at)} for n in rows]}
 
 
@@ -208,8 +208,8 @@ def list_notifications(unread_only: bool = False, limit: int = Query(50, ge=1, l
     rows = s.scalars(stmt.order_by(Notification.created_at.desc()).limit(limit))
     unread = s.scalar(select(func.count()).select_from(Notification).where(
         Notification.workspace_id == user.workspace_id, Notification.user_id == user.id, Notification.read_at.is_(None))) or 0
-    return {"unread": unread, "items": [{"id": n.id, "kind": n.kind, "title": n.title, "body": n.body, "case_id": n.case_id,
-                                         "read": n.read_at is not None, "at": iso(n.created_at)} for n in rows]}
+    return {"unread": unread, "items": privacy.for_viewer(user, [{"id": n.id, "kind": n.kind, "title": n.title, "body": n.body, "case_id": n.case_id,
+                                                                   "read": n.read_at is not None, "at": iso(n.created_at)} for n in rows])}
 
 
 @router.post("/notifications/{notification_id}/read")
@@ -228,6 +228,25 @@ def mark_all_read(user: User = Depends(current_user), s: Session = Depends(db)) 
     for n in rows:
         n.read_at = now
     return {"marked": len(rows)}
+
+
+# ---------------------------------------------------------------- retention (docs/PRIVACY.md)
+
+@router.get("/workspace/retention")
+def retention(user: User = Depends(current_user), s: Session = Depends(db)) -> dict:
+    """What is older than RETENTION_YEARS, for an owner to review. Nothing is deleted automatically."""
+    svc.require_role(user, "owner")
+    years = get_settings().retention_years
+    now = datetime.now(timezone.utc)
+    try:
+        cutoff = now.replace(year=now.year - years)
+    except ValueError:  # 29 February
+        cutoff = now.replace(year=now.year - years, day=28)
+    ws = user.workspace_id
+    old = select(func.count()).select_from(Case).where(Case.workspace_id == ws, Case.created_at < cutoff)
+    oldest = s.scalar(select(func.min(Case.created_at)).where(Case.workspace_id == ws))
+    return {"retention_years": years, "cutoff": iso(cutoff), "cases_past_retention": s.scalar(old) or 0, "oldest_case_at": iso(oldest),
+            "automatic_deletion": False}
 
 
 # ---------------------------------------------------------------- data export (DPDP: portability)

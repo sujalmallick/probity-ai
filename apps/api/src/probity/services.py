@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from probity.agents import action, risk_case, transaction, vendor, verification
 from probity.agents.common import deactivate_agent_claims, fv, record_claim, vendor_bundle
+from probity import privacy
 from probity.config import get_settings
 from probity.db.audit import audit
 from probity.db.models import (
@@ -758,22 +759,23 @@ def serialize_case(s: Session, case: Case, user: User, full: bool = True) -> dic
         "summary": case.summary,
         "memory_hits": case.memory_hits,
         "budget": case.budget,
-        "claims": [
+        # Contact emails and phones in what Probity and vendors wrote are masked for viewers (privacy.py).
+        "claims": privacy.for_viewer(user, [
             {"id": c.id, "agent": c.agent, "statement": mask_account_numbers(c.statement), "signal": c.signal, "status": c.status, "confidence": c.confidence,
              "severity": c.severity, "evidence_ids": c.evidence_ids, "verifier_notes": c.verifier_notes,
              "supporting_quote": mask_account_numbers(c.supporting_quote), "data": c.data, "active": c.active}
             for c in claims
-        ],
-        "drafts": [
+        ]),
+        "drafts": privacy.for_viewer(user, [
             {"id": d.id, "to_email": d.to_email, "recipient_verified": d.recipient_verified, "subject": d.subject, "body": d.body, "requested_items": d.requested_items,
              "fallback": d.fallback, "status": d.status, "sent_at": iso(d.sent_at), "followup_at": iso(d.followup_at)}
             for d in s.scalars(select(Draft).where(Draft.case_id == case.id))
-        ],
-        "messages": [
+        ]),
+        "messages": privacy.for_viewer(user, [
             {"id": m.id, "direction": m.direction, "from": m.from_email, "to": m.to_email, "subject": mask_account_numbers(m.subject),
              "body": mask_account_numbers(m.body), "indicators": m.indicators, "at": iso(m.created_at)}
             for m in s.scalars(select(Message).where(Message.case_id == case.id).order_by(Message.created_at))
-        ],
+        ]),
         "decisions": [
             {"decision": d.decision, "reason": d.reason, "actor_id": d.actor_id, "at": iso(d.created_at)}
             for d in s.scalars(select(Decision).where(Decision.case_id == case.id).order_by(Decision.created_at))
@@ -786,11 +788,11 @@ def serialize_case(s: Session, case: Case, user: User, full: bool = True) -> dic
     return out
 
 
-def case_evidence(s: Session, case: Case) -> list[dict]:
+def case_evidence(s: Session, case: Case, user: User | None = None) -> list[dict]:
     out = [evidence_public(e) for e in s.scalars(select(EvidenceRow).where(EvidenceRow.case_id == case.id).order_by(EvidenceRow.retrieved_at))]
     for e in out:  # excerpts quote documents and replies verbatim (G8)
         e["excerpt"] = mask_account_numbers(e.get("excerpt"))
-    return out
+    return privacy.for_viewer(user, out)  # type: ignore[no-any-return]
 
 
 def reveal_account(s: Session, user: User, case: Case) -> str | None:

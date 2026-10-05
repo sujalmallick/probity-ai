@@ -262,6 +262,7 @@ export function VendorDetail() {
   const role = user?.role as Role | undefined;
   const canEdit = can(role, "accountant");
   const isApprover = can(role, "approver");
+  const isOwner = can(role, "owner");
   const [v, setV] = useState<Any | null>(null);
   const [graph, setGraph] = useState<Any | null>(null);
   const [graphErr, setGraphErr] = useState<string | null>(null);
@@ -269,6 +270,7 @@ export function VendorDetail() {
   const [editing, setEditing] = useState(false);
   const [verify, setVerify] = useState<{ kind: Kind; item: Any } | null>(null);
   const [remove, setRemove] = useState<{ kind: Kind; item: Any } | null>(null);
+  const [erase, setErase] = useState<Any | null>(null);
   const [actionErr, setActionErr] = useState<string | null>(null);
 
   const load = () => api(`/vendors/${id}`).then((r) => { setV(r); setErr(null); }).catch((e) => setErr(errMsg(e)));
@@ -334,6 +336,7 @@ export function VendorDetail() {
             isApprover={isApprover}
             onVerify={(item) => setVerify({ kind: k, item })}
             onRemove={(item) => setRemove({ kind: k, item })}
+            onErase={k === "contact" && isOwner ? setErase : undefined}
             onChanged={load}
           />
         ))}
@@ -390,6 +393,7 @@ export function VendorDetail() {
       {editing && <VendorFormModal vendor={v} onClose={() => setEditing(false)} onSaved={() => { setEditing(false); load(); }} />}
       {verify && <VerifyModal kind={verify.kind} item={verify.item} vendorId={id} onClose={() => setVerify(null)} onDone={() => { setVerify(null); load(); }} />}
       {remove && <RemoveModal kind={remove.kind} item={remove.item} vendorId={id} onClose={() => setRemove(null)} onDone={() => { setRemove(null); load(); }} />}
+      {erase && <EraseContactModal item={erase} vendorId={id} onClose={() => setErase(null)} onDone={() => { setErase(null); load(); }} />}
     </div>
   );
 }
@@ -412,9 +416,9 @@ function VerifiedBy({ item }: { item: Any }) {
   );
 }
 
-function ItemSection({ kind, vendorId, items, canAdd, isApprover, onVerify, onRemove, onChanged }: {
+function ItemSection({ kind, vendorId, items, canAdd, isApprover, onVerify, onRemove, onErase, onChanged }: {
   kind: Kind; vendorId: string; items: Any[]; canAdd: boolean; isApprover: boolean;
-  onVerify: (it: Any) => void; onRemove: (it: Any) => void; onChanged: () => void;
+  onVerify: (it: Any) => void; onRemove: (it: Any) => void; onErase?: (it: Any) => void; onChanged: () => void;
 }) {
   const meta = KIND[kind];
   const [adding, setAdding] = useState(false);
@@ -463,7 +467,9 @@ function ItemSection({ kind, vendorId, items, canAdd, isApprover, onVerify, onRe
             {it.verified ? <ShieldCheck size={16} className="mt-0.5 shrink-0 text-low" aria-label="Verified" /> : <CircleDashed size={16} className="mt-0.5 shrink-0 text-medium" aria-label="Not verified" />}
             <div className="min-w-0 flex-1">
               <div className={`text-sm font-medium break-all ${kind === "bank" ? "font-mono" : ""}`}>{itemLabel(kind, it)}</div>
-              {kind === "contact" && (it.name || it.phone) && <div className="text-xs break-all text-muted">{[it.name ? it.email : null, it.phone].filter(Boolean).join(" · ")}</div>}
+              {kind === "contact" && (it.name || it.phone) && (
+                <div className="text-xs break-all text-muted" title={it.masked ? "Email and phone are hidden for viewers" : undefined}>{[it.name ? it.email : null, it.phone].filter(Boolean).join(" · ")}</div>
+              )}
               {kind === "bank" && it.last_seen && <div className="text-xs text-muted">Last seen {relTime(it.last_seen)}</div>}
               <VerifiedBy item={it} />
               <div className="mt-1.5 flex gap-3">
@@ -475,6 +481,11 @@ function ItemSection({ kind, vendorId, items, canAdd, isApprover, onVerify, onRe
                 <button className="text-xs text-muted hover:text-high hover:underline disabled:cursor-not-allowed disabled:opacity-45 disabled:no-underline" disabled={!isApprover} title={isApprover ? "" : "Requires approver role"} onClick={() => onRemove(it)}>
                   Remove
                 </button>
+                {onErase && (
+                  <button className="text-xs text-muted hover:text-high hover:underline" title="Erase this person's details everywhere (privacy request)" onClick={() => onErase(it)}>
+                    Erase
+                  </button>
+                )}
               </div>
             </div>
           </li>
@@ -569,6 +580,45 @@ function RemoveModal({ kind, item, vendorId, onClose, onDone }: { kind: Kind; it
 }
 
 
+const ERASE_REASON_MIN = 10; // server rule (services.meaningful)
+
+/** Privacy request from the person: deletes the contact and replaces their name, email and phone with "[erased]"
+ *  everywhere Probity wrote them, audit log included. Owner only; cannot be undone. */
+function EraseContactModal({ item, vendorId, onClose, onDone }: { item: Any; vendorId: string; onClose: () => void; onDone: () => void }) {
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const enough = (reason.match(/[\p{L}\p{N}]/gu) ?? []).length >= ERASE_REASON_MIN;
+  const submit = async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      await post(`/vendors/${vendorId}/contacts/${item.id}/erase`, { reason: reason.trim() });
+      onDone();
+    } catch (e: any) {
+      setErr(errMsg(e));
+      setBusy(false);
+    }
+  };
+  return (
+    <Modal title="Erase this contact's details?" onClose={onClose}>
+      <p className="text-sm text-muted">
+        <span className="font-mono text-ink">{item.name ? `${item.name} · ${item.email}` : item.email}</span> will be deleted, and their name, email
+        and phone number will be replaced with “[erased]” in emails, drafts, notes, evidence and the audit log. This cannot be undone.
+      </p>
+      <p className="mt-2 text-xs text-muted">Invoices themselves are kept: they are tax records. To only stop using this contact, use Remove instead.</p>
+      <label htmlFor="erase-reason" className="mt-4 block text-sm font-medium">Why are you erasing this contact?</label>
+      <textarea id="erase-reason" className="input mt-1.5 min-h-20" placeholder="e.g. Erasure request received by email on 5 Oct" value={reason}
+        onChange={(e) => { setReason(e.target.value); setErr(null); }} />
+      <p className="mt-1 text-[11px] text-muted">Recorded in the audit log. Don't include the person's details here.</p>
+      {err && <div role="alert" className="mt-3 rounded-lg bg-high-soft p-2.5 text-sm text-high">{err}</div>}
+      <div className="mt-4 flex justify-end gap-2">
+        <button className="btn" onClick={onClose}>Cancel</button>
+        <button className="btn btn-danger" disabled={busy || !enough} onClick={submit}>{busy ? <Spinner /> : <Trash2 size={14} aria-hidden />}Erase permanently</button>
+      </div>
+    </Modal>
+  );
+}
 
 // ---------------------------------------------------------------- GST registration
 

@@ -14,7 +14,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _SOURCE_ROOT = Path(__file__).resolve().parents[2]  # apps/api in a source checkout
@@ -127,6 +127,10 @@ class Settings(BaseSettings):
     case_token_limit: int = 200_000  # AI tokens (input + output) per case
     case_web_search_limit: int = 10  # web searches per case
     max_upload_mb: int = 10  # invoice upload size
+    # How long invoices and their investigations are kept (docs/PRIVACY.md). Indian GST law requires invoices and
+    # books to be kept for 72 months after the annual return's due date; 8 years covers that with margin. Nothing is
+    # deleted automatically: GET /workspace/retention lists what is past this period for an owner to review.
+    retention_years: int = Field(default=8, ge=1, le=50)
     # Document parser helper processes (ingestion/isolate.py): how many run at once, and each one's address-space cap.
     # A helper uses ~235 MB reading a 30-page invoice and needs a cap of at least ~288 MB. Keep helpers × cap plus
     # the API's ~110 MB inside the machine (Render free, 512 MB: PARSE_HELPERS=1, PARSE_MEMORY_MB=320).

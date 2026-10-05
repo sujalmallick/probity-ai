@@ -3,7 +3,7 @@
 **Status:**
 - The pre-production security audit is complete.
 - Both Critical findings and 12 of the 13 High findings are fixed.
-- **H11 (data deletion and retention) is still open.** It waits on a product decision about retention periods.
+- **H11 (data deletion and retention) is partly fixed.** Retention is 8 years, and an owner can erase a vendor contact (audit log included). Automatic deletion and workspace deletion were left out by decision.
 - The Mediums are fixed or assigned.
 - Low findings are parked until Phases 2–6 are done.
 
@@ -42,14 +42,17 @@ What the lock files are:
 - **`uvloop` is unpinned**, because it is Linux-only and isn't installed on the Windows dev machine.
 - **Not yet confirmed on Python 3.12:** they were generated under Python 3.13, so confirm on the first CI run.
 
-### 1b. Data deletion and retention (H11) — needs the user's retention periods
-Nothing can be deleted today: workspaces, cases, documents, messages, telemetry, and stored files on disk or S3. `docs/Security.md` promises retention and right-to-delete, and the immutable audit log holds personal data, which conflicts with DPDP erasure.
+### 1b. Data deletion and retention (H11) — partly fixed (user decisions, October 2026)
+Decisions: retention 8 years; build "erase a vendor contact" only; keep audit entries but replace personal details
+with "[erased]". Done (`privacy.py`, migration 0011, [PRIVACY.md](PRIVACY.md)):
+1. `RETENTION_YEARS=8` with the GST basis documented, and `GET /workspace/retention` listing what is past it.
+2. Owner-only contact erasure: deletes the contact and scrubs its name, email and phone from correspondence, notes,
+   claims, timeline, non-invoice evidence and the audit log. Audit and evidence rows change only through two
+   SECURITY DEFINER functions, each after a signed `privacy_redactions` record; `verify_chain` checks that record's
+   HMAC for erased rows. The invoice and what was read from it are kept (tax record).
+3. Viewers see contact emails and phones masked everywhere.
 
-Plan:
-1. Retention jobs.
-2. Workspace and user deletion that also removes stored files.
-3. Keep personal data in an erasable side table and put only pseudonymous IDs in the hash chain.
-4. Document the legal retention basis (GST: 8 years).
+Not built, by decision: automatic deletion after the retention period, and workspace or user deletion (with stored files).
 
 ### 2. Stronger PDF active-content check — fixed (user decision: no resident virus scanner)
 Every uploaded PDF is now parsed with pikepdf (qpdf) and rewritten before it is stored (`ingestion/scan.clean_pdf`):
@@ -123,7 +126,7 @@ These are listed in the full report (L1–L19). Examples:
 | H8 | Amount parsing never reads low (it takes the largest well-formed amount; lakh/crore and grouped formats are understood). An unknown, zero or low-confidence total holds the case and requires dual approval. | `test_ingestion_hardening.py`, `test_autoclear_gate.py` |
 | H9 | The audit chain is an HMAC keyed from HMAC_KEY and covers every column. A per-workspace advisory lock prevents forks. Each head is logged as an out-of-database witness, and `verify_chain(anchor=)` detects truncation. Rotating HMAC_KEY invalidates verification of older rows. | `test_audit_chain.py`, `test_platform.py` |
 | H10 | `Settings` repr hides secrets. Sentry runs with no frame locals and no request bodies. Tracebacks are scrubbed. | `test_secret_leaks.py` |
-| H11 | **Open:** see section 1, item 1b. | — |
+| H11 | **Partly fixed:** contact erasure with signed audit redactions, 8-year retention report, viewer masking. Automatic and workspace deletion not built (section 1, item 1b). | `test_contact_privacy.py` |
 | H12 | `PUT /workspace/policy` is a strict typed model with bounds. | `test_policy_validation.py` |
 | H13 | State changes lock the case row (`SELECT … FOR UPDATE`), so one concurrent decision wins. | `test_case_locking.py` |
 

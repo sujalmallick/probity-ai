@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from probity.db import audit as audit_mod
 from probity.db.audit import GENESIS, audit, chain_head, verify_chain
-from probity.db.models import AuditLog
+from probity.db.models import AuditLog, PrivacyRedaction
 
 WS = "ws_test"
 
@@ -20,6 +20,7 @@ def s(monkeypatch):
     monkeypatch.setattr(audit_mod, "_chain_key", lambda: b"k" * 32)
     engine = create_engine("sqlite://")
     AuditLog.__table__.create(engine)
+    PrivacyRedaction.__table__.create(engine)
     with Session(engine) as session:
         for i in range(4):
             audit(session, WS, "usr_1", "test.action", f"e{i}", {"i": i}, request_id=f"req{i}")

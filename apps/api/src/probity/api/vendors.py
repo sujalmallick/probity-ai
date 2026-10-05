@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from probity import graph_rel
+from probity import graph_rel, privacy
 from probity import services as svc
 from probity.api.deps import current_user, db, require_mfa_for_approvals
 from probity.db.audit import audit
@@ -89,6 +89,12 @@ def _verification(s: Session, v: Vendor, item, kind: str, key: str, names: dict,
             by, at, note = by or hit.actor, hit.ts, note or hit.data.get("note")
             method = method or hit.data.get("method") or "manual"
     return {"by": {"id": by, "name": names.get(by, by)} if by else None, "at": iso(at), "method": method, "note": note}
+
+
+def contact_details(c: VendorContact, user: User | None) -> dict:
+    if privacy.sees_contacts(user):
+        return {"email": c.email, "phone": c.phone}
+    return {"email": privacy.mask_email(c.email), "phone": privacy.mask_phone(c.phone), "masked": True}
 
 
 def masked_pan(pan: str | None, user: User | None) -> str | None:
@@ -170,8 +176,9 @@ def get_vendor(vendor_id: str, user: User = Depends(current_user), s: Session = 
                       "verification": ver(a, "bank", crypto.mask(a.last4)),
                       "first_seen": a.first_seen.isoformat() if a.first_seen else None, "last_seen": a.last_seen.isoformat() if a.last_seen else None} for a in q(VendorBankAccount)],
         "domains": [{"id": d.id, "domain": d.domain, "verified": d.verified, "verified_method": d.verified_method, "verification": ver(d, "domain", d.domain)} for d in q(VendorDomain)],
-        "contacts": [{"id": c.id, "name": c.name, "email": c.email, "phone": c.phone, "verified": c.verified, "verified_method": c.verified_method,
-                      "verification": ver(c, "contact", c.email)} for c in q(VendorContact)],
+        # Viewers see contact emails and phones masked (privacy.py); accountants and above need them for the work.
+        "contacts": [{"id": c.id, "name": c.name, **contact_details(c, user), "verified": c.verified, "verified_method": c.verified_method,
+                      "verification": privacy.for_viewer(user, ver(c, "contact", c.email))} for c in q(VendorContact)],
         "price_history": [{"id": h.id, "date": h.invoice_date.isoformat(), "invoice_number": h.invoice_number, "total_minor": h.total_minor,
                            "items": h.line_items, "status": "approved" if h.approved_at else "pending", "source": h.source} for h in hist],
         "purchase_orders": [{"id": p.id, "po_number": p.po_number, "po_date": p.po_date.isoformat(), "lines": p.lines,
@@ -449,6 +456,28 @@ def remove_contact(vendor_id: str, contact_id: str, request: Request, user: User
         raise LookupError("contact not found")
     s.delete(c)
     audit(s, user.workspace_id, user.id, "vendor.contact_removed", v.id, {"email": c.email}, request.state.request_id)
+
+
+class EraseIn(BaseModel):
+    reason: str = Field(min_length=10, max_length=1000)
+
+
+@router.post("/vendors/{vendor_id}/contacts/{contact_id}/erase")
+def erase_contact(vendor_id: str, contact_id: str, body: EraseIn, user: User = Depends(require_mfa_for_approvals), s: Session = Depends(db)) -> dict:
+    """Erasure request from the person (DPDP/GDPR): delete the contact and replace their name, email and phone with
+    "[erased]" everywhere Probity wrote them, audit log included. Owner only; cannot be undone. Removing a contact
+    (DELETE above) only stops using it; this also rewrites history."""
+    svc.require_role(user, "owner")
+    if not svc.meaningful(body.reason):
+        raise svc.BadRequest("say why this contact is being erased (e.g. 'erasure request received by email on 5 Oct')")
+    v = _vendor(s, user, vendor_id)
+    c = s.get(VendorContact, contact_id)
+    if c is None or c.vendor_id != v.id:
+        raise LookupError("contact not found")
+    try:
+        return privacy.erase_contact(s, user, c, body.reason)
+    except privacy.ChainBroken as e:
+        raise svc.Conflict(str(e)) from e
 
 
 # ---------------------------------------------------------------- graph
