@@ -184,5 +184,4 @@ Probity is open source under the [MIT License](LICENSE). You can use, copy, chan
 and license notice. It comes with no warranty.
 
 ---
-
 Probity identifies anomalies and recommends a hold. It never executes payments and never makes accusations.
