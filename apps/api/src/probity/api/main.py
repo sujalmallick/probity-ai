@@ -220,6 +220,19 @@ def ready() -> JSONResponse:
     return JSONResponse({"ok": ok, **checks}, status_code=200 if ok else 503)
 
 
+@app.get(f"{API}/ai/status")
+def ai_status(user: User = Depends(current_user)) -> dict:
+    """Is the AI working? `problem` is set while an account-level failure is active (credits or quota used up, key
+    rejected, not configured): the web app shows it as a banner. It clears on the next successful AI call."""
+    from probity import ai_health
+
+    st = get_settings()
+    problem = ai_health.current()
+    if problem is None and not st.llm_api_key:
+        problem = {"code": "not_configured", "reason": f"AI is not configured ({st.llm_key_name} missing). Rules are used instead.", "since": None}
+    return {"ok": problem is None, "provider": st.llm_provider, "problem": problem}
+
+
 @app.get(f"{API}/metrics")
 def metrics(authorization: str | None = Header(default=None)) -> Response:
     import hmac as _hmac

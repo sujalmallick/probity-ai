@@ -4,6 +4,7 @@ import { AlertTriangle, CheckCircle2, Copy, FileUp, Pencil, Play, XCircle } from
 import { errMsg, post, uploadFile } from "../lib/api";
 import { inr } from "../lib/format";
 import { Spinner } from "../components/ui";
+import { AiStatusBanner } from "../components/AiStatusBanner";
 
 type Field = { value: any; raw?: string; confidence: number; evidence_snippet?: string; via?: string };
 const ORDER = ["vendor_name", "gstin", "invoice_number", "invoice_date", "due_date", "po_number", "subtotal", "tax", "total", "bank_account", "ifsc", "vendor_email", "vendor_address"];
@@ -66,6 +67,7 @@ export default function NewCase() {
         <h1 className="page-title">New investigation</h1>
         <p className="text-sm text-muted">PDF, image or email file, up to 15 MB.</p>
       </div>
+      <AiStatusBanner />
       <div
         className={`card flex cursor-pointer flex-col items-center justify-center gap-2 border-2 border-dashed px-6 py-12 text-center ${drag ? "!border-accent bg-accent-soft" : ""}`}
         onClick={() => input.current?.click()}
