@@ -49,18 +49,42 @@ export const currentConfig = (): AppConfig => cached ?? SAFE_CONFIG;
 /** True when /app/config could not be loaded and the safe defaults are in use. */
 export const isFallbackConfig = (c: AppConfig) => c === SAFE_CONFIG;
 
-const INTEGRATION_LABEL: Record<Integration, string> = {
-  ai: "AI", web_search: "Web search", domain_lookup: "Domain lookup", gst_registry: "GST registry", email: "Email",
-  storage: "Storage", antivirus: "Antivirus", background_jobs: "Background jobs",
-};
-// Values that mean "this integration is not working right now". Anything else ("live", "local", "cloud", "inline", …) is fine.
-const NOT_AVAILABLE = new Set(["missing", "unavailable", "off"]);
+/** How an integration's status should read. Not every "off" is a problem:
+ *  - "ok": working
+ *  - "setup": works without it, but something useful is missing until someone connects it (amber)
+ *  - "optional": off by choice or not offered; nothing to fix (grey)
+ *  - "broken": the app can't do its job (red) */
+export type IntegrationTone = "ok" | "setup" | "optional" | "broken";
+export type IntegrationState = { key: Integration; label: string; tone: IntegrationTone; status: string; note?: string };
 
-/** Integrations that are not available, as readable labels (e.g. ["Web search", "GST registry"]). */
-export const unavailableIntegrations = (c: AppConfig) =>
-  (Object.entries(c.integrations) as [Integration, string][])
-    .filter(([, v]) => NOT_AVAILABLE.has(v))
-    .map(([k]) => INTEGRATION_LABEL[k] ?? k.replace(/_/g, " "));
+const INTEGRATIONS: Record<Integration, { label: string; off: IntegrationTone; offStatus: string; note: string }> = {
+  ai: { label: "AI", off: "setup", offStatus: "Not set up", note: "Summaries and claim checks use rules instead, and are labelled as a rule-based fallback." },
+  web_search: { label: "Web search", off: "setup", offStatus: "Not set up", note: "The web reputation check reports “could not verify”, so larger invoices are held for a person." },
+  domain_lookup: { label: "Domain lookup", off: "setup", offStatus: "Not set up", note: "The domain age check reports “could not verify”." },
+  gst_registry: { label: "GST registry", off: "optional", offStatus: "Not connected", note: "No GST registry is connected, so registration status can't be checked automatically. You can record it on the vendor page." },
+  email: { label: "Email", off: "setup", offStatus: "Not set up", note: "Verification emails to vendors, invitations and notifications can't be sent until an email provider is connected." },
+  storage: { label: "File storage", off: "broken", offStatus: "Unavailable", note: "Uploads can't be stored." },
+  antivirus: { label: "Antivirus", off: "optional", offStatus: "Off (optional)", note: "Uploads aren't virus-scanned. Every PDF is still cleaned of active content when it's uploaded." },
+  background_jobs: { label: "Background jobs", off: "broken", offStatus: "Unavailable", note: "Investigations can't start." },
+};
+const OK_STATUS: Record<string, string> = { live: "Connected", on: "On", cloud: "Cloud", local: "On this server", inline: "In the app server", worker: "Separate worker" };
+const OFF = new Set(["missing", "unavailable", "off"]);
+
+/** Every integration the server reported, with a plain-language status and tone. */
+export function integrationStates(c: AppConfig): IntegrationState[] {
+  return (Object.keys(INTEGRATIONS) as Integration[])
+    .filter((k) => typeof c.integrations[k] === "string")
+    .map((k) => {
+      const v = c.integrations[k]!;
+      const info = INTEGRATIONS[k];
+      return OFF.has(v)
+        ? { key: k, label: info.label, tone: info.off, status: info.offStatus, note: info.note }
+        : { key: k, label: info.label, tone: "ok" as const, status: OK_STATUS[v] ?? v };
+    });
+}
+
+/** Integrations that need someone to act (set up or broken), as readable labels, e.g. ["Email"]. */
+export const integrationsNeedingAction = (c: AppConfig) => integrationStates(c).filter((s) => s.tone === "setup" || s.tone === "broken").map((s) => s.label);
 
 /** Returns SAFE_CONFIG until the real config arrives. */
 export function useAppConfig(): AppConfig {

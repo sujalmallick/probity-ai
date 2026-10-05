@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import { CheckCircle2, CircleSlash, RotateCw, XCircle } from "lucide-react";
-import { isFallbackConfig, useAppConfig, type Integration } from "../lib/config";
+import { AlertTriangle, CheckCircle2, MinusCircle, RotateCw, XCircle } from "lucide-react";
+import { integrationStates, isFallbackConfig, useAppConfig, type IntegrationTone } from "../lib/config";
 import { relTime } from "../lib/format";
 import { Skeleton } from "../components/ui";
 
@@ -16,27 +16,22 @@ export async function fetchReady(): Promise<Ready | null> {
   }
 }
 
-const INTEGRATIONS: { key: Integration; label: string; off: string }[] = [
-  { key: "ai", label: "AI", off: "Summaries and claim checks use rules instead and are labelled as a rule-based fallback." },
-  { key: "web_search", label: "Web search", off: "The web reputation check reports “could not verify”." },
-  { key: "domain_lookup", label: "Domain lookup", off: "The domain age check reports “could not verify”." },
-  { key: "gst_registry", label: "GST registry", off: "GST registration can't be checked automatically; enter it on the vendor page." },
-  { key: "email", label: "Email", off: "Emails to vendors and notification emails can't be sent." },
-  { key: "storage", label: "File storage", off: "Uploads can't be stored." },
-  { key: "antivirus", label: "Antivirus", off: "Uploads aren't virus-scanned." },
-  { key: "background_jobs", label: "Background jobs", off: "Investigations can't start." },
-];
-const NOT_AVAILABLE = new Set(["missing", "unavailable", "off"]);
+const TONE = {
+  ok: { Icon: CheckCircle2, cls: "text-low" },
+  setup: { Icon: AlertTriangle, cls: "text-medium" },
+  optional: { Icon: MinusCircle, cls: "text-muted" },
+  broken: { Icon: XCircle, cls: "text-high" },
+} as const;
 
-function Row({ ok, label, value, note }: { ok: boolean | null; label: string; value?: string; note?: string }) {
-  const Icon = ok === null ? CircleSlash : ok ? CheckCircle2 : XCircle;
+function Row({ tone, label, value, note }: { tone: IntegrationTone; label: string; value?: string; note?: string }) {
+  const { Icon, cls } = TONE[tone];
   return (
     <li className="flex items-start gap-3 border-t border-line px-4 py-3 first:border-t-0">
-      <Icon size={16} className={`mt-0.5 shrink-0 ${ok === null ? "text-muted" : ok ? "text-low" : "text-high"}`} aria-hidden />
+      <Icon size={16} className={`mt-0.5 shrink-0 ${cls}`} aria-hidden />
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-baseline justify-between gap-x-3">
           <span className="text-sm font-medium">{label}</span>
-          {value && <span className="text-xs text-muted">{value}</span>}
+          {value && <span className={`text-xs ${tone === "ok" ? "text-muted" : cls}`}>{value}</span>}
         </div>
         {note && <p className="mt-0.5 text-xs text-muted">{note}</p>}
       </div>
@@ -69,32 +64,38 @@ export default function StatusPage() {
         <div className="border-b border-line px-4 py-3 text-sm font-semibold">Service</div>
         {ready === undefined ? <div className="p-4"><Skeleton className="h-16" /></div> : (
           <ul>
-            <Row ok={reachable} label="API" value={reachable ? "reachable" : "not reachable"} note={reachable ? undefined : "Probity's server isn't answering. It may be starting up; check again in a minute."} />
-            {reachable && <Row ok={ready!.database?.startsWith("ok") ?? false} label="Database" value={ready!.database ?? "unknown"} />}
-            {reachable && ready!.migrations && <Row ok={ready!.migrations === "ok"} label="Database schema" value={ready!.migrations} />}
-            {reachable && ready!.redis && <Row ok={ready!.redis === "ok"} label="Job queue" value={ready!.redis} />}
+            <Row tone={reachable ? "ok" : "broken"} label="API" value={reachable ? "Reachable" : "Not reachable"} note={reachable ? undefined : "Probity's server isn't answering. It may be starting up; check again in a minute."} />
+            {reachable && <Row tone={ready!.database?.startsWith("ok") ? "ok" : "broken"} label="Database" value={ready!.database ?? "unknown"} />}
+            {reachable && ready!.migrations && <Row tone={ready!.migrations === "ok" ? "ok" : "broken"} label="Database schema" value={ready!.migrations === "ok" ? "Up to date" : ready!.migrations} />}
+            {reachable && ready!.redis && <Row tone={ready!.redis === "ok" ? "ok" : "broken"} label="Job queue" value={ready!.redis} />}
           </ul>
         )}
       </section>
 
       <section className="card overflow-hidden" aria-label="Integrations">
-        <div className="border-b border-line px-4 py-3 text-sm font-semibold">Integrations</div>
+        <div className="border-b border-line px-4 py-3">
+          <div className="text-sm font-semibold">Integrations</div>
+          <p className="mt-0.5 text-xs text-muted">
+            <AlertTriangle size={12} className="mr-1 inline align-[-1px] text-medium" aria-hidden />needs setting up ·{" "}
+            <MinusCircle size={12} className="mr-1 inline align-[-1px] text-muted" aria-hidden />optional or not offered ·{" "}
+            <XCircle size={12} className="mr-1 inline align-[-1px] text-high" aria-hidden />broken
+          </p>
+        </div>
         {isFallbackConfig(cfg) ? (
           <p className="p-4 text-sm text-muted">Integration status couldn't be loaded.</p>
         ) : (
           <ul>
-            {INTEGRATIONS.filter((i) => cfg.integrations[i.key] !== undefined).map((i) => {
-              const v = cfg.integrations[i.key]!;
-              const off = NOT_AVAILABLE.has(v);
-              return <Row key={i.key} ok={!off} label={i.label} value={v} note={off ? i.off : undefined} />;
-            })}
+            {integrationStates(cfg).map((i) => <Row key={i.key} tone={i.tone} label={i.label} value={i.status} note={i.note} />)}
           </ul>
         )}
       </section>
 
       {!isFallbackConfig(cfg) && (
         <section className="card p-4 text-sm" aria-label="Limits">
-          <div className="mb-2 font-semibold">Limits</div>
+          <div className="font-semibold">Limits</div>
+          <p className="mt-0.5 mb-3 text-xs text-muted">
+            Daily limits are per workspace and reset at midnight UTC (5:30 am IST). When an invoice hits its own limit, the investigation stops early and the invoice is held for a person.
+          </p>
           <ul className="grid gap-1 text-muted sm:grid-cols-2">
             <li>Invoice upload: <b className="text-ink">{cfg.limits.max_upload_mb} MB</b></li>
             <li>CSV import: <b className="text-ink">{cfg.limits.max_import_mb} MB</b></li>
