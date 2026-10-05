@@ -158,7 +158,11 @@ def check_arithmetic(line_items: list[dict], subtotal: int | None, tax: int | No
     """Return a list of arithmetic findings; empty means consistent."""
     issues = []
     tolerance = 100  # ₹1: invoices round totals ("Round Off") and per-line amounts
-    if line_items and subtotal is not None:
+    readable = isinstance(line_items, list) and all(
+        isinstance(li, dict) and isinstance(li.get("qty"), (int, float)) and isinstance(li.get("unit_price_minor"), int) for li in line_items)
+    if line_items and not readable:  # never crash on a malformed value: flag it, which holds the case for review
+        issues.append({"check": "line_items_unreadable", "expected": None, "printed": None})
+    elif line_items and subtotal is not None:
         computed = round(sum(float(li["qty"]) * int(li["unit_price_minor"]) for li in line_items))
         if abs(computed - subtotal) > max(tolerance, len(line_items) * 100):
             issues.append({"check": "line_items_sum", "expected": computed, "printed": subtotal})

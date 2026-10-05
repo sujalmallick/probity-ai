@@ -41,6 +41,21 @@ class LLMExtraction(BaseModel):
     observations: list[str] = Field(default_factory=list)
 
 
+# Structured fields the AI gap-filler never writes: its answer is one verbatim string, and a string where a list of
+# {description, qty, unit_price_minor} belongs crashed every later step (preview arithmetic, transaction checks).
+# If the parser can't read the line-item table, line items stay missing and the case is held for a person.
+NOT_AI_FILLABLE = frozenset({"line_items"})
+
+
+def well_formed_line_items(value: object) -> bool:
+    return isinstance(value, list) and bool(value) and all(
+        isinstance(li, dict) and isinstance(li.get("description"), str)
+        and isinstance(li.get("qty"), (int, float)) and not isinstance(li.get("qty"), bool)
+        and isinstance(li.get("unit_price_minor"), int) and not isinstance(li.get("unit_price_minor"), bool)
+        for li in value
+    )
+
+
 def _llm_fill(ctx: CaseCtx, text: str, fields: dict, missing: list[str]) -> None:
     pv, system = llm.load_prompt("document", "extract")
     try:
@@ -59,7 +74,7 @@ def _llm_fill(ctx: CaseCtx, text: str, fields: dict, missing: list[str]) -> None
                 fields[name]["fallback"] = rule_based_fallback(f"parser value, not double-checked by AI: {e.reason}")
         return
     for f in out.fields:
-        if f.name in missing and f.raw and f.raw in text:  # grounding: must appear verbatim
+        if f.name in missing and f.name not in NOT_AI_FILLABLE and f.raw and f.raw in text:  # grounding: must appear verbatim
             val = parse_money_minor(f.raw) if f.name in ("subtotal", "tax", "total") else f.raw
             fields[f.name] = {"value": val, "raw": f.raw, "confidence": min(f.confidence, 0.85), "evidence_snippet": (f.evidence_snippet or f.raw)[:300], "page": 1, "via": "llm"}
 
@@ -82,7 +97,7 @@ def extract_document(ctx: CaseCtx, data: bytes, mime: str, corrections: dict) ->
         if meta["dkim"] and meta["dkim"] != "pass":
             fields["email_dkim"] = {"value": meta["dkim"], "raw": meta["dkim"], "confidence": 0.99, "evidence_snippet": f"dkim={meta['dkim']}", "page": 0}
 
-    missing = low_confidence(fields)
+    missing = [k for k in low_confidence(fields) if k not in NOT_AI_FILLABLE]
     if missing and ctx.budget is not None:
         ctx.progress(AGENT, f"Filling {len(missing)} low-confidence fields")
         _llm_fill(ctx, text, fields, missing)
@@ -95,6 +110,11 @@ def extract_document(ctx: CaseCtx, data: bytes, mime: str, corrections: dict) ->
             continue  # unchanged value: not a correction
         original = {kk: before.get(kk) for kk in ("value", "raw", "confidence")} if before else None
         fields[k] = {**(before or {}), "value": v, "raw": str(v), "confidence": 1.0, "via": "human_correction", "original": original}
+
+    # One choke point for every later consumer: line items are a well-formed list or they are absent (held for review).
+    if "line_items" in fields and not well_formed_line_items(fields["line_items"].get("value")):
+        fields.pop("line_items")
+        ctx.progress(AGENT, "Line items could not be read as a table; left for review")
 
     # Protect bank account: keep last4 + HMAC + ciphertext, never the raw number in case JSON.
     if "bank_account" in fields:
