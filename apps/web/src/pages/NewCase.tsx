@@ -31,7 +31,9 @@ export default function NewCase() {
     try {
       const d = await uploadFile(f, f.name);
       setDoc(d);
-      if (!d.duplicate_of) {
+      // A file uploaded before but never investigated (e.g. the earlier preview failed) continues from that upload:
+      // the server returns the existing document. Only an existing case stops here, so one file never becomes two cases.
+      if (!d.duplicate_of?.startsWith("case_")) {
         setBusy("Reading the document…");
         setPreview(await post(`/documents/${d.document_id}/preview`));
       }
@@ -82,8 +84,14 @@ export default function NewCase() {
 
       {doc?.duplicate_of && (
         <div className="card fade-in flex flex-wrap items-center justify-between gap-2 p-4 text-sm">
-          <span className="flex items-center gap-2 text-medium"><Copy size={15} />This exact file was already uploaded (sha256 {doc.sha256.slice(0, 12)}…).</span>
-          {doc.duplicate_of.startsWith("case_") && <button className="btn" onClick={() => nav(`/cases/${doc.duplicate_of}`)}>Open existing case</button>}
+          {doc.duplicate_of.startsWith("case_") ? (
+            <>
+              <span className="flex items-center gap-2 text-medium"><Copy size={15} />This exact file has already been investigated.</span>
+              <button className="btn" onClick={() => nav(`/cases/${doc.duplicate_of}`)}>Open existing case</button>
+            </>
+          ) : (
+            <span className="flex items-center gap-2 text-muted"><Copy size={15} />You uploaded this exact file before but didn't start an investigation, so we're continuing with that upload.</span>
+          )}
         </div>
       )}
 
