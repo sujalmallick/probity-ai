@@ -301,6 +301,10 @@ def gate(ctx: CaseCtx) -> dict:
             case.status = "AWAITING_HUMAN"
             reasons.extend(f"Sanity check failed: {p['message']}" for p in final_problems)
             case.recommendation = {**case.recommendation, "gate": {**case.recommendation["gate"], "auto_cleared": False, "reasons": reasons}}
+        if not auto and case.recommendation.get("action") == "PROCEED":
+            # A low score that the gate holds (checks couldn't run, unknown vendor...) is not "proceed": everything that
+            # reads the recommendation (case page, notifications, exports) must say it needs a person.
+            case.recommendation = {**case.recommendation, "action": "REVIEW"}
         sanity.stamp(case, final_problems)
         if not auto:
             from probity.agents.common import fv

@@ -7,6 +7,7 @@ import {
 import { api, can, errMsg, fetchBlob, post, streamEvents, type Role, type StreamState } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { evValue, isoDate, money, relTime, RUNNING, tierColor } from "../lib/format";
+import { AiStatusBanner } from "../components/AiStatusBanner";
 import { Gauge } from "../components/Gauge";
 import { RelGraph } from "../components/RelGraph";
 import { ActivityLog, Timeline, type AgentEvent } from "../components/Timeline";
@@ -133,8 +134,11 @@ export default function CaseView() {
   const anomalies = scored.filter((x) => x.points > 0);
   const quiet = [...scored.filter((x) => !(x.points > 0)).map((x) => ({ id: x.signal, statement: x.label, status: claimById[x.claim_id]?.status ?? "verified" })), ...otherInfo, ...unconfirmedInfo];
   const lastEvent = [...events].reverse().find((e) => e.message);
-  const rec = c.status === "AUTO_CLEARED" ? "Auto-cleared" : ACTION_LABEL[c.recommendation?.action] ?? "Pending";
-  const RecIcon = risk.tier === "LOW" || c.status === "AUTO_CLEARED" ? ShieldCheck : risk.tier === "MEDIUM" ? AlertTriangle : ShieldAlert;
+  // A low score the gate still held (checks couldn't run, unknown vendor…) is not "clear": say it's held, in amber.
+  const held = c.status === "AWAITING_HUMAN" && gate?.auto_cleared === false && ["PROCEED", "REVIEW"].includes(c.recommendation?.action);
+  const checksNotRun = Object.values((c.checks ?? {}) as Record<string, Any>).filter((v) => v?.status === "could_not_verify").length;
+  const rec = c.status === "AUTO_CLEARED" ? "Auto-cleared" : held ? "Held for review" : ACTION_LABEL[c.recommendation?.action] ?? "Pending";
+  const RecIcon = held ? AlertTriangle : risk.tier === "LOW" || c.status === "AUTO_CLEARED" ? ShieldCheck : risk.tier === "MEDIUM" ? AlertTriangle : ShieldAlert;
   const decided = ["APPROVED", "REJECTED", "AUTO_CLEARED"].includes(c.status);
   const latestReply = (c.messages ?? []).filter((m: Any) => m.direction === "in").slice(-1)[0];
   const peak = peakTier(c);
@@ -147,6 +151,7 @@ export default function CaseView() {
 
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-5 pb-24 lg:pb-0">
+      <AiStatusBanner />
       {/* Top bar */}
       <div className="flex items-center justify-between gap-3">
         <Link to="/dashboard" className="inline-flex items-center gap-1.5 rounded-md text-sm text-muted transition-colors hover:text-ink"><ArrowLeft size={15} aria-hidden />Cases</Link>
@@ -311,9 +316,16 @@ export default function CaseView() {
               <Gauge score={running && !risk.score && risk.score !== 0 ? null : risk.score ?? null} tier={risk.tier} provisional={running} size={136} />
             </div>
             {!running && (
-              <div className="mt-2 flex items-center gap-1.5 text-base font-semibold" style={{ color: risk.tier ? tierColor[risk.tier] : undefined }} title={gate?.reasons?.join("; ")}>
-                <RecIcon size={17} aria-hidden />{rec}
-              </div>
+              <>
+                <div className="mt-2 flex items-center gap-1.5 text-base font-semibold" style={{ color: held ? tierColor.MEDIUM : risk.tier ? tierColor[risk.tier] : undefined }} title={gate?.reasons?.join("; ")}>
+                  <RecIcon size={17} aria-hidden />{rec}
+                </div>
+                {held && (
+                  <div className="text-xs text-medium">
+                    {checksNotRun > 0 ? `${checksNotRun} check${checksNotRun === 1 ? "" : "s"} couldn't run · ` : ""}a person must decide
+                  </div>
+                )}
+              </>
             )}
             {!running && !decided && gate?.reasons?.length > 0 && c.status !== "FAILED" && (
               <ul className="mt-3 flex w-full flex-col gap-1 border-t border-line pt-3 text-left text-xs text-muted" aria-label="Why it's held">

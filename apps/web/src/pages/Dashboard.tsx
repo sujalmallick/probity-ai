@@ -6,6 +6,7 @@ import { useAuth } from "../lib/auth";
 import { inr, money, relTime, RUNNING, tierColor } from "../lib/format";
 import { Skeleton, Spinner, StatusChip, TierChip } from "../components/ui";
 import { isDismissed, OnboardingChecklist, type Onboarding } from "../components/Onboarding";
+import { AiStatusBanner } from "../components/AiStatusBanner";
 
 interface Row {
   id: string;
@@ -98,6 +99,7 @@ export default function Dashboard() {
         </div>
         {canUpload && <Link to="/cases/new" className="btn btn-primary"><FilePlus2 size={16} />Upload invoice</Link>}
       </header>
+      <AiStatusBanner />
 
       {err && <div role="alert" className="rounded-lg bg-high-soft p-3 text-sm text-high">{err}</div>}
 

@@ -26,6 +26,7 @@ from typing import Any, Literal, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
+from probity import ai_health
 from probity.config import get_settings
 from probity.db.models import LLMCall
 from probity.db.session import telemetry_scope
@@ -37,11 +38,18 @@ PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
 
 class LLMFailed(RuntimeError):
-    """The model could not produce a valid answer. `reason` is safe to show to users."""
+    """The model could not produce a valid answer. `reason` is safe to show to users; `code` says what kind of
+    failure it was (e.g. credits_exhausted, quota_exhausted, key_invalid) so the UI can explain account problems."""
 
-    def __init__(self, reason: str):
+    def __init__(self, reason: str, code: str = "error"):
         super().__init__(reason)
         self.reason = reason
+        self.code = code
+
+
+CREDITS_MSG = "AI credits have run out — add credits in the Anthropic console (Plans & Billing). Rules are used until then."
+ANTHROPIC_LIMIT_MSG = "AI usage limit reached on the Anthropic account — raise it in the Anthropic console. Rules are used until then."
+GEMINI_QUOTA_MSG = "AI quota is used up on the Gemini key — wait for it to reset or enable billing in Google AI Studio. Rules are used until then."
 
 
 class _InvalidOutput(ValueError):
@@ -82,7 +90,7 @@ def transport(schema: type[T], system: str, content: str | list[dict[str, Any]],
     """One structured-output call to the configured provider. Returns (parsed, input_tokens, output_tokens)."""
     st = get_settings()
     if not st.llm_api_key:
-        raise LLMFailed(f"AI is not configured ({st.llm_key_name} missing)")
+        raise LLMFailed(f"AI is not configured ({st.llm_key_name} missing)", "not_configured")
     return _TRANSPORTS[st.llm_provider](schema, system, content, model)
 
 
@@ -99,21 +107,26 @@ def _anthropic_transport(schema: type[T], system: str, content: str | list[dict[
             messages=[{"role": "user", "content": content}], output_format=schema,
         )
     except anthropic.AuthenticationError as e:
-        raise LLMFailed("AI key was rejected (check ANTHROPIC_API_KEY)") from e
+        raise LLMFailed("AI key was rejected (check ANTHROPIC_API_KEY)", "key_invalid") from e
     except anthropic.PermissionDeniedError as e:
-        raise LLMFailed("AI key lacks permission for this model") from e
+        raise LLMFailed("AI key lacks permission for this model", "model_access") from e
     except anthropic.RateLimitError as e:
-        raise LLMFailed("AI rate limit reached — try again shortly") from e
+        raise LLMFailed("AI rate limit reached — try again shortly", "rate_limited") from e
     except anthropic.APITimeoutError as e:
-        raise LLMFailed("AI request timed out") from e
+        raise LLMFailed("AI request timed out", "timeout") from e
     except anthropic.APIConnectionError as e:
-        raise LLMFailed("could not reach the AI service (network)") from e
+        raise LLMFailed("could not reach the AI service (network)", "network") from e
     except anthropic.BadRequestError as e:
-        raise LLMFailed(f"AI request was rejected ({getattr(e, 'status_code', 400)})") from e
+        detail = str(getattr(e, "message", "") or e).lower()
+        if "credit balance" in detail:  # Anthropic: "Your credit balance is too low to access the Anthropic API"
+            raise LLMFailed(CREDITS_MSG, "credits_exhausted") from e
+        if "usage limit" in detail or "spend limit" in detail:  # workspace / organisation spend limit reached
+            raise LLMFailed(ANTHROPIC_LIMIT_MSG, "quota_exhausted") from e
+        raise LLMFailed(f"AI request was rejected ({getattr(e, 'status_code', 400)})", "rejected") from e
     except anthropic.APIStatusError as e:
-        raise LLMFailed(f"AI service error ({e.status_code})") from e
+        raise LLMFailed(f"AI service error ({e.status_code})", "service_error") from e
     if resp.stop_reason == "refusal":
-        raise LLMFailed("the model declined this request")
+        raise LLMFailed("the model declined this request", "refused")
     if resp.stop_reason == "max_tokens":
         raise _InvalidOutput("output was cut off at the token limit")
     if resp.parsed_output is None:
@@ -185,28 +198,31 @@ def _gemini_transport(schema: type[T], system: str, content: str | list[dict[str
             if attempt < 2:
                 _sleep(2 ** attempt)
                 continue
-            raise LLMFailed("AI request timed out") from e
+            raise LLMFailed("AI request timed out", "timeout") from e
         except httpx.HTTPError as e:
-            raise LLMFailed("could not reach the AI service (network)") from e
+            raise LLMFailed("could not reach the AI service (network)", "network") from e
         if r.status_code in (429, 500, 502, 503, 504) and attempt < 2:
             _sleep(2 ** attempt)
             continue
         break
     if r.status_code in (401, 403):
-        raise LLMFailed("AI key was rejected or lacks permission for this model (check GEMINI_API_KEY)")
-    if r.status_code == 429:
-        raise LLMFailed("AI rate limit reached — try again shortly")
+        raise LLMFailed("AI key was rejected or lacks permission for this model (check GEMINI_API_KEY)", "key_invalid")
+    if r.status_code == 429:  # still limited after retries: a used-up quota says so in the error body
+        if "quota" in r.text.lower() or "resource_exhausted" in r.text.lower():
+            raise LLMFailed(GEMINI_QUOTA_MSG, "quota_exhausted")
+        raise LLMFailed("AI rate limit reached — try again shortly", "rate_limited")
     if r.status_code == 404:
-        raise LLMFailed(f"AI model not found ({model})")
+        raise LLMFailed(f"AI model not found ({model})", "model_not_found")
     if r.status_code >= 400:
-        raise LLMFailed(f"AI {'request was rejected' if r.status_code < 500 else 'service error'} ({r.status_code})")
+        raise LLMFailed(f"AI {'request was rejected' if r.status_code < 500 else 'service error'} ({r.status_code})",
+                        "rejected" if r.status_code < 500 else "service_error")
     data = r.json()
     if (data.get("promptFeedback") or {}).get("blockReason"):
-        raise LLMFailed("the model declined this request")
+        raise LLMFailed("the model declined this request", "refused")
     cand = (data.get("candidates") or [{}])[0]
     finish = cand.get("finishReason", "")
     if finish in ("SAFETY", "RECITATION", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII"):
-        raise LLMFailed("the model declined this request")
+        raise LLMFailed("the model declined this request", "refused")
     if finish == "MAX_TOKENS":
         raise _InvalidOutput("output was cut off at the token limit")
     text = "".join(part.get("text", "") for part in (cand.get("content") or {}).get("parts", []) if not part.get("thought"))
@@ -262,9 +278,11 @@ def generate(
                 budget.add_tokens(i + o - approx)  # count real input + output tokens, not just the estimate
             out = schema.model_validate(out.model_dump())  # validate again: never trust a transport blindly
             _record(tags, model, True, started, tin, tout)
+            ai_health.record_success()
             return out
-        except LLMFailed:
+        except LLMFailed as e:
             _record(tags, model, False, started, tin, tout)
+            ai_health.record_failure(e.code, e.reason)
             raise
         except (ValidationError, _InvalidOutput) as e:
             last = e
@@ -274,4 +292,4 @@ def generate(
                 note = f"\n\nYour previous output was invalid: {str(e)[:400]}. Return ONLY data matching the schema."
                 content = (user + note) if isinstance(user, str) else [*user, {"type": "text", "text": note}]
     _record(tags, model, False, started, tin, tout)
-    raise LLMFailed(f"the AI returned invalid output twice ({str(last)[:120]})")
+    raise LLMFailed(f"the AI returned invalid output twice ({str(last)[:120]})", "invalid_output")
